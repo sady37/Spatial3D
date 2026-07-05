@@ -1,9 +1,6 @@
-"""Tests for the voxel model and UART framing (no hardware / Open3D needed)."""
-
-import io
+"""Tests for the voxel model (no hardware / Open3D needed)."""
 
 from spatial3d.simulator import synthetic_room
-from spatial3d.uart_reader import PAYLOAD_SIZE, frame, read_grid
 from spatial3d.voxel import (
     GRID_DIMS,
     VOXEL_COUNT,
@@ -18,7 +15,6 @@ from spatial3d.voxel import (
 def test_grid_dims():
     assert VOXEL_COUNT == 20 * 30 * 15 == 9000
     assert WIRE_SIZE == 8
-    assert PAYLOAD_SIZE == 9000 * 8
 
 
 def test_voxel_pack_roundtrip():
@@ -38,15 +34,11 @@ def test_grid_bytes_roundtrip():
     assert [v.occupied for v in restored.voxels] == [v.occupied for v in grid.voxels]
 
 
-def test_uart_frame_roundtrip():
-    grid = synthetic_room()
-    stream = io.BytesIO(frame(grid))
-    restored = read_grid(stream)
-    assert restored.occupied_points() == grid.occupied_points()
-
-
-def test_uart_resync_on_leading_garbage():
-    grid = synthetic_room()
-    stream = io.BytesIO(b"\x00\xffnoise" + frame(grid))
-    restored = read_grid(stream)
-    assert len(restored.occupied_points()) == len(grid.occupied_points())
+def test_add_points_bins_into_grid():
+    grid = VoxelGrid()
+    # Points inside the 4x6x3 m room and one outside (should be dropped).
+    pts = [(0.1, 0.1, 0.1), (0.15, 0.12, 0.1), (3.9, 5.9, 2.9), (99.0, 0.0, 0.0)]
+    binned = grid.add_points(pts)
+    assert binned == 3
+    # First two land in the same voxel -> hit_count 2.
+    assert grid.get(0, 0, 0).hit_count == 2

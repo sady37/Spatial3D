@@ -94,6 +94,30 @@ class VoxelGrid:
             grid.voxels[i] = Voxel.unpack(chunk)
         return grid
 
+    # --- Accumulate a radar point cloud -----------------------------------
+    def add_points(self, points, origin=(0.0, 0.0, 0.0), intensity: int = 100) -> int:
+        """Fold XYZ points (meters, ROOM frame) into voxels. Returns # binned.
+
+        `origin` is the room-corner offset applied to sensor-frame points; the
+        sensor->room extrinsic calibration still needs to be measured per install.
+        """
+        nx, ny, nz = GRID_DIMS
+        ox, oy, oz = origin
+        binned = 0
+        for p in points:
+            ix = int((p[0] - ox) / VOXEL_SIZE_M)
+            iy = int((p[1] - oy) / VOXEL_SIZE_M)
+            iz = int((p[2] - oz) / VOXEL_SIZE_M)
+            if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
+                v = self.voxels[index_of(ix, iy, iz)]
+                v.log_odds = min(v.log_odds + 20, 2000)
+                v.hit_count = min(v.hit_count + 1, 0xFFFF)
+                v.intensity = min(v.intensity + intensity, 0xFFFF)
+                v.z_min = iz if v.hit_count == 1 else min(v.z_min, iz)
+                v.z_max = iz if v.hit_count == 1 else max(v.z_max, iz)
+                binned += 1
+        return binned
+
     # --- Modeling handoff --------------------------------------------------
     def occupied_points(self) -> list[tuple[float, float, float]]:
         """Return voxel centers (meters) for occupied voxels."""

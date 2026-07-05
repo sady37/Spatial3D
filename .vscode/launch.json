@@ -22,6 +22,28 @@
       "justMyCode": false
     },
     {
+      "name": "PC: dump DATA port",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "spatial3d.dump",
+      "args": ["--data-port", "/dev/cu.usbmodem0000RA444"],
+      "cwd": "${workspaceFolder}/pc",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "PC: live (cfg + DATA)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "spatial3d.main",
+      "args": ["--data-port", "/dev/cu.usbmodem0000RA444",
+               "--cli-port", "/dev/cu.usbmodem0000RA441",
+               "--cfg", "${workspaceFolder}/profile.cfg", "--frames", "100"],
+      "cwd": "${workspaceFolder}/pc",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
       "name": "PC: current file",
       "type": "debugpy",
       "request": "launch",
