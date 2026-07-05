@@ -1,17 +1,23 @@
 {
-  // Use IntelliSense to learn about possible attributes.
-  // Hover to view descriptions of existing attributes.
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "PC: main (--sim)",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "spatial3d.main",
-      "args": ["--sim"],
-      "cwd": "${workspaceFolder}/pc",
-      "console": "integratedTerminal",
-      "justMyCode": false
-    }
-  ]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "PC: main (--sim)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "spatial3d.main",
+            "args": [
+                "--sim"
+            ],
+            "cwd": "${workspaceFolder}/pc",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "xwrl68xx_xds110.ccxml",
+            "type": "ccs-debug",
+            "request": "launch",
+            "targetConfig": "${workspaceFolder}/xwrl68xx_xds110.ccxml"
+        }
+    ]
 }

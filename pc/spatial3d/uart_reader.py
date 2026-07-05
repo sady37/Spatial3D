@@ -16,7 +16,7 @@ from typing import Iterator
 from .tlv import Frame, read_frame
 
 CLI_BAUD = 115200
-DATA_BAUD = 921600
+DATA_BAUD = 1250000  # confirmed for xWRL6844 mmw_demo DATA UART (RA444)
 
 
 def open_serial(port: str, baudrate: int, timeout: float = 1.0):
