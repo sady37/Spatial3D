@@ -23,6 +23,46 @@
 [Mac / pc/]  发 .cfg + 读 DATA + 解析 TLV → 体素化 → Open3D
 ```
 
+## 方案 A：Intel Mac + VirtualBox 虚拟机（当前采用）
+
+主机：Mac mini 2018（Intel x86_64，36GB RAM）→ x86_64 Ubuntu 原生跑，无需模拟。
+VM 软件：**VirtualBox 7.2.x**（Fusion 被 Broadcom 下架了 brew cask，改用 VirtualBox）。
+
+### 0. 装 VirtualBox（已完成）
+```bash
+brew install --cask virtualbox
+brew install --cask virtualbox-extension-pack   # USB 直通必需
+```
+装完在「系统设置 → 隐私与安全性」放行 Oracle 内核扩展并**重启**（否则 VM 起不来）。
+验证：`kextstat | grep -i vbox` 有输出即 OK。
+
+### 1. 建 Ubuntu 22.04 VM
+下 `ubuntu-22.04.x-desktop-amd64.iso`。GUI 新建，或命令行：
+```bash
+VBoxManage createvm --name ti-linux --ostype Ubuntu_64 --register
+VBoxManage modifyvm ti-linux --cpus 4 --memory 8192 --vram 128 --usbxhci on
+VBoxManage createhd --filename ~/VirtualBox\ VMs/ti-linux/ti-linux.vdi --size 40960
+VBoxManage storagectl ti-linux --name SATA --add sata
+VBoxManage storageattach ti-linux --storagectl SATA --port 0 --device 0 --type hdd \
+    --medium ~/VirtualBox\ VMs/ti-linux/ti-linux.vdi
+VBoxManage storageattach ti-linux --storagectl SATA --port 1 --device 0 --type dvddrive \
+    --medium ~/Downloads/ubuntu-22.04.5-desktop-amd64.iso
+VBoxManage startvm ti-linux
+```
+装完系统后装 Guest Additions（剪贴板/共享目录），并从光驱移除 ISO。
+
+### 2. XDS110 USB 直通
+雷达插到 Mac，然后给 VM 加 USB 过滤器（TI 厂商 ID `0451`）：
+```bash
+VBoxManage usbfilter add 0 --target ti-linux --name xds110 --vendorid 0451
+```
+VM 里 `lsusb | grep -i texas` 能看到、并出现 `/dev/ttyACM0` `/dev/ttyACM1` 即成功。
+（GUI 里：设置 → USB → 勾 USB 3.0(xHCI) → 加设备过滤器选 XDS110。）
+
+### 3. 装 SDK / 编译 / 烧录 → 见下方「Linux 端步骤」
+
+---
+
 ## Linux 端步骤
 
 ### 1. 安装 MMWAVE-L-SDK
