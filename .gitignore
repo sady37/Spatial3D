@@ -1,0 +1,11 @@
+# Python
+pc/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# DSP build output
+dsp/build/
+
+# OS / editor
+.DS_Store

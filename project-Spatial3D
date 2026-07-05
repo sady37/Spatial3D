@@ -1,0 +1,502 @@
+我建议把它整理成**项目概要（Project Brief）**，这样以后无论给ChatGPT、Claude、Gemini，还是写论文、PRD、设计文档，都可以直接作为统一的项目背景。
+
+---
+
+# 项目概要：高分辨率3D静态分层空间建模（V3.0）
+
+## 项目背景
+
+本项目是养老跌倒监测系统 V3.0 的核心组成部分，目标不是实时人体检测，而是在**房间无人或静止期间**，利用固定安装的 TI AWR6844AOP 60GHz 毫米波雷达，对整个室内空间进行长期累积扫描，建立稳定、可持续更新的三维静态空间模型。
+
+由于 TI AWR6844AOP 无法输出 RAW I/Q 数据，且 UART 带宽有限，因此本方案完全基于 TI SDK 输出的数据进行设计，通过 DSP、UART 和 PC 的分层计算架构，在有限硬件资源下实现高质量的室内空间建模。
+
+整个系统优先考虑**空间精度、长期稳定性和工程可实现性**，不追求实时建图速度。
+
+---
+
+# 核心目标
+
+建立一套适用于固定安装毫米波雷达的**高分辨率3D静态分层空间建模系统（High Resolution 3D Static Layered Mapping）**。
+
+最终输出包括：
+
+* 房间三维几何模型
+* 墙体、地面、家具等静态结构
+* 家具高度及空间边界
+* 长期稳定背景地图
+* 后续跌倒检测及贝叶斯网络使用的空间先验（Spatial Prior）
+
+---
+
+# 系统约束
+
+硬件平台：
+
+* TI AWR6844AOP
+* 60GHz FMCW Radar
+* 固定安装于房间角落
+
+数据来源：
+
+* TI SDK UART 输出
+* 不使用 RAW I/Q
+* 不修改 Radar Front-End
+
+系统限制：
+
+* UART 带宽有限
+* DSP 运算资源有限
+* 长时间无人扫描
+* 不要求实时建图
+
+---
+
+# 空间配置
+
+房间尺寸：
+
+```
+4m × 6m × 3m
+```
+
+体素大小：
+
+```
+20cm × 20cm × 20cm
+```
+
+空间划分：
+
+```
+20 × 30 × 15
+
+≈9000 Voxels
+```
+
+扫描模式：
+
+```
+夜间
+
+无人
+
+静止环境
+
+长期累积
+```
+
+---
+
+# 系统架构
+
+整个系统采用三级计算架构。
+
+## 第一层：DSP（实时计算）
+
+负责：
+
+* Range FFT
+* Doppler FFT
+* CFAR
+* 静态点过滤
+* Voxel 更新
+* Occupancy 累积
+
+DSP 不负责：
+
+* 家具识别
+* 墙面拟合
+* PointNet
+* ICP
+* Open3D
+
+DSP 仅维护整个房间 9000 个 Voxel 的统计信息。
+
+---
+
+## 第二层：UART（地图同步）
+
+UART 不传输：
+
+* RAW I/Q
+* Point Cloud
+* Track
+
+UART 周期性同步：
+
+```
+Voxel Map
+```
+
+包括：
+
+* Occupancy
+* Hit Count
+* Intensity
+* Height
+* Confidence
+
+实现空间地图同步（Spatial Map Synchronization）。
+
+---
+
+## 第三层：PC（空间建模）
+
+PC 接收完整 Voxel 地图后执行：
+
+* Open3D
+* DBSCAN
+* RANSAC
+* ICP
+* PointNet（可选）
+* 家具分类
+* 墙体拟合
+* 语义建模
+
+最终生成完整静态空间模型。
+
+---
+
+# 长期累积策略
+
+系统采用长期积分方式提高空间质量。
+
+例如：
+
+```
+每天凌晨
+
+扫描1分钟
+
+持续30天
+```
+
+持续更新：
+
+* Occupancy
+* Reflection
+* Confidence
+* Background Model
+
+而不是一次扫描完成建图。
+
+---
+
+# 最终输出
+
+系统最终生成：
+
+```
+Persistent 3D Static Map
+```
+
+包含：
+
+* 墙体
+* 地板
+* 天花板
+* 家具
+* 门
+* 床
+* 沙发
+* 柜子
+
+以及：
+
+* 家具高度
+* 反射强度
+* Occupancy
+* Confidence
+
+形成长期维护的三维背景地图。
+
+---
+
+# 工程目标
+
+本项目重点解决以下问题：
+
+1. 在 TI AWR6844AOP 无法输出 RAW I/Q 的条件下，实现室内空间建模。
+2. 在 UART 带宽受限条件下，实现高效三维空间地图同步。
+3. 利用长期累积替代高算力超分辨算法，提高静态背景质量。
+4. 为后续人体检测、跌倒识别、多传感器融合及贝叶斯网络提供稳定可靠的空间先验（Spatial Prior）。
+5. 构建可长期维护、可持续更新的三维静态空间模型，而非一次性建图。
+
+---
+
+这份概要可以直接作为整个 **V3.0 项目的总设计说明（Project Brief）**，后续所有算法（墙面拟合、静态背景、多径过滤、家具识别、MUSIC、ICP、PointNet 等）都作为它下面的子模块展开，而不会偏离整个系统架构。
+
+
+附讨论
+我同意，这一层才是真正的核心，而且它已经不是DBN的问题，也不是AI的问题，而是**TI AWR6844AOP资源受限下的系统架构设计**。
+
+我建议把整个方案抽象成一句话：
+
+> **利用DSP完成持续体素统计，利用UART周期性输出压缩后的3D Occupancy Grid，在PC端完成高精度空间建模。**
+
+真正的创新不是20cm体素，而是**计算分层**。
+
+可以把整个系统简化成三层。
+
+---
+
+## 第一层：DSP（实时层）
+
+DSP永远不保存点云，而是直接维护9000个Voxel。
+
+输入：
+
+```
+Range FFT
+Doppler FFT
+CFAR
+```
+
+输出不是
+
+```
+Point Cloud
+```
+
+而是
+
+```
+Voxel[i]
+```
+
+例如
+
+```
+Voxel 231
+
+Occupancy++
+Intensity+=
+
+Count++
+```
+
+DSP里面维护的实际上是
+
+```
+struct Voxel
+{
+    int16 logOdds;
+    uint16 hitCount;
+    uint16 intensity;
+    uint16 zMin;
+    uint16 zMax;
+}
+```
+
+DSP只是不断更新9000个Voxel。
+
+它根本不做空间建模。
+
+---
+
+## 第二层：UART（同步层）
+
+UART不是传Point。
+
+也不是传Track。
+
+而是：
+
+**直接传Voxel数组。**
+
+例如
+
+```
+Voxel 0
+
+Voxel 1
+
+...
+
+Voxel 8999
+```
+
+实际上就是
+
+```
+9000 × sizeof(Voxel)
+```
+
+如果每Voxel压缩成8Byte
+
+```
+9000×8
+
+≈72KB
+```
+
+UART完全可以几秒内发送。
+
+所以UART不是瓶颈。
+
+真正关键的是：
+
+DSP里面的数据结构必须就是Voxel。
+
+而不是最后再转换。
+
+---
+
+## 第三层：PC（建模层）
+
+PC收到9000个Voxel以后：
+
+第一次：
+
+```
+Voxel
+
+↓
+
+Occupancy Grid
+```
+
+第二次：
+
+```
+Occupancy
+
+↓
+
+Open3D
+```
+
+第三次：
+
+```
+Wall
+Floor
+Furniture
+```
+
+第四次：
+
+```
+Semantic
+```
+
+所以所有耗CPU的东西：
+
+```
+DBSCAN
+
+RANSAC
+
+ICP
+
+PointNet
+
+Open3D
+```
+
+全部放PC。
+
+DSP只负责：
+
+```
+Voxel Update
+```
+
+---
+
+## 我认为这里真正最关键的一点，是数据流应该反过来设计。
+
+很多人会想：
+
+```
+Radar
+
+↓
+
+Point Cloud
+
+↓
+
+Voxel
+```
+
+但你的方案应该是：
+
+```
+Radar
+
+↓
+
+CFAR
+
+↓
+
+Voxel
+
+↓
+
+UART
+
+↓
+
+Point Cloud（如果需要）
+```
+
+也就是说：
+
+**Voxel才是第一数据结构。**
+
+Point Cloud只是调试工具。
+
+---
+
+## 我还建议把"20cm体素"定义成系统接口，而不是算法参数。
+
+例如：
+
+```
+Radar Hardware
+        │
+        ▼
+Voxel Engine（DSP）
+        │
+9000 Voxels
+        │
+UART
+        │
+Spatial Engine（PC）
+        │
+3D Model
+```
+
+以后如果换雷达：
+
+```
+TI
+
+Infineon
+
+NXP
+```
+
+DSP不同。
+
+但是：
+
+```
+Voxel Interface
+```
+
+永远一样。
+
+整个PC算法完全不用改。
+
+---
+
+### 我认为，这个架构真正的价值就在于一句话：
+
+> **不要把UART当成雷达数据输出接口，而要把它当成"空间地图同步接口（Spatial Map Synchronization Interface）"。**
+
+这样思路就完全统一了。DSP负责维护一张持续更新的9000体素地图，UART只负责周期性同步这张地图，而PC负责所有高层空间建模、语义识别和后续贝叶斯推理。这比"输出点云再建图"更符合你的系统目标，也更适合TI AWR6844AOP这种算力和带宽都受限的平台。
+
+

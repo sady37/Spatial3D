@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "dsp: build",
+      "type": "shell",
+      "command": "gcc",
+      "args": [
+        "-g", "-O0", "-Wall", "-Wextra", "-std=c11",
+        "-Idsp/include",
+        "dsp/src/voxel.c", "dsp/src/main.c",
+        "-o", "dsp/build/voxel_test"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": ["$gcc"],
+      "group": "build",
+      "presentation": { "reveal": "silent" }
+    },
+    {
+      "label": "pc: pytest",
+      "type": "shell",
+      "command": "${workspaceFolder}/pc/.venv/bin/pytest",
+      "args": ["-q"],
+      "options": { "cwd": "${workspaceFolder}/pc" },
+      "group": "test"
+    }
+  ]
+}

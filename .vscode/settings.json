@@ -1,0 +1,20 @@
+{
+  // --- Python (PC modeling layer) ---
+  "python.defaultInterpreterPath": "${workspaceFolder}/pc/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.analysis.extraPaths": ["${workspaceFolder}/pc"],
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "python.testing.cwd": "${workspaceFolder}/pc",
+
+  // --- C (DSP voxel engine, host-buildable) ---
+  "C_Cpp.default.includePath": ["${workspaceFolder}/dsp/include"],
+  "C_Cpp.default.cStandard": "c11",
+
+  "files.associations": {
+    "*.h": "c"
+  },
+  "files.exclude": {
+    "**/__pycache__": true
+  }
+}

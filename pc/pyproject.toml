@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Make the `spatial3d` package importable without an install.
+pythonpath = ["."]
+testpaths = ["tests"]

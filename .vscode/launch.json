@@ -1,0 +1,43 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PC: main (--sim)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "spatial3d.main",
+      "args": ["--sim"],
+      "cwd": "${workspaceFolder}/pc",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "PC: main (--sim --viz)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "spatial3d.main",
+      "args": ["--sim", "--viz"],
+      "cwd": "${workspaceFolder}/pc",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "PC: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}/pc",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "DSP: voxel (gcc)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/dsp/build/voxel_test",
+      "cwd": "${workspaceFolder}/dsp",
+      "MIMode": "lldb",
+      "preLaunchTask": "dsp: build"
+    }
+  ]
+}
