@@ -62,6 +62,10 @@ def main():
 
             frame_count += 1
             pts = frame.detected_points()
+            # TODO(spatial3d): firmware now emits a per-range-bin zero-Doppler block
+            # (frame.range_antenna()), not per-detection vectors. The len(cx)==n path
+            # below no longer aligns; rework to map detections->bins by range and
+            # accumulate across frames for MUSIC covariance.
             cx = frame.antenna_complex()
             n = len(pts)
             total_det += n

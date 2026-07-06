@@ -39,13 +39,20 @@ TLV_RANGE_PROFILE = 2
 TLV_NOISE_PROFILE = 3
 TLV_SIDE_INFO = 7
 
-# Custom TLV type for per-antenna complex data (requires firmware mod)
-# Format per detection: 16 complex float32 pairs (real, imag) = 128 bytes
-# Total payload: N_detections * 128 bytes
-TLV_ANTENNA_COMPLEX = 8  # custom type ID, verify against firmware
+# Range-antenna zero-Doppler complex TLV (Spatial3D firmware mod, AWRL6844.md 5.5).
+# Reuses the demo enum value 8 (MMWDEMO_OUTPUT_MSG_AZIMUT_ELEVATION_STATIC_HEAT_MAP).
+# Payload layout (little-endian):
+#     uint16 start_bin
+#     uint16 num_bins
+#     then num_bins * 16 * cmplx16ImRe_t  (int16 imag, int16 real)  -- imag FIRST
+# i.e. per range bin, the zero-Doppler (coherent mean over chirps) 16-virtual-antenna
+# vector. NOT indexed by detection -- the server maps detections->bins by range.
+TLV_RANGE_ANTENNA = 8
+TLV_ANTENNA_COMPLEX = TLV_RANGE_ANTENNA  # backward-compat alias
 
-_COMPLEX_PER_DET = 16  # 4TX * 4RX virtual antennas
-_COMPLEX_BYTES_PER_DET = _COMPLEX_PER_DET * 8  # 16 * (float32_real + float32_imag) = 128 bytes
+_NUM_VIRT_ANT = 16  # 4TX * 4RX virtual antennas
+_RA_SUBHDR = struct.Struct("<2H")           # start_bin, num_bins
+_BYTES_PER_ANT = 4                          # cmplx16ImRe_t: int16 imag + int16 real
 
 # Detected-point struct: x, y, z, doppler  (float32 each) = 16 bytes.
 _POINT = struct.Struct("<4f")
@@ -70,6 +77,17 @@ class Tlv:
 
 
 @dataclass
+class RangeAntenna:
+    """Zero-Doppler antenna vectors for a contiguous range-bin window."""
+    start_bin: int
+    data: np.ndarray  # (num_bins, 16) complex64
+
+    @property
+    def num_bins(self) -> int:
+        return self.data.shape[0]
+
+
+@dataclass
 class Frame:
     header: FrameHeader
     tlvs: list[Tlv] = field(default_factory=list)
@@ -81,12 +99,19 @@ class Frame:
                 return parse_detected_points(t.payload)
         return np.empty((0, 4), dtype=np.float32)
 
-    def antenna_complex(self) -> np.ndarray | None:
-        """Per-antenna complex data. Shape (N_detections, 16) complex64. None if TLV not present."""
+    def range_antenna(self) -> RangeAntenna | None:
+        """Zero-Doppler range-antenna block (start_bin + (num_bins, 16) complex64).
+        None if the TLV is not present."""
         for t in self.tlvs:
-            if t.type == TLV_ANTENNA_COMPLEX:
-                return parse_antenna_complex(t.payload)
+            if t.type == TLV_RANGE_ANTENNA:
+                return parse_range_antenna(t.payload)
         return None
+
+    def antenna_complex(self) -> np.ndarray | None:
+        """Deprecated: the (num_bins, 16) complex64 vectors from the range-antenna
+        TLV. These are indexed by RANGE BIN, not by detection. Prefer range_antenna()."""
+        ra = self.range_antenna()
+        return None if ra is None else ra.data
 
 
 def parse_detected_points(payload: bytes) -> np.ndarray:
@@ -97,14 +122,30 @@ def parse_detected_points(payload: bytes) -> np.ndarray:
     return arr.reshape(n, 4).copy()
 
 
+def parse_range_antenna(payload: bytes) -> RangeAntenna:
+    """Parse the range-antenna zero-Doppler TLV (type 8).
+
+    Wire format: [start_bin u16][num_bins u16] then num_bins*16 cmplx16ImRe_t
+    (int16 imag, int16 real). Returns a RangeAntenna with (num_bins, 16) complex64.
+    """
+    if len(payload) < _RA_SUBHDR.size:
+        return RangeAntenna(0, np.empty((0, _NUM_VIRT_ANT), dtype=np.complex64))
+    start_bin, num_bins = _RA_SUBHDR.unpack_from(payload, 0)
+    body = payload[_RA_SUBHDR.size:]
+    count = num_bins * _NUM_VIRT_ANT
+    avail = len(body) // _BYTES_PER_ANT
+    count = min(count, avail)
+    if count == 0:
+        return RangeAntenna(start_bin, np.empty((0, _NUM_VIRT_ANT), dtype=np.complex64))
+    raw = np.frombuffer(body[:count * _BYTES_PER_ANT], dtype='<i2').astype(np.float32)
+    raw = raw.reshape(-1, _NUM_VIRT_ANT, 2)  # (num_bins, 16, [imag, real])
+    data = (raw[..., 1] + 1j * raw[..., 0]).astype(np.complex64)  # real=[..,1], imag=[..,0]
+    return RangeAntenna(int(start_bin), data)
+
+
+# Backward-compat alias (old name); returns just the (num_bins, 16) array.
 def parse_antenna_complex(payload: bytes) -> np.ndarray:
-    """Parse complex antenna data TLV. Returns (N, 16) complex64 array."""
-    n = len(payload) // _COMPLEX_BYTES_PER_DET
-    if n == 0:
-        return np.empty((0, _COMPLEX_PER_DET), dtype=np.complex64)
-    raw = np.frombuffer(payload[:n * _COMPLEX_BYTES_PER_DET], dtype='<f4')
-    raw = raw.reshape(n, _COMPLEX_PER_DET, 2)  # (N, 16, 2) -- real, imag pairs
-    return (raw[..., 0] + 1j * raw[..., 1]).astype(np.complex64)
+    return parse_range_antenna(payload).data
 
 
 def parse_frame(buf: bytes) -> Frame:
@@ -154,23 +195,26 @@ def read_frame(stream) -> Frame:
 
 
 def build_frame(points: np.ndarray, frame_number: int = 1,
-                antenna_complex: np.ndarray | None = None) -> bytes:
+                range_antenna: tuple[int, np.ndarray] | None = None) -> bytes:
     """Encode points into a TI frame (for tests / offline replay).
 
-    If *antenna_complex* is provided, it must be (N, 16) complex64 where N
-    matches the number of points. A TLV_ANTENNA_COMPLEX block is appended.
+    If *range_antenna* is provided as (start_bin, data) where data is
+    (num_bins, 16) complex64, a TLV_RANGE_ANTENNA (type 8) block is appended,
+    encoded as int16 cmplx16ImRe_t (imag first) to match the firmware.
     """
     pts = np.asarray(points, dtype="<f4").reshape(-1, 4)
     tlv_payload = pts.tobytes()
     tlv = _TLV_HDR.pack(TLV_DETECTED_POINTS, len(tlv_payload)) + tlv_payload
     num_tlvs = 1
 
-    if antenna_complex is not None:
-        cx = np.asarray(antenna_complex, dtype=np.complex64).reshape(-1, _COMPLEX_PER_DET)
-        # Interleave real/imag as float32 pairs
-        pairs = np.stack([cx.real, cx.imag], axis=-1).astype("<f4")
-        cx_payload = pairs.tobytes()
-        tlv += _TLV_HDR.pack(TLV_ANTENNA_COMPLEX, len(cx_payload)) + cx_payload
+    if range_antenna is not None:
+        start_bin, data = range_antenna
+        cx = np.asarray(data, dtype=np.complex64).reshape(-1, _NUM_VIRT_ANT)
+        # cmplx16ImRe_t: imag first, then real (int16)
+        pairs = np.stack([cx.imag, cx.real], axis=-1)
+        ints = np.rint(pairs).astype("<i2")
+        ra_payload = _RA_SUBHDR.pack(start_bin, cx.shape[0]) + ints.tobytes()
+        tlv += _TLV_HDR.pack(TLV_RANGE_ANTENNA, len(ra_payload)) + ra_payload
         num_tlvs += 1
 
     total = HEADER_SIZE + len(tlv)

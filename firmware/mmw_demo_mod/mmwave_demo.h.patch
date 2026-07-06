@@ -1,0 +1,16 @@
+--- orig/mmwave_demo.h	2026-07-06 12:01:00
++++ mod/mmwave_demo.h	2026-07-06 12:01:30
+@@ -494,6 +494,13 @@
+ 
+     uint8_t       reserved;
+ 
++    /*! @brief   Spatial3D: range-antenna zero-Doppler TLV — first range bin to export */
++    uint16_t       rangeAntennaStartBin;
++
++    /*! @brief   Spatial3D: range-antenna zero-Doppler TLV — number of range bins to export
++     *           (0 = disabled). Enable gate reuses @ref rangeAzimuthHeatMap. */
++    uint16_t       rangeAntennaNumBins;
++
+ } CLI_GuiMonSel;
+ 
+ /**

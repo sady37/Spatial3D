@@ -7,6 +7,7 @@ import numpy as np
 from spatial3d.tlv import (
     MAGIC,
     TLV_DETECTED_POINTS,
+    TLV_RANGE_ANTENNA,
     build_frame,
     parse_frame,
     read_frame,
@@ -39,3 +40,16 @@ def test_read_two_back_to_back_frames():
 
 def test_magic_word_value():
     assert MAGIC == bytes([2, 1, 4, 3, 6, 5, 8, 7])
+
+
+def test_range_antenna_roundtrip():
+    # 3 range bins x 16 antennas, integer-valued so int16 quantization is exact
+    data = (np.arange(3 * 16).reshape(3, 16)
+            + 1j * np.arange(3 * 16, 0, -1).reshape(3, 16)).astype(np.complex64)
+    frame = parse_frame(build_frame(POINTS, range_antenna=(7, data)))
+    assert frame.tlvs[-1].type == TLV_RANGE_ANTENNA
+    ra = frame.range_antenna()
+    assert ra is not None
+    assert ra.start_bin == 7
+    assert ra.num_bins == 3
+    np.testing.assert_allclose(ra.data, data, rtol=0, atol=0)

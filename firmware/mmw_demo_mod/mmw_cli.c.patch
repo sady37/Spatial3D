@@ -1,0 +1,43 @@
+--- orig/mmw_cli.c	2026-07-06 12:01:01
++++ mod/mmw_cli.c	2026-07-06 12:03:31
+@@ -865,6 +865,28 @@
+     return 0;
+ }
+ 
++/**
++ *  Spatial3D: configure the range-antenna zero-Doppler complex TLV (type 8).
++ *  Usage: rangeAntennaOutput <startBin> <numBins> <enable>
++ *    startBin : first range bin to export
++ *    numBins  : number of range bins (0 disables)
++ *    enable   : 1 to emit the TLV, 0 to suppress (reuses rangeAzimuthHeatMap gate)
++ */
++static int32_t CLI_MMWaveRangeAntennaOutput (int32_t argc, char* argv[])
++{
++    if (argc != 4)
++    {
++        CLI_write ("Error: Invalid usage of the CLI command\n");
++        return -1;
++    }
++
++    gMmwMssMCB.guiMonSel.rangeAntennaStartBin = (uint16_t) atoi (argv[1]);
++    gMmwMssMCB.guiMonSel.rangeAntennaNumBins  = (uint16_t) atoi (argv[2]);
++    gMmwMssMCB.guiMonSel.rangeAzimuthHeatMap  = (uint8_t)  atoi (argv[3]);
++
++    return 0;
++}
++
+ static int32_t CLI_MMWaveCfarProcCfg (int32_t argc, char* argv[])
+ {
+     uint32_t            procDirection;
+@@ -1652,6 +1674,11 @@
+     cliCfg.tableEntry[cnt].cmd            = "guiMonitor";
+     cliCfg.tableEntry[cnt].helpString     = "<pointCloud> <rangeProfile> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo>";
+     cliCfg.tableEntry[cnt].cmdHandlerFxn  = CLI_MMWaveGuiMonSel;
++    cnt++;
++
++    cliCfg.tableEntry[cnt].cmd            = "rangeAntennaOutput";
++    cliCfg.tableEntry[cnt].helpString     = "<startBin> <numBins> <enable>";
++    cliCfg.tableEntry[cnt].cmdHandlerFxn  = CLI_MMWaveRangeAntennaOutput;
+     cnt++;
+ 
+     cliCfg.tableEntry[cnt].cmd            = "cfarProcCfg";

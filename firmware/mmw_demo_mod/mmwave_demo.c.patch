@@ -1,0 +1,106 @@
+--- orig/mmwave_demo.c	2026-07-06 12:01:01
++++ mod/mmwave_demo.c	2026-07-06 12:08:56
+@@ -398,6 +398,17 @@
+     uint8_t padding[MMWDEMO_OUTPUT_MSG_SEGMENT_LEN];
+     MmwDemo_output_message_tl   tl[MMWDEMO_OUTPUT_ALL_MSG_MAX];
+ 
++    /* Spatial3D range-antenna zero-Doppler TLV (type 8) working vars.
++     * numVirtAnt = numTx*numRx (=16 for 4T4R). The range cube is the 1D range-FFT
++     * output in DPIF_RADARCUBE_FORMAT_2: x[numRangeBins][numDopplerChirps][numTx][numRx],
++     * cmplx16ImRe_t. The zero-Doppler (static) vector per bin is the coherent mean
++     * over the chirp dimension. See AWRL6844.md 5.5. Computed per-frame below so
++     * they use post-sensorStart config values. */
++    uint16_t raNumVirtAnt   = 0;
++    uint16_t raNumChirps    = 0;
++    uint16_t raStartBin     = 0;
++    uint16_t raNumBins      = 0;
++
+     /* Get Gui Monitor configuration */
+     pGuiMonSel = &gMmwMssMCB.guiMonSel;
+ 
+@@ -458,6 +469,37 @@
+             tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RANGE_DOPPLER_HEAT_MAP;
+             tl[tlvIdx].length = gMmwMssMCB.numRangeBins * gMmwMssMCB.numDopplerBins * sizeof(uint16_t);
+             packetLen += sizeof(MmwDemo_output_message_tl) +  tl[tlvIdx].length;
++            tlvIdx++;
++        }
++
++        /* Spatial3D: range-antenna zero-Doppler complex TLV (type 8).
++         * Enabled by rangeAzimuthHeatMap; bin window set by rangeAntennaOutput CLI cmd. */
++        raNumVirtAnt = gMmwMssMCB.numTxAntennas * gMmwMssMCB.numRxAntennas;
++        raNumChirps  = (gMmwMssMCB.numTxAntennas == 0) ? 0 :
++                       (uint16_t)((gMmwMssMCB.mmWaveCfg.frameCfg.numOfBurstsInFrame *
++                                   gMmwMssMCB.mmWaveCfg.frameCfg.numOfChirpsInBurst) /
++                                   gMmwMssMCB.numTxAntennas);
++        raStartBin = pGuiMonSel->rangeAntennaStartBin;
++        raNumBins  = pGuiMonSel->rangeAntennaNumBins;
++        if (raNumChirps == 0 || raNumVirtAnt == 0)
++        {
++            raNumBins = 0;
++        }
++        if (raStartBin >= gMmwMssMCB.numRangeBins)
++        {
++            raNumBins = 0;
++        }
++        else if ((uint32_t)raStartBin + raNumBins > gMmwMssMCB.numRangeBins)
++        {
++            raNumBins = (uint16_t)(gMmwMssMCB.numRangeBins - raStartBin);
++        }
++        if (pGuiMonSel->rangeAzimuthHeatMap && (gMmwMssMCB.radarCube != NULL) && (raNumBins > 0))
++        {
++            tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_AZIMUT_ELEVATION_STATIC_HEAT_MAP; /* 8 */
++            /* 4-byte subheader (startBin u16, numBins u16) + payload */
++            tl[tlvIdx].length = 2 * sizeof(uint16_t) +
++                    (uint32_t)raNumBins * raNumVirtAnt * sizeof(cmplx16ImRe_t);
++            packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+             tlvIdx++;
+         }
+ 
+@@ -590,6 +632,47 @@
+                 tlvIdx++;
+             }
+ 
++            /* Spatial3D: send range-antenna zero-Doppler complex TLV (type 8).
++             * Payload: [startBin u16][numBins u16] then, per range bin, raNumVirtAnt
++             * cmplx16ImRe_t = coherent mean over the chirp dimension (static/DC vector). */
++            if (pGuiMonSel->rangeAzimuthHeatMap && (gMmwMssMCB.radarCube != NULL) && (raNumBins > 0))
++            {
++                cmplx16ImRe_t antVec[SYS_COMMON_NUM_TX_ANTENNAS * SYS_COMMON_NUM_RX_CHANNEL];
++                uint16_t subHdr[2];
++                uint16_t bin, a;
++
++                MmwDemo_uartWrite (uartHandle,
++                                (uint8_t*)&tl[tlvIdx],
++                                sizeof(MmwDemo_output_message_tl));
++
++                subHdr[0] = raStartBin;
++                subHdr[1] = raNumBins;
++                MmwDemo_uartWrite (uartHandle, (uint8_t*)subHdr, sizeof(subHdr));
++
++                for (bin = 0; bin < raNumBins; bin++)
++                {
++                    uint32_t r = (uint32_t)raStartBin + bin;
++                    /* base index of chirp 0 for this range bin */
++                    uint32_t base = r * raNumChirps * raNumVirtAnt;
++                    for (a = 0; a < raNumVirtAnt; a++)
++                    {
++                        int32_t accRe = 0, accIm = 0;
++                        uint16_t c;
++                        for (c = 0; c < raNumChirps; c++)
++                        {
++                            cmplx16ImRe_t *s = &gMmwMssMCB.radarCube[base + (uint32_t)c * raNumVirtAnt + a];
++                            accRe += s->real;
++                            accIm += s->imag;
++                        }
++                        antVec[a].real = (int16_t)(accRe / (int32_t)raNumChirps);
++                        antVec[a].imag = (int16_t)(accIm / (int32_t)raNumChirps);
++                    }
++                    MmwDemo_uartWrite (uartHandle, (uint8_t*)antVec,
++                                       raNumVirtAnt * sizeof(cmplx16ImRe_t));
++                }
++                tlvIdx++;
++            }
++
+             /* Send stats information (interframe processing time and uart transfer time) */
+             if (pGuiMonSel->statsInfo)
+             {
