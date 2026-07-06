@@ -39,6 +39,14 @@ TLV_RANGE_PROFILE = 2
 TLV_NOISE_PROFILE = 3
 TLV_SIDE_INFO = 7
 
+# Custom TLV type for per-antenna complex data (requires firmware mod)
+# Format per detection: 16 complex float32 pairs (real, imag) = 128 bytes
+# Total payload: N_detections * 128 bytes
+TLV_ANTENNA_COMPLEX = 8  # custom type ID, verify against firmware
+
+_COMPLEX_PER_DET = 16  # 4TX * 4RX virtual antennas
+_COMPLEX_BYTES_PER_DET = _COMPLEX_PER_DET * 8  # 16 * (float32_real + float32_imag) = 128 bytes
+
 # Detected-point struct: x, y, z, doppler  (float32 each) = 16 bytes.
 _POINT = struct.Struct("<4f")
 
@@ -73,6 +81,13 @@ class Frame:
                 return parse_detected_points(t.payload)
         return np.empty((0, 4), dtype=np.float32)
 
+    def antenna_complex(self) -> np.ndarray | None:
+        """Per-antenna complex data. Shape (N_detections, 16) complex64. None if TLV not present."""
+        for t in self.tlvs:
+            if t.type == TLV_ANTENNA_COMPLEX:
+                return parse_antenna_complex(t.payload)
+        return None
+
 
 def parse_detected_points(payload: bytes) -> np.ndarray:
     n = len(payload) // _POINT.size
@@ -80,6 +95,16 @@ def parse_detected_points(payload: bytes) -> np.ndarray:
         return np.empty((0, 4), dtype=np.float32)
     arr = np.frombuffer(payload[: n * _POINT.size], dtype="<f4")
     return arr.reshape(n, 4).copy()
+
+
+def parse_antenna_complex(payload: bytes) -> np.ndarray:
+    """Parse complex antenna data TLV. Returns (N, 16) complex64 array."""
+    n = len(payload) // _COMPLEX_BYTES_PER_DET
+    if n == 0:
+        return np.empty((0, _COMPLEX_PER_DET), dtype=np.complex64)
+    raw = np.frombuffer(payload[:n * _COMPLEX_BYTES_PER_DET], dtype='<f4')
+    raw = raw.reshape(n, _COMPLEX_PER_DET, 2)  # (N, 16, 2) -- real, imag pairs
+    return (raw[..., 0] + 1j * raw[..., 1]).astype(np.complex64)
 
 
 def parse_frame(buf: bytes) -> Frame:
@@ -128,11 +153,26 @@ def read_frame(stream) -> Frame:
     return parse_frame(header_buf + body)
 
 
-def build_frame(points: np.ndarray, frame_number: int = 1) -> bytes:
-    """Encode points into a TI frame (for tests / offline replay)."""
+def build_frame(points: np.ndarray, frame_number: int = 1,
+                antenna_complex: np.ndarray | None = None) -> bytes:
+    """Encode points into a TI frame (for tests / offline replay).
+
+    If *antenna_complex* is provided, it must be (N, 16) complex64 where N
+    matches the number of points. A TLV_ANTENNA_COMPLEX block is appended.
+    """
     pts = np.asarray(points, dtype="<f4").reshape(-1, 4)
     tlv_payload = pts.tobytes()
     tlv = _TLV_HDR.pack(TLV_DETECTED_POINTS, len(tlv_payload)) + tlv_payload
+    num_tlvs = 1
+
+    if antenna_complex is not None:
+        cx = np.asarray(antenna_complex, dtype=np.complex64).reshape(-1, _COMPLEX_PER_DET)
+        # Interleave real/imag as float32 pairs
+        pairs = np.stack([cx.real, cx.imag], axis=-1).astype("<f4")
+        cx_payload = pairs.tobytes()
+        tlv += _TLV_HDR.pack(TLV_ANTENNA_COMPLEX, len(cx_payload)) + cx_payload
+        num_tlvs += 1
+
     total = HEADER_SIZE + len(tlv)
-    header = _HDR.pack(MAGIC, 1, total, 0, frame_number, 0, len(pts), 1, 0)
+    header = _HDR.pack(MAGIC, 1, total, 0, frame_number, 0, len(pts), num_tlvs, 0)
     return header + tlv
