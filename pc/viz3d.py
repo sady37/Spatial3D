@@ -113,6 +113,24 @@ def voxel_density(xyz, vs):
     return centers, counts
 
 
+def cluster_boxes(xyz, args):
+    """Detect furniture (cluster + bounding box) and return Open3D box outlines."""
+    from spatial3d.cluster import detect_objects, LABEL_COLORS
+    boxes, _ = detect_objects(
+        xyz, voxel_size=args.voxel_size if args.voxel else 0.3,
+        min_density=args.cluster_density, floor_z=args.floor_z)
+    print(f"detected {len(boxes)} objects (cluster + bounding box):")
+    geoms = []
+    for b in boxes:
+        print(f"  {b.label:12s} center=({b.center[0]:+.1f},{b.center[1]:.1f},"
+              f"{b.center[2]:.1f})m  size=({b.size[0]:.2f}x{b.size[1]:.2f}"
+              f"x{b.size[2]:.2f})m  n={b.n_points}")
+        box = o3d.geometry.AxisAlignedBoundingBox(b.min_bound, b.max_bound)
+        box.color = LABEL_COLORS.get(b.label, (1, 1, 1))
+        geoms.append(box)
+    return geoms
+
+
 def build_geometries(args):
     xyz, extra = load_points(args.input)
     if args.z_min is not None:
@@ -126,6 +144,8 @@ def build_geometries(args):
     geoms = [o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)]
     if args.room:
         geoms += reference_geometries()
+    if getattr(args, "cluster", False):
+        geoms += cluster_boxes(xyz, args)
 
     if args.voxel:
         centers, dens = voxel_density(xyz, args.voxel_size)
@@ -170,6 +190,12 @@ def main():
     ap.add_argument("--point-size", type=float, default=5.0)
     ap.add_argument("--room", action="store_true",
                     help="Show radar marker + boresight + floor grid + room box")
+    ap.add_argument("--cluster", action="store_true",
+                    help="Detect furniture (cluster stable voxels + bounding box)")
+    ap.add_argument("--cluster-density", type=int, default=10,
+                    help="Min voxel density for clustering (stable structure)")
+    ap.add_argument("--floor-z", type=float, default=0.35,
+                    help="Remove points below this Z before clustering (floor plane)")
     ap.add_argument("--z-min", type=float, default=None,
                     help="Drop points below this Z (use -0.1 to remove "
                          "floor-bounce multipath ghosts — often ~half the cloud)")
