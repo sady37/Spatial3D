@@ -131,7 +131,7 @@ def estimate_covariance(
     R : (N, N) or (L, L) complex Hermitian covariance matrix
         where L = spatial_smoothing when smoothing is applied.
     """
-    snapshots = np.asarray(snapshots)
+    snapshots = np.asarray(snapshots, dtype=np.complex128)
     K, N = snapshots.shape
 
     if spatial_smoothing <= 0:
@@ -160,6 +160,88 @@ def estimate_covariance(
 
     R /= 2 * n_subarrays
     return R
+
+
+# ---------------------------------------------------------------------------
+# 2-D forward-backward spatial smoothing (for a UPA)
+# ---------------------------------------------------------------------------
+def spatial_smoothing_2d(
+    snapshots: NDArray[np.complexfloating],
+    grid: tuple[int, int] = (4, 4),
+    sub: tuple[int, int] = (3, 3),
+    forward_backward: bool = True,
+) -> NDArray[np.complexfloating]:
+    """Covariance with 2-D spatial smoothing over a planar array.
+
+    The 1-D smoothing in :func:`estimate_covariance` treats the 16 virtual
+    antennas as a line, which is wrong for the AWRL6844's 4x4 grid. This
+    decorrelates *coherent* sources (e.g. several static scatterers in one
+    range bin, whose antenna response is identical every frame) by averaging
+    the covariance over all overlapping (sub_el x sub_az) sub-arrays.
+
+    Antenna ordering must match :func:`awrl6844_array`: index = el*grid_az + az
+    (elevation-major). Pair the returned covariance with
+    :func:`subarray_array` so the steering geometry matches.
+
+    Parameters
+    ----------
+    snapshots        : (K, grid_el*grid_az) complex array.
+    grid             : (n_el, n_az) full array shape.
+    sub              : (sub_el, sub_az) sub-array shape (<= grid per axis).
+    forward_backward : also average the backward (conjugate-reversed) covariance.
+
+    Returns
+    -------
+    R : (sub_el*sub_az, sub_el*sub_az) complex Hermitian covariance.
+    """
+    snapshots = np.asarray(snapshots, dtype=np.complex128)
+    K, N = snapshots.shape
+    n_el, n_az = grid
+    s_el, s_az = sub
+    if n_el * n_az != N:
+        raise ValueError(f"grid {grid} has {n_el*n_az} elements != {N} antennas")
+    if s_el > n_el or s_az > n_az:
+        raise ValueError(f"sub {sub} exceeds grid {grid}")
+
+    L = s_el * s_az
+    X = snapshots.reshape(K, n_el, n_az)
+    R = np.zeros((L, L), dtype=np.complex128)
+    J = np.fliplr(np.eye(L))
+    n_sub = 0
+    for p in range(n_el - s_el + 1):
+        for q in range(n_az - s_az + 1):
+            sub_x = X[:, p:p + s_el, q:q + s_az].reshape(K, L)  # (K, L)
+            R_fwd = (sub_x.T @ sub_x.conj()) / K
+            if forward_backward:
+                R += 0.5 * (R_fwd + J @ R_fwd.conj() @ J)
+            else:
+                R += R_fwd
+            n_sub += 1
+    R /= max(n_sub, 1)
+    return R
+
+
+def subarray_array(
+    sub: tuple[int, int] = (3, 3),
+    wavelength: float = LAMBDA,
+) -> "AntennaArray":
+    """AntennaArray matching a (sub_el, sub_az) sub-array from spatial_smoothing_2d.
+
+    Elements are on a lambda/2 grid, ordered elevation-major to match the
+    smoothed covariance produced by :func:`spatial_smoothing_2d`.
+    """
+    s_el, s_az = sub
+    half_lambda = wavelength / 2.0
+    az_idx, el_idx = [], []
+    for e in range(s_el):
+        for a in range(s_az):
+            az_idx.append(a)
+            el_idx.append(e)
+    return AntennaArray(
+        np.asarray(az_idx, dtype=np.float64) * half_lambda,
+        np.asarray(el_idx, dtype=np.float64) * half_lambda,
+        wavelength,
+    )
 
 
 # ---------------------------------------------------------------------------
