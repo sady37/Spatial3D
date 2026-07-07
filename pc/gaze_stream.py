@@ -13,6 +13,7 @@ import time
 
 import numpy as np
 
+from spatial3d.cube import save_cube
 from spatial3d.range_music import DR_M, N_VIRT_ANT, BinAccumulator
 from spatial3d.uart_reader import RadarSession
 
@@ -75,14 +76,15 @@ def main():
             acc.add(ra)
     s.close()
 
-    covs = acc.covariances(min_snapshots=10)
-    binsA = np.array(sorted(covs), dtype=np.int32)
-    cov = np.stack([covs[int(b)] for b in binsA]).astype(np.complex64)
-    cnt = np.array([len(acc.snaps[int(b)]) for b in binsA], dtype=np.int32)
-    np.savez(a.out, bins=binsA, covariances=cov, counts=cnt,
-             dr_m=np.float32(DR_M))
-    print(f"SAVED {a.out}  {len(binsA)} bins, min/bin={acc.min_count(bins)}",
-          flush=True)
+    # Save the RAW slow-time cube (not just the covariance): the mean and the
+    # frame-to-frame variation are what separate a static object from a
+    # breathing person, and collapsing to R alone discards them. The cube is
+    # MB-scale and needs no firmware change — the type-8 stream already carries
+    # every frame. save_cube also writes a derived 'covariances' for back-compat.
+    binsA, cube, cnt = save_cube(a.out, acc, list(bins),
+                                 dr=DR_M, min_snapshots=10)
+    print(f"SAVED {a.out}  {len(binsA)} bins, cube {cube.shape}, "
+          f"min/bin={acc.min_count(bins)}", flush=True)
 
 
 if __name__ == "__main__":

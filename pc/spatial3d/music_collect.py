@@ -162,6 +162,16 @@ def main():
         description="Per-bin MUSIC pipeline: covariances -> DOA -> 3D voxel map")
     src = p.add_argument_group("source (live or from file)")
     src.add_argument("--from-npz", help="Load per-bin covariances from .npz")
+    src.add_argument("--source", choices=["static", "motion"], default="static",
+                     help="static = MUSIC on R (energy/structure); motion = "
+                          "MUSIC on R-m·mᴴ (fluctuation) = breathing/moving "
+                          "scatterers only. 'motion' needs a cube npz (snapshots).")
+    src.add_argument("--motion-gate", type=float, default=0.15,
+                     help="motion source: keep bins with variance >= this "
+                          "fraction of the peak variance (drops noise-only bins)")
+    src.add_argument("--base", default=None,
+                     help="motion source: base_cube.npz whose variance/"
+                          "fluctuation floor is subtracted (real motion = excess)")
     src.add_argument("--cli-port", help="CLI UART port (live)")
     src.add_argument("--data-port", help="DATA UART port (live)")
     src.add_argument("--cfg", help="MUSIC .cfg (live)")
@@ -274,6 +284,32 @@ def main():
 def _acquire_source(args):
     """Get (covs, stacks, dr) from a saved npz or one live acquisition."""
     if args.from_npz:
+        if getattr(args, "source", "static") == "motion":
+            from .cube import Cube
+            c = Cube.load(args.from_npz)      # raises if no cube in the npz
+            flc = c.fluctuation()             # R - m·mᴴ  -> moving scatterers
+            var = c.variance()                # per-bin fluctuation energy
+            # Subtract the empty-room base: clutter/multipath has its own
+            # baseline fluctuation, so real motion is the EXCESS over base.
+            if getattr(args, "base", None):
+                bd = np.load(args.base, allow_pickle=True)
+                bb = bd["bins"].astype(int)
+                bvar = {int(b): float(bd["variance"][i]) for i, b in enumerate(bb)}
+                bflc = ({int(b): bd["fluctuation"][i] for i, b in enumerate(bb)}
+                        if "fluctuation" in bd else {})
+                var = {b: max(0.0, var[b] - bvar.get(b, 0.0)) for b in var}
+                flc = {b: (R - bflc[b] if b in bflc else R)
+                       for b, R in flc.items()}
+            # MUSIC finds a peak in EVERY bin, even noise-only ones, so gate by
+            # the (base-subtracted) fluctuation energy: keep only bins whose
+            # variation stands out — i.e. that actually contain new motion.
+            vmax = max(var.values()) if var else 0.0
+            gate = getattr(args, "motion_gate", 0.15) * vmax
+            flc = {b: R for b, R in flc.items() if var.get(b, 0.0) >= gate}
+            tag = "base-subtracted " if getattr(args, "base", None) else ""
+            print(f"Loading {tag}MOTION (fluctuation) from {args.from_npz}"
+                  f"  ({len(flc)} bins pass variance gate {gate:.3f})")
+            return flc, None, c.dr
         print(f"Loading covariances from {args.from_npz}")
         return _load_npz(args.from_npz)
 
