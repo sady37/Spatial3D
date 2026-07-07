@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-FALL_Z = 0.6   # room-frame height below which an appeared object is a fall/lie
+FALL_Z = 0.4   # room-frame height (<=40cm floor band) = fall/lie zone (design 5.x)
 
 
 @dataclass
