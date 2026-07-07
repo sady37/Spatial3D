@@ -138,6 +138,16 @@ def run_pipeline(covs, stacks, dr, args) -> np.ndarray:
         return np.empty((0, 7), dtype=np.float32)
 
     room = to_room(radar_pts)  # (M, 6): x,y,z,power,bin,range
+    z_min = getattr(args, "z_min", -0.1)
+    if z_min is not None:
+        keep = room[:, 2] >= z_min
+        n_drop = int((~keep).sum())
+        room = room[keep]
+        if n_drop:
+            print(f"  dropped {n_drop} below-floor points (z < {z_min}m, "
+                  f"floor-bounce multipath ghosts)")
+    if len(room) == 0:
+        return np.empty((0, 7), dtype=np.float32)
     labels = np.array([_LABEL_ID[semantic_label(z)] for z in room[:, 2]],
                       dtype=np.float32)
     return np.column_stack([room, labels]).astype(np.float32)
@@ -177,6 +187,10 @@ def main():
                           "(needs snapshot stacks)")
     mus.add_argument("--method", choices=["music", "fft"], default="music",
                      help="DOA method: music (super-res) or fft (Bartlett baseline)")
+    mus.add_argument("--z-min", type=float, default=-0.1,
+                     help="Drop points below this room-frame Z (default -0.1m: "
+                          "removes floor-bounce multipath ghosts, ~half the cloud). "
+                          "Pass a very negative value to keep them.")
 
     out = p.add_argument_group("output")
     out.add_argument("--voxel-size", type=float, default=0.3)
