@@ -168,6 +168,29 @@ def test_single_source_doa_recovers_angle():
     assert abs(el - (-10.0)) <= 3.0
 
 
+def test_fft_and_music_both_locate_single_source():
+    # Bartlett (fft) and MUSIC should both find a lone source; MUSIC sharper.
+    from spatial3d.music import awrl6844_array, bartlett_doa, music_doa
+    array = awrl6844_array()
+    R = _source_covariance(array, az_deg=15.0, el_deg=-5.0)
+    for doa in (music_doa, bartlett_doa):
+        dets = doa(R, array, n_signals=1, az_range=(-45, 45),
+                   el_range=(-45, 20), resolution_deg=1.0)
+        assert dets, f"{doa.__name__} found no peak"
+        assert abs(dets[0][0] - 15.0) <= 4.0
+        assert abs(dets[0][1] - (-5.0)) <= 4.0
+
+
+def test_covariances_to_points_fft_method_runs():
+    from spatial3d.music import awrl6844_array
+    array = awrl6844_array()
+    covs = {100: _source_covariance(array, az_deg=20.0, el_deg=0.0, seed=1)}
+    pts = covariances_to_points(covs, array, n_signals=1, resolution_deg=1.0,
+                                max_peaks_per_bin=1, method="fft")
+    assert pts.shape[0] == 1
+    assert pts[0, 0] > 0                      # +az -> +x
+
+
 def test_covariances_to_points_maps_bins_and_angles():
     array = awrl6844_array()
     covs = {

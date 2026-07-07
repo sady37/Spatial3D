@@ -439,34 +439,79 @@ def music_doa(
         R, array, az_angles, el_angles,
         n_signals=n_signals, n_snapshots=n_snapshots,
     )
+    return _find_peaks_2d(spectrum, az_angles, el_angles)
 
-    # Convert to dB for peak finding
+
+def _find_peaks_2d(
+    spectrum: NDArray[np.floating],
+    az_angles: NDArray[np.floating],
+    el_angles: NDArray[np.floating],
+    threshold_db: float = -20.0,
+) -> list[tuple[float, float, float]]:
+    """Local 2-D maxima of a pseudo-spectrum, as (az_deg, el_deg, power).
+
+    Keeps 8-connected local maxima at least *threshold_db* below the peak,
+    sorted by power descending. Shared by MUSIC and Bartlett DOA.
+    """
     spectrum_db = 10.0 * np.log10(spectrum / spectrum.max() + 1e-30)
-
-    # Find peaks: threshold at -20 dB below maximum, require some prominence
     detections: list[tuple[float, float, float]] = []
-
-    # Flatten, find peaks, unflatten
-    flat = spectrum_db.ravel()
-    # Use 1-D peak finding on flattened array; also check neighbours in 2D
     M, P = spectrum_db.shape
-
     for i in range(1, M - 1):
         for j in range(1, P - 1):
             val = spectrum_db[i, j]
-            if val < -20.0:
+            if val < threshold_db:
                 continue
-            # Check 8-connected neighbourhood
-            neighbourhood = spectrum_db[i - 1 : i + 2, j - 1 : j + 2]
-            if val >= neighbourhood.max():
-                az_deg = float(np.rad2deg(az_angles[i]))
-                el_deg = float(np.rad2deg(el_angles[j]))
-                power = float(spectrum[i, j])
-                detections.append((az_deg, el_deg, power))
-
-    # Sort by power descending
+            if val >= spectrum_db[i - 1 : i + 2, j - 1 : j + 2].max():
+                detections.append((
+                    float(np.rad2deg(az_angles[i])),
+                    float(np.rad2deg(el_angles[j])),
+                    float(spectrum[i, j]),
+                ))
     detections.sort(key=lambda x: x[2], reverse=True)
     return detections
+
+
+# ---------------------------------------------------------------------------
+# Bartlett / FFT conventional beamformer (the non-super-resolution baseline)
+# ---------------------------------------------------------------------------
+def bartlett_spectrum_2d(
+    R: NDArray[np.complexfloating],
+    array: AntennaArray,
+    az_angles: NDArray[np.floating],
+    el_angles: NDArray[np.floating],
+) -> NDArray[np.floating]:
+    """Conventional (Bartlett) beamformer power: P(theta) = a^H R a.
+
+    This is the covariance form of the classic angle-FFT beamformer — the
+    resolution is limited by the array beamwidth (~29 deg for a 4-element ULA),
+    i.e. NO super-resolution. Use it as the baseline to compare against MUSIC.
+    """
+    A = array.steering_matrix(az_angles, el_angles)  # (M, P, N)
+    # P[m,p] = a^H R a  = sum_kl conj(A_k) R_kl A_l
+    spec = np.real(np.einsum("mpk,kl,mpl->mp", A.conj(), R, A))
+    return spec
+
+
+def bartlett_doa(
+    R: NDArray[np.complexfloating],
+    array: AntennaArray,
+    n_signals: int | None = None,   # unused (kept for a common signature)
+    n_snapshots: int = 100,          # unused
+    az_range: tuple[float, float] = (-60.0, 60.0),
+    el_range: tuple[float, float] = (-60.0, 60.0),
+    resolution_deg: float = 1.0,
+) -> list[tuple[float, float, float]]:
+    """DOA via the conventional Bartlett/FFT beamformer + peak finding.
+
+    Same call signature as :func:`music_doa` (n_signals/n_snapshots ignored) so
+    the two are drop-in interchangeable in the per-bin pipeline.
+    """
+    az_angles = np.deg2rad(
+        np.arange(az_range[0], az_range[1] + resolution_deg / 2, resolution_deg))
+    el_angles = np.deg2rad(
+        np.arange(el_range[0], el_range[1] + resolution_deg / 2, resolution_deg))
+    spectrum = bartlett_spectrum_2d(R, array, az_angles, el_angles)
+    return _find_peaks_2d(spectrum, az_angles, el_angles)
 
 
 # ---------------------------------------------------------------------------

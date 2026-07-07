@@ -121,7 +121,8 @@ def run_pipeline(covs, stacks, dr, args) -> np.ndarray:
         smooth_sub = (se, sa)
 
     covariances, array = build_covariances(stacks, covs, smooth_sub)
-    print(f"MUSIC over {len(covariances)} bins "
+    method = getattr(args, "method", "music").upper()
+    print(f"{method} over {len(covariances)} bins "
           f"(array={array.n_antennas} ant, smooth={smooth_sub}) ...")
 
     radar_pts = covariances_to_points(
@@ -130,6 +131,7 @@ def run_pipeline(covs, stacks, dr, args) -> np.ndarray:
         az_range=tuple(args.az_range), el_range=tuple(args.el_range),
         resolution_deg=args.resolution,
         max_peaks_per_bin=args.max_peaks,
+        method=getattr(args, "method", "music"),
     )
     print(f"  MUSIC points: {len(radar_pts)}")
     if len(radar_pts) == 0:
@@ -173,6 +175,8 @@ def main():
     mus.add_argument("--smooth", default=None,
                      help="2D spatial smoothing sub-array, e.g. '3x3' or '2x2' "
                           "(needs snapshot stacks)")
+    mus.add_argument("--method", choices=["music", "fft"], default="music",
+                     help="DOA method: music (super-res) or fft (Bartlett baseline)")
 
     out = p.add_argument_group("output")
     out.add_argument("--voxel-size", type=float, default=0.3)

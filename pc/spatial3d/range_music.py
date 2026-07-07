@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from .music import AntennaArray, estimate_covariance, music_doa
+from .music import AntennaArray, bartlett_doa, estimate_covariance, music_doa
 from .tlv import RangeAntenna
 
 # --- range geometry (profile_4T4R_music.cfg) --------------------------------
@@ -278,8 +278,12 @@ def covariances_to_points(
     resolution_deg: float = 1.0,
     max_peaks_per_bin: int = 3,
     min_rel_db: float = -6.0,
+    method: str = "music",
 ) -> NDArray[np.floating]:
-    """Run per-bin 2D MUSIC and map peaks to radar-frame 3D points.
+    """Run per-bin DOA and map peaks to radar-frame 3D points.
+
+    ``method``: "music" (super-resolution) or "fft"/"bartlett" (conventional
+    beamformer baseline, resolution-limited by the array beamwidth).
 
     Parameters
     ----------
@@ -295,10 +299,11 @@ def covariances_to_points(
     -------
     (M, 6) float array: columns [x, y, z, power, bin_idx, range_m].
     """
+    doa_fn = bartlett_doa if method in ("fft", "bartlett") else music_doa
     rows: list[list[float]] = []
     for b in sorted(covariances):
         R = covariances[b]
-        dets = music_doa(
+        dets = doa_fn(
             R, array, n_signals=n_signals, n_snapshots=n_snapshots,
             az_range=az_range, el_range=el_range, resolution_deg=resolution_deg,
         )

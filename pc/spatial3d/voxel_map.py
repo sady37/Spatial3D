@@ -54,7 +54,8 @@ def build_voxel_grid(room_pts: np.ndarray, voxel_size: float,
 
 
 def render_voxels(grid: np.ndarray, ranges, voxel_size: float,
-                  threshold: int = 3, out_path: str = "voxel_map.png"):
+                  threshold: int = 3, out_path: str = "voxel_map.png",
+                  elev: float = 25, azim: float = -60, title_suffix: str = ""):
     x_range, y_range, z_range = ranges
     occupied = grid >= threshold
 
@@ -91,10 +92,11 @@ def render_voxels(grid: np.ndarray, ranges, voxel_size: float,
     ax.set_xlim(x_range)
     ax.set_ylim(y_range)
     ax.set_zlim(z_range)
-    ax.set_title(f"3D Voxel Map (size={voxel_size}m, threshold≥{threshold} pts)\n"
+    ax.set_title(f"3D Voxel Map (size={voxel_size}m, threshold≥{threshold} pts)"
+                 f"{title_suffix}\n"
                  f"Red=fall zone(≤0.4m)  Orange=boundary  Blue=normal",
                  fontsize=12)
-    ax.view_init(elev=25, azim=-60)
+    ax.view_init(elev=elev, azim=azim)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
