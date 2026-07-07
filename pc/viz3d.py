@@ -95,11 +95,13 @@ def reference_geometries(h_mount=H_MOUNT, tilt_deg=TILT_DEG,
     return geoms
 
 
-# Camera presets (front, up, zoom) — the radar looks down into the room.
+# Camera presets (front, up, zoom). NOTE Open3D 'front' is the camera's LOOK
+# direction (camera -> scene). The radar sits at (0,0,2) and looks into +Y / down.
 VIEWS = {
-    "side": ([-1, 0, 0.05], [0, 0, 1], 0.6),     # along -X: radar on top, floor as a line
-    "3q":   ([-0.6, -0.5, 0.55], [0, 0, 1], 0.62),  # front-right, elevated
-    "top":  ([0, 0, -1], [0, 1, 0], 0.7),         # bird's-eye
+    "radar": ([0, 1, -0.5], [0, 0, 1], 0.5),      # ALONG the radar line of sight
+    "side":  ([-1, 0, 0.05], [0, 0, 1], 0.6),     # side elevation (Y horizontal)
+    "3q":    ([0.5, 0.7, -0.5], [0, 0, 1], 0.55),  # into room, from front-left-above
+    "top":   ([0, 0, -1], [0, 1, 0], 0.7),        # bird's-eye
 }
 
 
@@ -201,9 +203,11 @@ def main():
         print(f"saved {args.screenshot}")
     else:
         print("opening window — drag=orbit, scroll=zoom, shift+drag=pan, Q=quit")
+        front, up, zoom = VIEWS[args.view or "radar"]  # open along the radar's view
         o3d.visualization.draw_geometries(
             geoms, window_name=f"Spatial3D: {args.input}",
-            width=1400, height=1000)
+            width=1400, height=1000,
+            front=front, up=up, zoom=zoom, lookat=[0, 3.0, 0.4])
 
 
 if __name__ == "__main__":
