@@ -50,6 +50,9 @@ def main():
     ap.add_argument("--voxel-size", type=float, default=0.3)
     ap.add_argument("--fall-alert-mag", type=float, default=0.08,
                     help="Min fall-zone 'appeared' magnitude to raise a FALL alert")
+    ap.add_argument("--fall-centroid", type=float, default=0.55,
+                    help="Vertical energy centroid (m) below which = lying/fall, "
+                         "above = standing. Radar FOV clips heads, so ~0.55m.")
     args = ap.parse_args()
 
     base = np.load(args.baseline, allow_pickle=True)["music_cloud"]
@@ -58,32 +61,37 @@ def main():
     kw = dict(voxel_size=args.voxel_size, x_range=X_RANGE, y_range=Y_RANGE)
     diff_full, meta_full = energy_change(base, event, z_range=(-0.1, 2.5), **kw)
     diff_fall, meta_fall = energy_change(base, event, z_range=(-0.1, FALL_Z), **kw)
-    diff_tall, meta_tall = energy_change(base, event, z_range=(1.0, 1.8), **kw)
     ev_full = change_events(diff_full, meta_full, rel_threshold=0.3, min_voxels=1)
     ev_fall = change_events(diff_fall, meta_fall, rel_threshold=0.3, min_voxels=1)
 
-    # A standing person also puts energy in the fall zone (feet), so a fall is a
-    # low-lying appeared mass whose energy is DOMINANTLY low vs the column above
-    # (per the design: fall = energy redistributes DOWN, no standing column).
+    # A standing person also puts energy in the fall zone (feet), and the
+    # down-tilted FOV clips their head, so a band ratio is unreliable. Instead
+    # use the VERTICAL ENERGY CENTROID of the appeared mass at that (x,y): a
+    # lying person's energy sits low (~0.4m), a standing person's is high
+    # (~0.85m, legs+torso). Clean separation on real data.
     vs = args.voxel_size
-    low_col = np.maximum(diff_fall.sum(axis=2), 0.0)    # (nx,ny) appeared low
-    tall_col = np.maximum(diff_tall.sum(axis=2), 0.0)   # (nx,ny) appeared high
+    xr, yr, zr, _ = meta_full
+    app = np.maximum(diff_full, 0.0)                    # appeared energy (3D)
+    zc = zr[0] + (np.arange(app.shape[2]) + 0.5) * vs
 
-    def col_energy(grid, cx, cy, r=0.5):
+    def centroid_z(cx, cy, r=0.4):
         ix = int((cx - X_RANGE[0]) / vs); iy = int((cy - Y_RANGE[0]) / vs)
         rr = int(r / vs)
-        sub = grid[max(0, ix - rr):ix + rr + 1, max(0, iy - rr):iy + rr + 1]
-        return float(sub.max()) if sub.size else 0.0
+        prof = app[max(0, ix - rr):ix + rr + 1,
+                   max(0, iy - rr):iy + rr + 1, :].sum(axis=(0, 1))
+        return float((zc * prof).sum() / prof.sum()) if prof.sum() > 0 else 99.0
 
     def is_fall(e):
-        lo = col_energy(low_col, e.center[0], e.center[1])
-        hi = col_energy(tall_col, e.center[0], e.center[1])
-        return lo > 1.5 * hi                            # energy dominantly low
+        return centroid_z(e.center[0], e.center[1]) < args.fall_centroid
 
+    # Classify the DOMINANT appeared mass (strongest event), not any — a weak
+    # floor-multipath artifact elsewhere shouldn't override a clearly-standing
+    # person. (Multiple real people is a future refinement.)
     strong = [e for e in ev_fall if e.kind == "appeared"
               and e.magnitude >= args.fall_alert_mag]
-    fall_hits = [e for e in strong if is_fall(e)]
-    standing = [e for e in strong if not is_fall(e)]
+    top_ev = strong[0] if strong else None              # ev_fall is mag-sorted
+    fall_hits = [top_ev] if (top_ev and is_fall(top_ev)) else []
+    standing = [top_ev] if (top_ev and not is_fall(top_ev)) else []
     alert = bool(fall_hits)
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
