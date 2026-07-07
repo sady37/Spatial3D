@@ -99,6 +99,8 @@ def reference_geometries(h_mount=H_MOUNT, tilt_deg=TILT_DEG,
 # direction (camera -> scene). The radar sits at (0,0,2) and looks into +Y / down.
 VIEWS = {
     "radar": ([0, 1, -0.5], [0, 0, 1], 0.5),      # ALONG the radar line of sight
+    "left":  ([0.7, 0.7, -0.45], [0, 0, 1], 0.5),   # into room, yawed to the left
+    "right": ([-0.7, 0.7, -0.45], [0, 0, 1], 0.5),  # into room, yawed to the right
     "side":  ([-1, 0, 0.05], [0, 0, 1], 0.6),     # side elevation (Y horizontal)
     "3q":    ([0.5, 0.7, -0.5], [0, 0, 1], 0.55),  # into room, from front-left-above
     "top":   ([0, 0, -1], [0, 1, 0], 0.7),        # bird's-eye
