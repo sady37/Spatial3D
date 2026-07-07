@@ -38,6 +38,10 @@ def _colorize(scalar, name, lo=None, hi=None):
     return _cmap(name)((scalar - lo) / (hi - lo + 1e-9))
 
 
+H_MOUNT = 2.0     # radar mount height (room frame): radar sits at (0, 0, H_MOUNT)
+TILT_DEG = 35.0   # downward mount tilt
+
+
 def load_points(path: str):
     """Return (xyz float64 (N,3), extra (N,) or None) from .npz or .ply."""
     if path.endswith(".npz"):
@@ -47,6 +51,56 @@ def load_points(path: str):
         return c[:, :3].astype(np.float64), extra
     pc = o3d.io.read_point_cloud(path)
     return np.asarray(pc.points), None
+
+
+def reference_geometries(h_mount=H_MOUNT, tilt_deg=TILT_DEG,
+                         x_range=(-3, 3), y_range=(0, 7)):
+    """Radar marker (blue sphere) + boresight ray + floor grid + room box.
+
+    Orients the scene: the radar sits ABOVE the floor at (0, 0, h_mount) and
+    looks DOWN into +Y at *tilt_deg*, so the natural view is from the side or
+    above, not level.
+    """
+    geoms = []
+    radar = o3d.geometry.TriangleMesh.create_sphere(radius=0.15)
+    radar.translate([0, 0, h_mount])
+    radar.paint_uniform_color([0.1, 0.4, 1.0])
+    radar.compute_vertex_normals()
+    geoms.append(radar)
+
+    t = np.radians(tilt_deg)
+    # boresight = (0, cos t, -sin t) from radar; hits floor (z=0) at y = h/tan(t)
+    floor_hit_y = h_mount / np.tan(t) if t else y_range[1]
+    ray = o3d.geometry.LineSet()
+    ray.points = o3d.utility.Vector3dVector([[0, 0, h_mount], [0, floor_hit_y, 0]])
+    ray.lines = o3d.utility.Vector2iVector([[0, 1]])
+    ray.colors = o3d.utility.Vector3dVector([[0.1, 0.8, 1.0]])
+    geoms.append(ray)
+
+    box = o3d.geometry.AxisAlignedBoundingBox(
+        [x_range[0], y_range[0], -0.1], [x_range[1], y_range[1], 2.5])
+    box.color = (0.5, 0.5, 0.5)
+    geoms.append(box)
+
+    pts, lns = [], []
+    for xg in np.arange(x_range[0], x_range[1] + 0.01, 0.5):
+        i = len(pts); pts += [[xg, y_range[0], 0], [xg, y_range[1], 0]]; lns.append([i, i + 1])
+    for yg in np.arange(y_range[0], y_range[1] + 0.01, 0.5):
+        i = len(pts); pts += [[x_range[0], yg, 0], [x_range[1], yg, 0]]; lns.append([i, i + 1])
+    floor = o3d.geometry.LineSet()
+    floor.points = o3d.utility.Vector3dVector(pts)
+    floor.lines = o3d.utility.Vector2iVector(lns)
+    floor.paint_uniform_color([0.25, 0.25, 0.28])
+    geoms.append(floor)
+    return geoms
+
+
+# Camera presets (front, up, zoom) — the radar looks down into the room.
+VIEWS = {
+    "side": ([-1, 0, 0.05], [0, 0, 1], 0.6),     # along -X: radar on top, floor as a line
+    "3q":   ([-0.6, -0.5, 0.55], [0, 0, 1], 0.62),  # front-right, elevated
+    "top":  ([0, 0, -1], [0, 1, 0], 0.7),         # bird's-eye
+}
 
 
 def voxel_density(xyz, vs):
@@ -59,7 +113,17 @@ def voxel_density(xyz, vs):
 
 def build_geometries(args):
     xyz, extra = load_points(args.input)
+    if args.z_min is not None:
+        keep = xyz[:, 2] >= args.z_min
+        dropped = (~keep).sum()
+        xyz = xyz[keep]
+        if extra is not None:
+            extra = extra[keep]
+        print(f"dropped {dropped} points below z={args.z_min} "
+              f"(floor-bounce multipath ghosts)")
     geoms = [o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)]
+    if args.room:
+        geoms += reference_geometries()
 
     if args.voxel:
         centers, dens = voxel_density(xyz, args.voxel_size)
@@ -102,6 +166,13 @@ def main():
                     help="Keep voxels with >= this many points (stable structure)")
     ap.add_argument("--color", choices=["height", "density"], default="height")
     ap.add_argument("--point-size", type=float, default=5.0)
+    ap.add_argument("--room", action="store_true",
+                    help="Show radar marker + boresight + floor grid + room box")
+    ap.add_argument("--z-min", type=float, default=None,
+                    help="Drop points below this Z (use -0.1 to remove "
+                         "floor-bounce multipath ghosts — often ~half the cloud)")
+    ap.add_argument("--view", choices=list(VIEWS), default=None,
+                    help="Camera preset for --screenshot (side/3q/top)")
     ap.add_argument("--screenshot", default=None,
                     help="Render off-screen to this PNG instead of a window")
     args = ap.parse_args()
@@ -110,12 +181,19 @@ def main():
 
     if args.screenshot:
         vis = o3d.visualization.Visualizer()
-        vis.create_window(visible=False, width=1400, height=1000)
+        vis.create_window(visible=False, width=1500, height=1000)
         for g in geoms:
             vis.add_geometry(g)
         opt = vis.get_render_option()
         opt.point_size = args.point_size
         opt.background_color = np.array([0.08, 0.08, 0.10])
+        if args.view:
+            front, up, zoom = VIEWS[args.view]
+            ctr = vis.get_view_control()
+            ctr.set_lookat([0, 3.0, 0.5])
+            ctr.set_front(front)
+            ctr.set_up(up)
+            ctr.set_zoom(zoom)
         vis.poll_events()
         vis.update_renderer()
         vis.capture_screen_image(args.screenshot, do_render=True)
