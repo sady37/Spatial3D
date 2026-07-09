@@ -53,14 +53,20 @@ def main():
     ap.add_argument("--fall-centroid", type=float, default=0.55,
                     help="Vertical energy centroid (m) below which = lying/fall, "
                          "above = standing. Radar FOV clips heads, so ~0.55m.")
+    ap.add_argument("--z-min", type=float, default=-0.1,
+                    help="lower Z bound for FULL-HEIGHT panel (m)")
+    ap.add_argument("--fall-z-min", type=float, default=-0.1,
+                    help="lower Z bound for FALL ZONE (m). Set e.g. -2 to COUNT "
+                         "the below-floor elevation-artifact energy of a low/"
+                         "lying target (whose energy scatters below the floor).")
     args = ap.parse_args()
 
     base = np.load(args.baseline, allow_pickle=True)["music_cloud"]
     event = np.load(args.event, allow_pickle=True)["music_cloud"]
 
     kw = dict(voxel_size=args.voxel_size, x_range=X_RANGE, y_range=Y_RANGE)
-    diff_full, meta_full = energy_change(base, event, z_range=(-0.1, 2.5), **kw)
-    diff_fall, meta_fall = energy_change(base, event, z_range=(-0.1, FALL_Z), **kw)
+    diff_full, meta_full = energy_change(base, event, z_range=(args.z_min, 2.5), **kw)
+    diff_fall, meta_fall = energy_change(base, event, z_range=(args.fall_z_min, FALL_Z), **kw)
     ev_full = change_events(diff_full, meta_full, rel_threshold=0.3, min_voxels=1)
     ev_fall = change_events(diff_fall, meta_fall, rel_threshold=0.3, min_voxels=1)
 
