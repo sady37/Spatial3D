@@ -2,6 +2,39 @@
 
 接续:实时连续 HR 输出 + 心动过速。本文件是新会话的提示词/交接。
 
+## ✅ 已完成(2026-07-11 本轮)
+
+- **核心重构(零行为变化)**:`bcg_vitals.py` 把相位解调/RR/HR 抽成可复用函数
+  `demod_channels / estimate_rr / hr_band_search / estimate_hr`,main 输出逐字节不变
+  (四份回归 81/81/87/80 精确不动)。RT 层 import 这些函数,**未碰已验证核心**。
+- **任务 1 = `bcg_vitals_rt.py`**(滑窗连续 HR + 时序层)。15s 窗/1.5s 步,每窗跑
+  `estimate_hr` → 瞬时 HR+bin-spread+autocorr 峰高(SQI 代理)。时序层三件套:
+  ① **卡尔曼**(标量随机游走,测量噪声 R 随 bin-spread 增大 → 低置信窗少动状态);
+  ② **连续性验证**(近 5 值,±10% 均值 / ±20% 上值,不过则不输出、卡尔曼滑行);
+  ③ **质量门 + 备份**:autocorr 峰高 < q_min(默认 0.40)= 掉线检测(**关键发现:HR 值本身
+     被 band-prior 钳在 60-102bpm,纯噪声也给"貌似合理"的值 → 值/spread 都测不出掉线,
+     只有 autocorr 峰高/带内 SNR 能测**);连续失败 ≥3 → 更长窗(30s)重捕获重锚。
+  用法 `python bcg_vitals_rt.py sit39_cube.npz --fps 18.8 --plot hr.png`。
+  四份连续曲线:sit39 中位 79、sidesit 78、lie41 77、fall20 80(全 ≈ 验证值);
+  合成掉线测试(注噪 12s)证明 lowconf/coast + 备份重捕获 + 卡尔曼稳态保持。
+  图:`hr_timeline_{sit39,sidesit,lie41,fall20,disturbed}.png`。
+- **任务 2 算法 = `estimate_hr(..., tachy_hi=2.2)` 高带仲裁**(`--tachy 2.2` 开关,两处都通)。
+  做法:低边**恒定 1.0Hz**(0.7-1.0 呼吸残留永不重入),仅当 SQI-top bins 里
+  **宽带自相关周期的中位 > 1.7Hz 且多数(≥50%)bins 落在 1.7Hz 之上**才判心动过速(区域投票);
+  判定后 tachy 值用**该带 FFT 峰**(自相关在 102-132bpm 只有 ~3 个整数 lag,太粗;FFT 细)。
+  **走过的死路**:自相关"峰高比"和窄带"谱突出度(PMR)"都**不能**判高/低带 —— 二者对
+  band-limited 残留都饱和(高带 PMR≈低带,峰高甚至更高 → 假心动过速 113);**只有宽带周期落点**能判。
+  四份回归全判 LOW、HR 不变(sidesit 38%、lie41 38%、fall20 50%+中位98<102 均被挡)。
+  **仍缺**:真高心率数据验证 tachy 的**数值**(见下)。
+
+### 遗留(任务 2 收尾,需硬件)
+运动后立即录一份 cube(`python cap_cube.py tachy1_cube.npz 120`),同步 Apple Watch,
+跑 `bcg_vitals.py tachy1_cube.npz --fps <实测> --tachy 2.2` 看是否判 HIGH 且 FFT 值对表。
+若边界误判:调 `estimate_hr` 的 `vote_frac`(默认 0.5)或 tachy_hi。RT 连续版同 `--tachy 2.2`。
+
+---
+（以下为本轮开始前的原始交接,保留）
+
 ## 现状(已完成、已验证)
 
 - **HR/RR 管线** `pc/bcg_vitals.py`。配方 = **相位解调(mm 通道)→ SQI 选胸腔 bin → 自相关@生理带 [1.0-1.7Hz] 取中位**。RR 用低频带中位数(非 SQI 加权)。

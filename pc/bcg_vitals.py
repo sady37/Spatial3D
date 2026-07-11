@@ -21,6 +21,7 @@ except Exception:
 HR_HI = 2.5                 # 150 bpm ceiling
 RR_LO, RR_HI = 0.12, 0.6    # 7-36 rpm
 DR = 0.0234375
+LAMBDA_MM = 5.0             # radar wavelength (λ=5mm) for phase->displacement
 
 
 def bandpass(x, fps, lo, hi, notch_f0=None, notch_hw=0.022, notch_n=25):
@@ -64,16 +65,140 @@ def fft_peak(x, fps, lo, hi):
     return f[m][np.argmax(S[m])] if m.any() else None
 
 
-def autocorr_bpm(sig, fps, lo_bpm=48, hi_bpm=150):
-    """First autocorrelation peak within a bpm range -> bpm (already-filtered sig)."""
+def autocorr_peak(sig, fps, lo_bpm=48, hi_bpm=150):
+    """Largest autocorrelation peak in a bpm range -> (bpm, normalized_height).
+    Height (0-1) measures periodicity strength: used to arbitrate low vs high band."""
     ac = np.correlate(sig, sig, "full")[len(sig) - 1:]
     if ac[0] <= 0:
-        return None
+        return None, 0.0
     ac = ac / ac[0]
     l0, l1 = int(fps / (hi_bpm / 60)), int(fps / (lo_bpm / 60))
     if l1 <= l0 + 1 or l1 >= len(ac):
-        return None
-    return fps / (l0 + int(np.argmax(ac[l0:l1]))) * 60
+        return None, 0.0
+    k = l0 + int(np.argmax(ac[l0:l1]))
+    return fps / k * 60, float(ac[k])
+
+
+def autocorr_bpm(sig, fps, lo_bpm=48, hi_bpm=150):
+    """First autocorrelation peak within a bpm range -> bpm (already-filtered sig)."""
+    return autocorr_peak(sig, fps, lo_bpm, hi_bpm)[0]
+
+
+# --- Extracted core (reused by bcg_vitals_rt.py for sliding-window HR). The
+# phase-demod + band-prior recipe below is the VALIDATED core — do not change its
+# math; the RT layer only wraps it in a sliding window + Kalman/continuity. ---
+
+def demod_channels(C, bins):
+    """Per-bin PHASE demodulation -> mm displacement time series (nbin, T).
+    z = coherently-combined complex; disp = -λ/4π·unwrap(angle(z)). This is the
+    validated cardiac channel — mm motion lives in phase, not amplitude."""
+    chans = []
+    for i in range(len(bins)):
+        m = C[i].mean(0); m = m / (np.linalg.norm(m) + 1e-9)
+        z = C[i] @ m.conj()                       # complex per frame
+        phi = np.unwrap(np.angle(z))              # rad
+        disp_mm = -LAMBDA_MM / (4 * np.pi) * (phi - phi.mean())
+        chans.append(disp_mm)                     # mm displacement time series
+    return np.array(chans)                        # (nbin, T)
+
+
+def estimate_rr(chans, fps, topk=8):
+    """RR via low-freq SQI-top bins, MEDIAN fft peak. Returns (rr_rpm, f0_hz,
+    bin_spread, per_bin_list). f0 also drives the HR-band RR-harmonic notch."""
+    rr_sqi = np.array([sqi(bandpass(c, fps, RR_LO, RR_HI), fps, RR_LO, RR_HI)
+                       for c in chans])
+    rr_top = np.argsort(rr_sqi)[::-1][:topk]
+    rr_f = []
+    for i in rr_top:
+        ff = fft_peak(chans[i], fps, RR_LO, RR_HI)
+        if ff: rr_f.append(ff * 60)
+    rr = float(np.median(rr_f)) if rr_f else None
+    f0 = rr / 60.0 if rr else 0.25
+    spread = float(np.std(rr_f)) if len(rr_f) > 1 else 99.0
+    return rr, f0, spread, rr_f
+
+
+def hr_band_search(chans, fps, f0, lo, hi, topk=8):
+    """Autocorr-in-band HR over the SQI-top bins of ONE band. Returns dict with
+    hr (median bpm), spread (inter-bin std), strength (median autocorr height =
+    periodicity confidence), hr_bc (beat-count x-check), ac list, top bins."""
+    hr_sqi = np.array([sqi(bandpass(c, fps, lo, hi, notch_f0=f0), fps, lo, hi)
+                       for c in chans])
+    top = np.argsort(hr_sqi)[::-1][:topk]
+    ac, heights, bc = [], [], []
+    for i in top:
+        sig = bandpass(chans[i], fps, lo, hi, notch_f0=f0)
+        bpm, h = autocorr_peak(sig, fps, int(round(lo * 60)), int(round(hi * 60)))
+        if bpm: ac.append(bpm); heights.append(h)
+        bc.append(beat_count(sig, fps, hi_bpm=int(round(hi * 60))))
+    return dict(
+        hr=float(np.median(ac)) if ac else None,
+        spread=float(np.std(ac)) if len(ac) > 1 else 99.0,
+        strength=float(np.median(heights)) if heights else 0.0,
+        hr_bc=float(np.median(bc)) if bc else None,
+        ac=ac, top=top)
+
+
+def hr_region_vote(chans, fps, f0, lo, split, hi, topk=8):
+    """Region classifier for tachycardia. Runs autocorr over the FULL [lo,hi]
+    band (single consistent filter) per SQI-top bin and asks: does the cardiac
+    PERIOD land above `split`? Returns (median_bpm, frac_above_split). Fair
+    across the resting/tachy boundary because it compares one wide-band period
+    estimate, not intra-band peakiness (which is biased toward narrow high bands).
+    Note: raw autocorr height and narrow-band spectral prominence do NOT
+    discriminate — both saturate on band-limited residue; only the wide-band
+    PERIOD does (verified on the 4 resting cubes: frac_above stays < 0.5)."""
+    s = np.array([sqi(bandpass(c, fps, lo, hi, notch_f0=f0), fps, lo, hi)
+                  for c in chans])
+    top = np.argsort(s)[::-1][:topk]
+    cand = []
+    for i in top:
+        sig = bandpass(chans[i], fps, lo, hi, notch_f0=f0)
+        bpm, _ = autocorr_peak(sig, fps, int(round(lo * 60)), int(round(hi * 60)))
+        if bpm: cand.append(bpm)
+    if not cand:
+        return None, 0.0
+    frac = float(np.mean([c > split * 60 for c in cand]))
+    return float(np.median(cand)), frac
+
+
+def hr_fft_value(chans, fps, f0, lo, hi, topk=8):
+    """HR from median FFT peak in a band. Used for the TACHY value: once the band
+    is confirmed to START above the breathing-harmonic residue (>=1.7Hz), FFT
+    argmax is clean (no lower residue to halve into) and gives far finer
+    resolution than autocorr, whose integer-lag grid is coarse up here
+    (only ~3 lags span 102-132bpm @19fps)."""
+    s = np.array([sqi(bandpass(c, fps, lo, hi, notch_f0=f0), fps, lo, hi)
+                  for c in chans])
+    top = np.argsort(s)[::-1][:topk]
+    pk = []
+    for i in top:
+        ff = fft_peak(chans[i], fps, lo, hi)
+        if ff: pk.append(ff * 60)
+    hr = float(np.median(pk)) if pk else None
+    spread = float(np.std(pk)) if len(pk) > 1 else 99.0
+    return hr, spread, pk
+
+
+def estimate_hr(chans, fps, f0, topk=8, lo=1.0, hi=1.7,
+                tachy_hi=None, vote_frac=0.5):
+    """Arbitrated HR. Resting band [lo,hi]=[1.0,1.7] is the VALIDATED default and
+    is always what's returned unless tachy_hi is set AND a majority of SQI-top
+    bins show the cardiac period sitting above `hi` (region vote). The low edge
+    stays at `lo` in every path, so the 0.7-1.0Hz breathing-harmonic residue is
+    never re-admitted. Returns a result dict; band='HIGH' => tachycardia."""
+    low = hr_band_search(chans, fps, f0, lo, hi, topk)
+    out = dict(low=low, high=None, region=None, band="LOW", hr=low["hr"],
+               spread=low["spread"], strength=low["strength"], hr_bc=low["hr_bc"])
+    if tachy_hi and tachy_hi > hi:
+        med, frac = hr_region_vote(chans, fps, f0, lo, hi, tachy_hi, topk)
+        out["region"] = dict(median=med, frac_above=frac)
+        if med is not None and med > hi * 60 and frac >= vote_frac:
+            hr, spread, pk = hr_fft_value(chans, fps, f0, hi, tachy_hi, topk)
+            if hr is not None:
+                out.update(band="HIGH", hr=hr, spread=spread, strength=frac,
+                           high=dict(hr=hr, spread=spread, pk=pk))
+    return out
 
 
 def main():
@@ -83,6 +208,9 @@ def main():
     ap.add_argument("--t0", type=float, default=0.0)
     ap.add_argument("--t1", type=float, default=1e9)
     ap.add_argument("--topk", type=int, default=8)
+    ap.add_argument("--tachy", type=float, default=0.0,
+                    help="widen HR ceiling to this Hz (e.g. 2.2 = 132bpm) with "
+                         "high-band arbitration; 0 = disabled (validated resting)")
     a = ap.parse_args()
 
     d = np.load(a.path, allow_pickle=True)
@@ -92,33 +220,12 @@ def main():
     i0, i1 = int(a.t0 * a.fps), min(K, int(a.t1 * a.fps))
     C = cube[:, i0:i1, :]
 
-    # per-bin channel = PHASE of the coherently-combined complex (arctangent
-    # demodulation). Phase carries mm/sub-mm displacement (Δφ=4π·Δr/λ ≈ 2.5rad/mm
-    # @λ=5mm) — the amplitude/energy view threw that away. This is the standard
-    # radar vital-signs channel and gives HR/tremor 10-100× the amplitude SNR.
-    LAMBDA_MM = 5.0
-    chans = []
-    for i in range(len(bins)):
-        m = C[i].mean(0); m = m / (np.linalg.norm(m) + 1e-9)
-        z = C[i] @ m.conj()                       # complex per frame
-        phi = np.unwrap(np.angle(z))              # rad
-        disp_mm = -LAMBDA_MM / (4 * np.pi) * (phi - phi.mean())
-        chans.append(disp_mm)                     # mm displacement time series
-    chans = np.array(chans)                       # (nbin, T)
+    # per-bin PHASE demod -> mm displacement (see demod_channels). Phase carries
+    # mm motion (Δφ=4π·Δr/λ ≈ 2.5rad/mm @λ=5mm); the amplitude view threw it away.
+    chans = demod_channels(C, bins)               # (nbin, T)
 
-    # --- RR first: low-freq band, SQI-weighted FFT peak. Also gives f0 for HR. ---
-    rr_sqi = np.array([sqi(bandpass(c, a.fps, RR_LO, RR_HI), a.fps, RR_LO, RR_HI)
-                       for c in chans])
-    rr_top = np.argsort(rr_sqi)[::-1][:a.topk]
-    rr_f, rw = [], []
-    for i in rr_top:
-        ff = fft_peak(chans[i], a.fps, RR_LO, RR_HI)
-        if ff: rr_f.append(ff * 60); rw.append(rr_sqi[i])
-    # median (robust) not SQI-weighted: a couple of near bins carry low-freq
-    # artifact energy -> high SQI but a wrong (too-low) RR that skews the average.
-    rr = float(np.median(rr_f)) if rr_f else None
-    f0 = rr / 60.0 if rr else 0.25
-    rr_spread = float(np.std(rr_f)) if len(rr_f) > 1 else 99.0
+    # --- RR first: low-freq band, MEDIAN fft peak. Also gives f0 for HR notch. ---
+    rr, f0, rr_spread, rr_f = estimate_rr(chans, a.fps, a.topk)
     rr_conf = "HIGH" if rr_spread < 2 else ("MED" if rr_spread < 4 else "LOW")
     print(f"RR (median) = {rr:.0f} rpm  [{rr_conf}, bin-spread {rr_spread:.1f}]  "
           f"(f0={f0:.3f}Hz, 5th harm={5*f0*60:.0f}bpm)  per-bin: {[round(v) for v in rr_f]}")
@@ -130,27 +237,23 @@ def main():
     # low-freq residue. AUTOCORRELATION in [1.0-1.7Hz] (60-102bpm, resting-elderly
     # prior) is SNR-robust (responds to the period, not a single peak) and matched
     # Apple Watch across seated/side/lying (all ~81). Beat-count is a strong-signal
-    # cross-check. Widen HR_PHYS_HI only if tachycardia must be caught. ---
+    # cross-check. --tachy widens the ceiling with high-band arbitration. ---
     HR_PHYS_LO, HR_PHYS_HI = 1.0, 1.7
-    hr_sqi = np.array([sqi(bandpass(c, a.fps, HR_PHYS_LO, HR_PHYS_HI, notch_f0=f0),
-                           a.fps, HR_PHYS_LO, HR_PHYS_HI) for c in chans])
-    hr_top = np.argsort(hr_sqi)[::-1][:a.topk]
+    tachy_hi = a.tachy if a.tachy else None
+    res = estimate_hr(chans, a.fps, f0, a.topk, HR_PHYS_LO, HR_PHYS_HI, tachy_hi=tachy_hi)
+    lo_r = res["low"]
     print(f"HR band {HR_PHYS_LO}-{HR_PHYS_HI}Hz (physiological prior + RR-notch). "
-          f"top bins: " + ", ".join(f"{bins[i]}({bins[i]*DR:.2f}m)" for i in hr_top))
-    ac, bc = [], []
-    for i in hr_top:
-        sig = bandpass(chans[i], a.fps, HR_PHYS_LO, HR_PHYS_HI, notch_f0=f0)
-        aa = autocorr_bpm(sig, a.fps, int(HR_PHYS_LO * 60), int(HR_PHYS_HI * 60))
-        if aa: ac.append(aa)
-        bc.append(beat_count(sig, a.fps, hi_bpm=int(HR_PHYS_HI * 60)))
-    hr = float(np.median(ac)) if ac else None            # PRIMARY = autocorr@band
-    hr_bc = float(np.median(bc)) if bc else None
-    spread = float(np.std(ac)) if len(ac) > 1 else 99.0
-    conf = "HIGH" if spread < 3 else ("MED" if spread < 6 else "LOW")
-    print(f"  autocorr@band (PRIMARY) = {hr:.0f} bpm  [{conf}, bin-spread {spread:.1f}]  "
-          f"{[round(v) for v in ac]}")
-    print(f"  beat-count    (x-check) = {hr_bc:.0f} bpm   {[round(v) for v in bc]}")
-    print(f"  -> HR = {hr:.0f} bpm")
+          f"top bins: " + ", ".join(f"{bins[i]}({bins[i]*DR:.2f}m)" for i in lo_r["top"]))
+    conf = "HIGH" if lo_r["spread"] < 3 else ("MED" if lo_r["spread"] < 6 else "LOW")
+    print(f"  autocorr@band (PRIMARY) = {lo_r['hr']:.0f} bpm  [{conf}, bin-spread "
+          f"{lo_r['spread']:.1f}]  {[round(v) for v in lo_r['ac']]}")
+    print(f"  beat-count    (x-check) = {lo_r['hr_bc']:.0f} bpm")
+    if res["region"] is not None:
+        rg = res["region"]
+        print(f"  tachy vote {HR_PHYS_HI}-{tachy_hi}Hz: wide-period median="
+              f"{rg['median'] and round(rg['median'])}bpm frac>{HR_PHYS_HI}Hz={rg['frac_above']:.0%} "
+              f"-> {res['band']} band" + (f" (FFT {res['hr']:.0f}bpm)" if res['high'] else ""))
+    print(f"  -> HR = {res['hr']:.0f} bpm  [{res['band']}]")
 
 
 if __name__ == "__main__":
