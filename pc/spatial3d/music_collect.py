@@ -99,7 +99,10 @@ def _load_npz(path: str):
     """Load covariances (+ optional snapshot stacks) from a music_cov.npz."""
     data = np.load(path, allow_pickle=True)
     bins = data["bins"].astype(int)
-    covs = {int(b): data["covariances"][i] for i, b in enumerate(bins)}
+    # BinAccumulator captures (cap_*.py) save the per-bin matrices under "cov";
+    # the older live path used "covariances". Accept either.
+    cov_key = "covariances" if "covariances" in data else "cov"
+    covs = {int(b): data[cov_key][i] for i, b in enumerate(bins)}
     stacks = None
     if "snapshots" in data and "snap_bins" in data:
         sb = data["snap_bins"].astype(int)

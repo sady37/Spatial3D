@@ -39,7 +39,8 @@ def _load_cov(path):
     if "snapshots" in d:
         return Cube.load(path).covariances()
     bins = d["bins"].astype(int)
-    return {int(b): d["covariances"][i] for i, b in enumerate(bins)}
+    key = "covariances" if "covariances" in d else "cov"
+    return {int(b): d[key][i] for i, b in enumerate(bins)}
 
 
 def main():
