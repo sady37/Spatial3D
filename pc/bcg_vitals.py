@@ -114,11 +114,13 @@ def main():
     for i in rr_top:
         ff = fft_peak(chans[i], a.fps, RR_LO, RR_HI)
         if ff: rr_f.append(ff * 60); rw.append(rr_sqi[i])
-    rr = np.average(rr_f, weights=rw) if rr_f else None
+    # median (robust) not SQI-weighted: a couple of near bins carry low-freq
+    # artifact energy -> high SQI but a wrong (too-low) RR that skews the average.
+    rr = float(np.median(rr_f)) if rr_f else None
     f0 = rr / 60.0 if rr else 0.25
     rr_spread = float(np.std(rr_f)) if len(rr_f) > 1 else 99.0
     rr_conf = "HIGH" if rr_spread < 2 else ("MED" if rr_spread < 4 else "LOW")
-    print(f"RR (SQI-weighted) = {rr:.0f} rpm  [{rr_conf}, bin-spread {rr_spread:.1f}]  "
+    print(f"RR (median) = {rr:.0f} rpm  [{rr_conf}, bin-spread {rr_spread:.1f}]  "
           f"(f0={f0:.3f}Hz, 5th harm={5*f0*60:.0f}bpm)  per-bin: {[round(v) for v in rr_f]}")
 
     # --- HR: the FFT argmax over the whole HR band is fooled by breathing-
