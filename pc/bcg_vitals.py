@@ -123,34 +123,33 @@ def main():
     print(f"RR (median) = {rr:.0f} rpm  [{rr_conf}, bin-spread {rr_spread:.1f}]  "
           f"(f0={f0:.3f}Hz, 5th harm={5*f0*60:.0f}bpm)  per-bin: {[round(v) for v in rr_f]}")
 
-    # --- HR: the FFT argmax over the whole HR band is fooled by breathing-
-    # harmonic residue (halving error). Fixes: (1) start the band ABOVE the dense
-    # RR harmonics (~3.5·f0), (2) narrow-notch the RR harmonic comb, (3) use
-    # TIME-DOMAIN beat-count (primary; sharp beats survive, smooth harmonic
-    # doesn't) + autocorrelation (cross-check), not FFT argmax. ---
-    hr_lo = max(0.9, 3.5 * f0)
-    hr_sqi = np.array([sqi(bandpass(c, a.fps, hr_lo, HR_HI, notch_f0=f0),
-                           a.fps, hr_lo, HR_HI) for c in chans])
+    # --- HR: at ~4m the cardiac phase is WEAKER than the breathing-harmonic
+    # residue, so any "find the strongest peak" (FFT argmax, harmonic-sum, or
+    # coprime/CRT folding) locks onto the residue -> halving. No transform lifts a
+    # sub-noise signal; the lever is a PHYSIOLOGICAL BAND PRIOR that excludes the
+    # low-freq residue. AUTOCORRELATION in [1.0-1.7Hz] (60-102bpm, resting-elderly
+    # prior) is SNR-robust (responds to the period, not a single peak) and matched
+    # Apple Watch across seated/side/lying (all ~81). Beat-count is a strong-signal
+    # cross-check. Widen HR_PHYS_HI only if tachycardia must be caught. ---
+    HR_PHYS_LO, HR_PHYS_HI = 1.0, 1.7
+    hr_sqi = np.array([sqi(bandpass(c, a.fps, HR_PHYS_LO, HR_PHYS_HI, notch_f0=f0),
+                           a.fps, HR_PHYS_LO, HR_PHYS_HI) for c in chans])
     hr_top = np.argsort(hr_sqi)[::-1][:a.topk]
-    print(f"HR band {hr_lo:.2f}-{HR_HI:.1f}Hz (RR-adaptive + notched). top bins: "
-          + ", ".join(f"{bins[i]}({bins[i]*DR:.2f}m)" for i in hr_top))
-    bc, ac = [], []
+    print(f"HR band {HR_PHYS_LO}-{HR_PHYS_HI}Hz (physiological prior + RR-notch). "
+          f"top bins: " + ", ".join(f"{bins[i]}({bins[i]*DR:.2f}m)" for i in hr_top))
+    ac, bc = [], []
     for i in hr_top:
-        sig = bandpass(chans[i], a.fps, hr_lo, HR_HI, notch_f0=f0)
-        bc.append(beat_count(sig, a.fps))
-        aa = autocorr_bpm(sig, a.fps, int(hr_lo * 60), 150)
+        sig = bandpass(chans[i], a.fps, HR_PHYS_LO, HR_PHYS_HI, notch_f0=f0)
+        aa = autocorr_bpm(sig, a.fps, int(HR_PHYS_LO * 60), int(HR_PHYS_HI * 60))
         if aa: ac.append(aa)
-    hr = float(np.median(bc)) if bc else None            # PRIMARY = beat-count
-    hr_ac = float(np.median(ac)) if ac else None
-    # confidence from inter-bin beat-count agreement (a real HR is consistent
-    # across bins; harmonic artifacts scatter). autocorr is only a soft x-check —
-    # it locks onto the smooth breathing residue when that outpowers the beats.
-    spread = float(np.std(bc)) if len(bc) > 1 else 99.0
-    conf = "HIGH" if spread < 4 else ("MED" if spread < 8 else "LOW")
-    print(f"  beat-count (PRIMARY) = {hr:.0f} bpm  [{conf}, bin-spread {spread:.1f}]  "
-          f"{[round(v) for v in bc]}")
-    print(f"  autocorr   (x-check) = {hr_ac:.0f} bpm   {[round(v) for v in ac]}"
-          f"{'  (lagging — breathing residue)' if hr and hr_ac and hr - hr_ac > 8 else ''}")
+        bc.append(beat_count(sig, a.fps, hi_bpm=int(HR_PHYS_HI * 60)))
+    hr = float(np.median(ac)) if ac else None            # PRIMARY = autocorr@band
+    hr_bc = float(np.median(bc)) if bc else None
+    spread = float(np.std(ac)) if len(ac) > 1 else 99.0
+    conf = "HIGH" if spread < 3 else ("MED" if spread < 6 else "LOW")
+    print(f"  autocorr@band (PRIMARY) = {hr:.0f} bpm  [{conf}, bin-spread {spread:.1f}]  "
+          f"{[round(v) for v in ac]}")
+    print(f"  beat-count    (x-check) = {hr_bc:.0f} bpm   {[round(v) for v in bc]}")
     print(f"  -> HR = {hr:.0f} bpm")
 
 
