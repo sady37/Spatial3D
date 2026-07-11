@@ -67,9 +67,12 @@ def main():
         micro[i] = sp[fb[:k]].sum(); bre[i] = sp[breath[:k]].sum()
     rng = bins * dr
     pk = int(np.argmax(micro)); k = int(counts[pk])
-    sp = bin_spectrum(cube[pk, :k]); pos = freqs[:k] > 0
-    fpk = freqs[:k][pos][np.argmax(sp[pos])]
-    print(f"micro peak: bin{bins[pk]} R={rng[pk]:.2f}m  rate={fpk:.2f}Hz={fpk*60:.0f}/min  "
+    sp = bin_spectrum(cube[pk, :k])
+    # Rate = peak WITHIN the breathing band (0.15-0.5Hz). Taking the global argmax
+    # lets DC-leakage at ~0.02Hz win and reports a bogus ~1/min; restrict the search.
+    bb = (freqs[:k] >= 0.15) & (freqs[:k] <= 0.5)
+    fpk = freqs[:k][bb][np.argmax(sp[bb])]
+    print(f"micro peak: bin{bins[pk]} R={rng[pk]:.2f}m  breath-rate={fpk:.3f}Hz={fpk*60:.0f}/min  "
           f"peak/median={micro.max()/np.median(micro[micro>0]):.1f}x")
 
     if a.localize:
@@ -99,6 +102,7 @@ def main():
         ax[0].bar(rng, micro, width=dr * 2, color="teal")
         ax[0].set_xlabel("range (m)"); ax[0].set_ylabel("micro-motion (0.1-2.5Hz)")
         ax[0].set_title("base-free micro-motion vs range")
+        pos = freqs[:k] > 0
         ax[1].plot(freqs[:k][pos], sp[pos]); ax[1].axvspan(0.15, 0.5, color="orange", alpha=0.2)
         ax[1].set_xlim(0, 2.5); ax[1].set_xlabel("Hz"); ax[1].set_ylabel("|FFT|^2")
         ax[1].set_title(f"spectrum @ bin{bins[pk]} peak {fpk*60:.0f}/min")

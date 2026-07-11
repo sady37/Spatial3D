@@ -27,9 +27,20 @@ ALLB = range(87, 271)
 DR = 0.0234375
 
 
+# Optional {short-name: npz-path} override, set from --map. Lets the same table
+# be run over arbitrary captures (e.g. this session's emptyJ / evK) without
+# touching the hardcoded historical mapping below.
+OVERRIDE: dict[str, str] = {}
+
+
 def load_cov(name):
     """Return {bin: 16x16 cov} for a short capture name."""
     import os
+    if name in OVERRIDE:
+        d = np.load(OVERRIDE[name], allow_pickle=True)
+        bins = d["bins"].astype(int)
+        key = "cov" if "cov" in d else "covariances"
+        return {int(b): d[key][i] for i, b in enumerate(bins)}
     if name in "ABCDE":
         d = np.load("reset_ab.npz", allow_pickle=True)
         bins = d["bins"].astype(int)
@@ -89,7 +100,11 @@ def main():
     ap.add_argument("--pairs", default="A-B,A-C,A-D,A-E,A-G,G-H,A-H,A-I,H-I")
     ap.add_argument("--music", action="store_true",
                     help="also compute MUSIC point-cloud + energy columns (slow)")
+    ap.add_argument("--map", default="",
+                    help="override capture files, e.g. A=empty_A.npz,J=emptyJ.npz")
     a = ap.parse_args()
+    if a.map:
+        OVERRIDE.update(dict(kv.split("=") for kv in a.map.split(",")))
     pairs = [tuple(p.split("-")) for p in a.pairs.split(",")]
     names = sorted({n for p in pairs for n in p})
 
