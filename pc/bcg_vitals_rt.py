@@ -25,6 +25,81 @@ import numpy as np
 from bcg_vitals import (demod_channels, estimate_rr, estimate_hr, hr_band_search,
                         occupancy, bandpass, sqi, fft_peak, autocorr_peak,
                         beat_count, RR_LO, RR_HI)
+try:
+    from scipy.stats import theilslopes
+    _HAVE_THEIL = True
+except Exception:
+    _HAVE_THEIL = False
+
+
+# ============================================================================
+# ELEVATED/recovering HR (post-exercise tachycardia) — segment-slope detector.
+# ============================================================================
+# HARD FINDING (2026-07-11, see pc/NEXT.md): the per-window HR MISSES post-exercise
+# tachycardia because a SWEEPING rate (e.g. 131->91bpm as the heart recovers) cannot
+# be band-integrated the way a stationary resting HR is — full-record autocorr smears
+# it to ~70-81. But the DESCENT itself is a robust, clinically meaningful signal ("HR
+# elevated and recovering"). So: cut the record into ~15s quasi-stationary segments,
+# take a WIDE-band [1.0-2.5] autocorr HR per segment (no resting cap), and test for a
+# significant DOWNWARD trend (Theil-Sen slope + permutation p). Absolute per-segment
+# bpm is noisy (+-31) so ONLY the slope sign is trusted. Validated on the cubes:
+# fires on near-range post-exercise (tachy2: slope -17bpm/rec, p=0.06), SILENT on 5
+# resting cubes (sit39/lie41/sidesit/fall20/tachy3 -> 0 false alarms). LIMITATION:
+# misses FAR-range tachy (tachy1 @3.9m, slope only -7) — per-segment SNR falls with
+# range, so this is a NEAR-range (<~2.5m) capability. Thresholds are a scaffold from
+# ONE near-range positive (tachy2, borderline p) and need more near post-exercise
+# captures to anchor. Pure post-hoc add-on; does not touch the validated HR core.
+ELEV_SEG_S, ELEV_STEP_S = 15.0, 5.0
+ELEV_LO, ELEV_HI = 1.0, 2.5
+ELEV_SPREAD_MAX = 20.0            # drop noisy segments (inter-bin std) before the fit
+ELEV_SLOPE_MIN = -8.0            # bpm over whole record: more negative => descending
+ELEV_P_MAX = 0.10               # permutation p that the slope is <= observed
+
+
+def _perm_p_slope(t, hr, obs_slope, n=400):
+    """Permutation p-value that a descending slope this steep arises by chance:
+    fraction of time-shuffled series whose Theil-Sen slope <= obs_slope. Uses a
+    deterministic roll/reverse family (no RNG -> reproducible)."""
+    if not _HAVE_THEIL or len(hr) < 5:
+        return 1.0
+    cnt = tot = 0
+    for k in range(n):
+        h = np.roll(hr, k % len(hr))
+        if (k // len(hr)) % 2:
+            h = h[::-1]
+        s = theilslopes(h, t)[0]
+        cnt += (s <= obs_slope); tot += 1
+    return cnt / max(1, tot)
+
+
+def elevated_hr_trend(cube, bins, fps, seg_s=ELEV_SEG_S, step_s=ELEV_STEP_S):
+    """Post-hoc 'HR elevated & recovering' detector (see block comment). Returns
+    dict(elevated, slope_rec, p, n_seg, series=[(t,hr,spread)])."""
+    K = cube.shape[1]; n = int(seg_s * fps); step = int(step_s * fps)
+    # single full-record f0 for the RR-notch (a per-segment f0 on 15s is noisy and
+    # shifts the notch each segment, which flattens the very descent we're detecting)
+    _, f0, _, _ = estimate_rr(demod_channels(cube, bins), fps)
+    t, hr, sp = [], [], []
+    for s in range(0, K - n + 1, step):
+        ch = demod_channels(cube[:, s:s + n, :], bins)
+        if not occupancy(ch, fps)["present"]:          # only trend a present person
+            continue
+        r = hr_band_search(ch, fps, f0, ELEV_LO, ELEV_HI, topk=8)
+        if r["hr"]:
+            t.append(s / fps + seg_s / 2); hr.append(r["hr"]); sp.append(r["spread"])
+    t, hr, sp = np.array(t), np.array(hr), np.array(sp)
+    out = dict(elevated=False, slope_rec=0.0, p=1.0, n_seg=len(hr),
+               series=list(zip(t.tolist(), hr.tolist(), sp.tolist())))
+    if len(hr) < 5 or not _HAVE_THEIL:
+        return out
+    keep = sp <= ELEV_SPREAD_MAX
+    tk, hk = (t[keep], hr[keep]) if keep.sum() >= 5 else (t, hr)
+    slope = theilslopes(hk, tk)[0]
+    rec = float(t[-1] - t[0]) if len(t) > 1 else 0.0
+    out["slope_rec"] = slope * rec
+    out["p"] = _perm_p_slope(tk, hk, slope)
+    out["elevated"] = (out["slope_rec"] < ELEV_SLOPE_MIN) and (out["p"] < ELEV_P_MAX)
+    return out
 
 
 # ============================================================================
@@ -326,6 +401,13 @@ def main():
     for r in rows: af_ct[r[7]] = af_ct.get(r[7], 0) + 1
     n_alert = sum(1 for r in rows if r[9])
     print("AF states:", af_ct, f"| sustained-alert windows: {n_alert}")
+
+    # ELEVATED/recovering HR (post-exercise) — segment-slope, post-hoc add-on
+    ev = elevated_hr_trend(cube, bins, a.fps)
+    tag = ("  <<< HR ELEVATED / RECOVERING (post-exercise)" if ev["elevated"]
+           else "(no significant descent)")
+    print(f"elevated-trend: {ev['n_seg']} seg, slope={ev['slope_rec']:+.0f}bpm/rec "
+          f"p(desc)={ev['p']:.2f} -> {tag}")
     if a.plot:
         plot(rows, a.plot, f"Continuous HR — {a.path}  (win {a.win:.0f}s, hop {a.hop:.1f}s)")
 

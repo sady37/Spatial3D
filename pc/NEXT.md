@@ -2,6 +2,84 @@
 
 接续:实时连续 HR 输出 + 心动过速。本文件是新会话的提示词/交接。
 
+## 🟢🟢 tachy2 破了(2026-07-12) — Bessel 谐波梳拟合 + 心跳超出量
+
+**用户三洞察连成的方法(终于把 tachy2 从 66-81 谐波锁里拉出来):**
+1. HR 比 RR 密、且不与呼吸锁相 → 减掉周期呼吸,异步心跳存活(挡心跳的是**周期的呼吸谐波**,不是噪声——非周期噪声挡不住周期检测)。
+2. 对手是呼吸谐波**梳**。
+3. **PM 信号 z=A·e^{jβsin(2πf0t)} 的谐波幅度精确 = |J_n(β)|(贝塞尔,固定公式)**。
+
+**做法**(`bessel_fit.py`):在**复信号**上量 n·f0 谐波幅度 → 从干净低次(n=1-4,无心跳,HR>90=n≥5)**拟合 β** → 用 c·|J_n(β)| 预测呼吸梳 → **减掉,残差(超出量)= 心跳** → 逐20s段超出量质心 → HR。
+
+**结果**:**tachy2 读中位 133(真131)**——首个拉出来的方法;阈值 >110 时,强 tachy(tachy2 133、sport33 118)与**全部静息(tachy3 97/sit39 103/lie41 81/sit33 54/fall20 59)清楚分开,零误报**。
+- 为什么之前 excess 失败:log 直线是**错模型**——实测衰减比值 2.4→1.5→1.1 **平台化 = Bessel 平台**(J_n 在 n<β 平),用户一句"固定波形衰减是固定公式"点破。
+- 已证 **unwrap 不是元凶**(`harmonic_decay.py`:稳健 dφ==unwrap)。
+
+**边界**:只对**强 tachy(>~115)**;余量薄(强133 vs 高静息103 差~30bpm),轻度 105-110 与高静息重叠;逐段 β 拟合抖(需整段中位);需近距强信号。
+**下一步**:加**局部鼓包判据**(A_n 同时>两邻+>基线)砍掉薄余量假阳、鲁棒 β 拟合 → 固化成检测器进 `bcg_vitals_rt.py`;采一份**近距(~2m)运动后**验证。
+文件:`bessel_fit.py`(检测器)、`tachy2_excess_track.py`、`harmonic_decay.py`、`harmonic_excess.py`、`template_readout.py`、`peak_cycle_probe.py`、`tachy2_separate.py`、`tachy2_spatial_track.py`。
+
+## 🔧 硬件/采集(2026-07-12)
+
+- **动态 CLI 改 bin range:当前固件不支持**(`verify_dynamic_window.py` 实测:流式中发 `rangeAntennaOutput` → `[NO-Done]`,start_bin 不动)。handler 无守卫、TLV 每帧现读,但 CLI 任务流式中不派发 → 要重编固件(卡工具链)。**用开机固定窗口即可**。
+- **20fps 上限 ~44bin(≈1.0m),不是 1.5m**:64bin@20fps **wedge**(唯一差异 = rangeAntennaOutput 64→103 bin)。RA TLV=4+numBins·16·4B,1.25Mbaud 计 9µs/B,超 50ms 帧即丢帧。全房 1.8-4.2m(103bin)需:10fps,或 baud≥2M(SysConfig 重编,且 baud≠1.25M 绕过丢帧检查),或片上 16→1 投影。
+- **现场 3.3m 双验证**:44bin 窗 @startBin119(2.79-3.80m)稳采 90-120s。`sit33_cube.npz`(静息 HR81✓/占用✓/斜率正确判平)、`sport33_cube.npz`(运动后 RR 9→19,真 HR 101→106→82)。
+- **cfg**:`profile_vitals_win64.cfg`(64bin,wedge,留作警示)、`profile_vitals_1p8_4p2.cfg`(103bin,需 baud/10fps)、操作用 `profile_fall_20fps_near.cfg`(44bin 稳)。
+- **Scheme C 相位编解码**(`scheme_c.py`):传 int16 wrapped phase(管线只用相位)= 103bin 31kbps,对 HR/RR/占用**无损**,但 tachy 特征丢(需逐窗16天线)。
+
+## 🟢 tachy 突破(2026-07-11) — 运动后 tachy 可检测为"偏高/恢复中"(分段斜率)
+
+**根因精确化**:运动后 HR 是**单调下降的扫频**(131→91 边恢复边降),**无法像静息平稳 HR 那样长积分**
+(整段自相关糊成 70-81);静息能测正因为它平稳(可长积分),TI demo 同理。**修法(有效)**:整段切
+~15s 准平稳段 → 每段宽带 [1.0-2.5] 自相关 HR → **Theil-Sen 斜率 + 置换检验**判显著下降。
+**验证**:近距 tachy2 触发(斜率 −17bpm/rec,p=0.06 → "HR ELEVATED/RECOVERING");
+**5 份静息全静默(sit39/lie41/sidesit/fall20/tachy3 → 0 误报)**。绝对 bpm 仍吵(±31),**只信斜率符号**。
+**局限**:远距 tachy1(@3.9m,斜率仅 −7)漏——单段信噪随距离掉,这是**近距(≤~2.5m)能力**;
+阈值(slope<−8,p<0.1)是单例脚手架,需更多近距运动后采集锚定。**已固化进 `bcg_vitals_rt.py`
+的 `elevated_hr_trend()`,纯事后附加,不碰已验证核心**(加时踩坑:RR-notch 必须用**整段单一 f0**,
+逐15s段 f0 太吵会抹平下降→斜率归零)。契合你"除 S 外全下降"的观察。探针:`segment_autocorr.py`、
+`robust_slope.py`。失败的空间/时域探针(`spatial_*`/`tachy_*`/`respgate`/`phase_deharm`/
+`synced_template`/`destat_track`/`harmonic_map`)留作死路证据。
+
+## 🟡 空间源分离已试(2026-07-11 下轮·6个探针) — 信号在,但"选 bin"才是死结
+
+按蓝图 lever 1 实做了空间分离。关键:此前所有方法都跑在 `demod_channels` 用均值导向矢量把
+16天线塌成1路(bcg_vitals.py:116)**之后** —— 空间轴在第一步就被丢了。新探针保留逐天线相位,
+用**呼吸谐波梳**估计呼吸空间子空间,投影到其正交补(一次性消掉分布式源**及其所有频率上的 PM 谐波**——
+频率法永远做不到的事)。结果:
+
+- **呼吸空间秩 ≈ 6/16**(分布式,已量化);2-4m 处**与心脏角度支撑重叠** → 16天线阵**无法**用波束
+  把心前区从膈肌分开。在呼吸-SQI bin 上做 MaxSNR/GEVD 失败(仍 60-88bpm)——那些 bin 就是膈肌。
+- **Oracle 选 bin**(44个 bin 里取 tachy帧占比 argmax)下,呼吸消零残差**真的**浮现脊线:
+  tachy2 的 **bin 65(~1.5m,非SQI bin)读中位 113bpm 且跟踪已知 131→110→91 下降**(116→120→105);
+  静息 sit39 保持 ~79。**tachy 信息确实在——藏在一个专门的非SQI(心前区)bin。**
+- **但答案无关的自动选 bin 失败**(`tachy_verdict.py`,evidence=高频占比×脊线稳定度×√能量份额):
+  盲规则选错 bin → **两份 tachy 都漏(读90)**,且**空房误报 56%**(bin 171,105bpm)。持续高频脊线是
+  **噪声的属性**(空房也造得出)——和 FFT 投票同一死法,**零余量**。
+- **结论**:lever 1 未被证伪但未兑现——空间消零只在**已知哪个 bin 是心前区**时才暴露信号。
+  死结从"频率 vs 空间"移到了**心前区 bin 的盲选**。
+  探针:`spatial_sep_probe.py`(v1 GEVD)、`spatial_null_probe.py`(子空间消零)、
+  `tachy_existence_probe.py`+`tachy_existence_spatial.py`(持续性检验)、
+  `tachy_ridge_track.py`(下降跟踪)、`tachy_verdict.py`(盲验证矩阵)。
+
+**选bin死结已穷尽**:试了答案无关选bin器——高频占比、残差能量、held-rate连续性
+(`continuity_selector.py`)、平滑轨迹连续性(`smooth_selector.py`,非重叠6s,低二阶差)。全败:
+oracle bin65 在平滑度上排 **38/44**,能量/高频占比也非最高——与 ~40% 出持续高频脊线的噪声/静息
+bin 无法内在区分(空房造出 56%/111bpm)。几何铁证:bin65=1.5m,在 2.1m 人体**前方 0.6m**,
+解剖上不可能是心前区偏移(~10-20cm)→ **bin65 是幸运跟踪伪影,非真心脏点源**。无盲规则能找到它。
+**累计 17 频率 + 8 空间/选bin 探针,无一召回 tachy 数值。**
+
+**决定 = 诚实交付**(用户 2026-07-11):静息 HR 已验证(全部读 ~80;rest_near 真84-87、sit39 真81
+均**正确**);tachy 数值**不可从单份2min静态采集恢复,列为范围外**,至多作"偏高/不确定"提示。
+占用门验证(全 PERSON;空房抑制)。RR 是**弱间接**代理(tachy1/2 RR 18-19 vs 静息 10-14,但
+sit39=14/tachy3=16 重叠;呼吸≠心率,仅5点)——只能作明确标注的不确定标志,**不作 bpm 断言**。
+待办:P/Q/S 新数据到位后确认(需文件名+fps)再收尾。探针脚本留作死路证据。
+
+**数据清理(2026-07-11)**:今日代表对 = **Q=`tachy2_cube.npz`**(sported 2.1m,真128-91)、
+**S=`tachy3_cube.npz`**(normal,真84-87)。今日冗余采集已删:`tachy1_cube`、`rest_near_cube`、
+`emptyT_cube`、`warmup20/39`、`fps_test_20`(结论保留在本文/memory,原始文件不再需要)。
+保留静息回归集:`sit39/sidesit/lie41/fall20_cube.npz`。P(sidesit 3.4m 135-95 4min)未传到 Mac。
+
 ## 🔴 关键发现(2026-07-11 近距 tachy 定论 — 待下轮攻坚)
 
 **tachy 漏检是算法问题,不是 SNR。** 采了两份真实运动后数据(对 Apple Watch):
