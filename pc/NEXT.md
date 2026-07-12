@@ -2,6 +2,20 @@
 
 接续:实时连续 HR 输出 + 心动过速。本文件是新会话的提示词/交接。
 
+## ✅ 已完成(2026-07-11 占用门 = 关键修复)
+
+- **发现真负失败**:录 4min 空房 `emptyT_cube.npz`(sidesit 几何,18.8fps),空房(无人)被
+  误判 **HR=120[HIGH 心动过速] + 145/151 窗持续 AF ALERT**。根因:整链缺"有没有人"的门 —
+  ① tachy 宽带自相关能锁噪声周期>1.7Hz;② AF 存在性门(心脏带/呼吸带能量比)假设"呼吸总在",
+  空房无呼吸→分母趋零→比值爆表→放行噪声。之前四份有人 AF 全 indeterminate 只是碰巧有人。
+- **占用门 `occupancy()` (核心新增,纯附加)**:判据 = **呼吸带位移 RMS**(相位解调绝对 mm)。
+  实测空房 ~1um vs 有人 ≥10um@15s 窗(8× 干净分开,所有窗尺度成立);`rr_spread` 在窗尺度
+  无判别力(空 5-11 vs 有人 4-10 重叠)已弃用只做诊断。**阈值 disp≥4um**。main+RT 都先判占用,
+  无人→抑制 HR/tachy、AF 记 `no_person`(不进警报)、卡尔曼 coast。
+- **回归**:空房 151/151 NO PERSON、**0 假警报**(原 145);四份有人全覆盖、HR 基线逐一保持
+  (RT 78.4/78.2/76.8/80.1;核心 main 81/81/87/81 不变)。标定脚本 `occupancy_probe.py`/
+  `occ_window_probe.py`。见 memory `vitals-occupancy-gate`、`pc/case-test.md`。
+
 ## ✅ 已完成(2026-07-11 合并 web 分支)
 
 - **AF 房颤判别**(从 web `hr_continuous.py` 移植进 `bcg_vitals_rt.py`,纯附加不碰核心):

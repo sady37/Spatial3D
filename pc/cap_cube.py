@@ -34,6 +34,10 @@ ap.add_argument("dur", type=float, nargs="?", default=55.0, help="capture second
 ap.add_argument("--cfg", default=CFG_DEFAULT)
 ap.add_argument("--reconfig", action="store_true",
                 help="force sensorStop->send cfg->sensorStart (needed to change fps)")
+ap.add_argument("--preheat", type=float, default=None,
+                help="override RF preheat seconds after sending cfg. Unit is "
+                     "thermally warm (always-on) -> PLL/VCO re-lock takes seconds, "
+                     "not the conservative 120s cold thermal settle. e.g. --preheat 25")
 a = ap.parse_args()
 
 s = RadarSession(CLI, DATA); s.start_drain()
@@ -52,8 +56,9 @@ if a.reconfig or live < 5:
     print(f"sending cfg {os.path.basename(a.cfg)} ...", flush=True)
     s.send_cfg(a.cfg, echo=False)
     warm = live >= 5                    # RF already warm if it was streaming
-    pre = 30 if warm else 120
-    print(f"{'warm' if warm else 'cold'} preheat {pre}s", flush=True)
+    pre = a.preheat if a.preheat is not None else (30 if warm else 120)
+    lbl = "override" if a.preheat is not None else ("warm" if warm else "cold")
+    print(f"{lbl} preheat {pre:.0f}s", flush=True)
     t0 = time.time()
     while time.time() - t0 < pre: s.get_frame(timeout=0.5)
 else:

@@ -23,8 +23,8 @@ import argparse
 from collections import deque
 import numpy as np
 from bcg_vitals import (demod_channels, estimate_rr, estimate_hr, hr_band_search,
-                        bandpass, sqi, fft_peak, autocorr_peak, beat_count,
-                        RR_LO, RR_HI)
+                        occupancy, bandpass, sqi, fft_peak, autocorr_peak,
+                        beat_count, RR_LO, RR_HI)
 
 
 # ============================================================================
@@ -209,6 +209,14 @@ def run(cube, bins, fps, win_s=15.0, hop_s=1.5, tachy_hi=None,
     for i in range(0, max(1, T - w + 1), hop):
         C = cube[:, i:i + w, :]
         chans = demod_channels(C, bins)
+        t = (i + w / 2) / fps
+        # OCCUPANCY gate first: no person -> suppress vitals, coast, no AF/tachy.
+        occ = occupancy(chans, fps)
+        if not occ["present"]:
+            af_hist.append("no_person")
+            rows.append((t, np.nan, kf.coast(), "noperson", 99.0, "LOW", 0.0,
+                         "no_person", 0.0, False))
+            continue
         _, f0, _, _ = estimate_rr(chans, fps)
         res = estimate_hr(chans, fps, f0, tachy_hi=tachy_hi, interp=True)
         hr_meas, spread, band = res["hr"], res["spread"], res["band"]
@@ -216,7 +224,6 @@ def run(cube, bins, fps, win_s=15.0, hop_s=1.5, tachy_hi=None,
         af = af_metrics(chans, fps, f0)            # rhythm regularity (gated)
         af_hist.append(af["state"])
         af_alert = sum(s == "af_suspected" for s in af_hist) >= 4  # sustained >~10s
-        t = (i + w / 2) / fps
         if hr_meas is None:
             rows.append((t, np.nan, kf.coast(), "none", 99.0, band, quality,
                          af["state"], af["concentration"], af_alert)); continue

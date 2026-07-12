@@ -22,6 +22,14 @@ HR_HI = 2.5                 # 150 bpm ceiling
 RR_LO, RR_HI = 0.12, 0.6    # 7-36 rpm
 DR = 0.0234375
 LAMBDA_MM = 5.0             # radar wavelength (λ=5mm) for phase->displacement
+# Occupancy gate — measured empty vs 4 occupied at 15/30/45s windows
+# (occupancy_probe.py / occ_window_probe.py). resp-band chest displacement RMS is
+# the clean discriminator at EVERY window scale: empty <=1.4um vs occupied >=6um
+# (>=8x gap). Inter-bin RR spread does NOT separate at window scale (empty
+# 5-11rpm vs occupied 4-10rpm overlap) so it is diagnostic only, NOT gated on.
+# Present iff displacement clears the floor. See memory vitals-occupancy-gate.
+BREATH_DISP_MIN = 0.004     # mm, RMS resp-band displacement floor (empty ~0.001,
+                            # occupied@15s >=0.010; 4um -> empty clean, big margin)
 
 
 def bandpass(x, fps, lo, hi, notch_f0=None, notch_hw=0.022, notch_n=25):
@@ -126,6 +134,33 @@ def estimate_rr(chans, fps, topk=8):
     f0 = rr / 60.0 if rr else 0.25
     spread = float(np.std(rr_f)) if len(rr_f) > 1 else 99.0
     return rr, f0, spread, rr_f
+
+
+def occupancy(chans, fps, topk=8):
+    """Presence gate from BREATHING COHERENCE — the upstream 'is a person here?'
+    check that HR/tachy/AF all depend on. A stationary person has coherent
+    breathing (0.12-0.6Hz): real mm-scale chest displacement AND the same rate
+    across chest bins. Empty-room noise has ~1um displacement and scattered
+    per-bin rates, which otherwise fools every estimator into false vitals
+    (empty room -> false 120bpm tachycardia + sustained AF alert). Returns
+    dict(present, disp_rms, rr_spread, rr_med). present iff BOTH the displacement
+    floor and the inter-bin agreement ceiling say a person is there."""
+    resp_sqi = np.array([sqi(bandpass(c, fps, RR_LO, RR_HI), fps, RR_LO, RR_HI)
+                         for c in chans])
+    top = np.argsort(resp_sqi)[::-1][:topk]
+    rr_f, rms = [], []
+    for i in top:
+        b = bandpass(chans[i], fps, RR_LO, RR_HI)
+        ff = fft_peak(chans[i], fps, RR_LO, RR_HI)
+        if ff:
+            rr_f.append(ff * 60)
+        rms.append(float(np.sqrt(np.mean(b ** 2))))          # mm displacement RMS
+    disp_rms = float(np.median(rms)) if rms else 0.0
+    rr_spread = float(np.std(rr_f)) if len(rr_f) > 1 else 99.0   # diagnostic only
+    rr_med = float(np.median(rr_f)) if rr_f else 0.0
+    present = disp_rms >= BREATH_DISP_MIN
+    return dict(present=present, disp_rms=disp_rms, rr_spread=rr_spread,
+                rr_med=rr_med)
 
 
 def hr_band_search(chans, fps, f0, lo, hi, topk=8, interp=False):
@@ -237,6 +272,16 @@ def main():
     # per-bin PHASE demod -> mm displacement (see demod_channels). Phase carries
     # mm motion (Δφ=4π·Δr/λ ≈ 2.5rad/mm @λ=5mm); the amplitude view threw it away.
     chans = demod_channels(C, bins)               # (nbin, T)
+
+    # --- OCCUPANCY gate FIRST: no coherent breathing => no person => suppress all
+    # vitals (else empty-room noise reads as false 120bpm tachycardia + AF). ---
+    occ = occupancy(chans, a.fps, a.topk)
+    print(f"occupancy: disp_rms={occ['disp_rms']*1000:.2f}um "
+          f"rr_spread={occ['rr_spread']:.1f}rpm -> "
+          f"{'PERSON' if occ['present'] else 'NO PERSON'}")
+    if not occ["present"]:
+        print("  -> NO PERSON: vitals suppressed (no reliable HR/RR/AF).")
+        return
 
     # --- RR first: low-freq band, MEDIAN fft peak. Also gives f0 for HR notch. ---
     rr, f0, rr_spread, rr_f = estimate_rr(chans, a.fps, a.topk)
