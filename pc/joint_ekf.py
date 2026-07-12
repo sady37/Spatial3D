@@ -38,6 +38,39 @@ FPS = 18.78
 KR = 8          # breathing harmonics (0.3Hz*8 ~ 2.5Hz covers the comb into cardiac band)
 KH = 1          # cardiac harmonics (fundamental; shape=sinusoid for M1, template=M2)
 
+# M2 JKL cardiac template: phase-folded from sit33 @20fps (clean resting, 105 cycles),
+# unit-RMS Fourier coeffs {p_m,q_m}_1..4 (learn_jkl_template.py). Per-harmonic spectral
+# SNR (peak/local-floor): 1f 1.4x, 2f 2.1x, 3f 1.2x, 4f 1.2x -> 2f is the real JKL
+# fingerprint; 3f/4f sit on the noise floor at 3.3m. Default --tM 3 uses {1f,2f,3f};
+# the 4f term is dropped (near-noise, and 4*omega_H aliases past Nyquist at tachy where
+# it drove an omega_H runaway that locked tachy3 to 150). The 2f fingerprint enters the
+# [0.10,3.2]Hz obs band exactly as HR drops below ~96bpm -- i.e. right in tachy2's
+# 91~5*RR overlap tail, letting the oscillator hold the descent where a sinusoid can't.
+TEMPLATE_P = np.array([-1.209, -0.176, -0.306, -0.534])
+TEMPLATE_Q = np.array([-0.068,  0.283, -0.167,  0.124])
+
+
+def _tmpl(ph, p, q):
+    """JKL template as an ANALYTIC PAIR at cardiac phase ph:
+      Tc(ph) = sum_m p_m cos(m ph)+q_m sin(m ph)      (in-phase)
+      Ts(ph) = sum_m p_m sin(m ph)-q_m cos(m ph)      (quadrature = Hilbert of Tc)
+    Observation y_H = a_H*Tc + b_H*Ts: (a_H,b_H) give amplitude + a global phase anchor
+    (linear, stable like M1's a,b) while the per-harmonic MAGNITUDES |h_m|=|p_m,q_m| stay
+    LOCKED under that rotation -- so the 2f/3f/4f fingerprint that breathing can't fake is
+    preserved. Returns (Tc, Ts, dTc/dph, dTs/dph)."""
+    m = np.arange(1, len(p) + 1)
+    c, s = np.cos(m * ph), np.sin(m * ph)
+    Tc = float(np.sum(p * c + q * s)); Ts = float(np.sum(p * s - q * c))
+    dTc = float(np.sum(m * (-p * s + q * c))); dTs = float(np.sum(m * (p * c + q * s)))
+    return Tc, Ts, dTc, dTs
+
+
+def _tmpl_cols(phi, p, q):
+    """[Tc, Ts] regressor columns over a phase vector (for ls_init), shape (T,2)."""
+    m = np.arange(1, len(p) + 1)
+    cph = np.cos(np.outer(phi, m)); sph = np.sin(np.outer(phi, m))
+    return np.stack([cph @ p + sph @ q, cph @ q * -1 + sph @ p], axis=1)
+
 
 def set_KR(k):
     global KR
@@ -91,13 +124,21 @@ def seed_fh0(y, fps, f0, warm_s=30.0):
     return pk if pk else 1.5
 
 
-def ls_init(y, fps, f0, fh0, warm_s=15.0):
-    """Least-squares seed of all harmonic coeffs over a warmup window, with
-    phi_R=2pi f0 t and phi_H=2pi fh0 t (so phi_R(0)=phi_H(0)=0)."""
+def ls_init(y, fps, f0, fh0, template=None, warm_s=15.0):
+    """Least-squares seed of all harmonic coeffs over a warmup window, phi_R=2pi f0 t.
+    M1 (template=None): free cardiac comb, phi_H=2pi fh0 t -> coef len 2KR+2KH.
+    M2 (template=(p,q)): cardiac columns = [Tc, Ts] of the JKL template; (a_H,b_H) carry
+    amplitude + anchor linearly -> coef len 2KR+2. phi_H(0)=0."""
     n = min(len(y), int(warm_s * fps)); t = np.arange(n) / fps
-    G = _regressors(2 * np.pi * f0 * t, 2 * np.pi * fh0 * t, KR, KH)
+    phiR = 2 * np.pi * f0 * t
+    if template is None:
+        G = _regressors(phiR, 2 * np.pi * fh0 * t, KR, KH)
+    else:
+        p, q = template
+        G = np.hstack([_regressors(phiR, phiR, KR, 0),
+                       _tmpl_cols(2 * np.pi * fh0 * t, p, q)])
     coef, *_ = np.linalg.lstsq(G, y[:n], rcond=None)
-    return coef                                      # len 2KR+2KH
+    return coef
 
 
 # ------------------------------------------------------------------ EKF + RTS
@@ -109,7 +150,7 @@ WR_LO, WR_HI = 0.13, 0.55   # breathing freq clamp Hz
 
 def run(y, fps, f0, fh0,
         s_wR=0.04, s_wH=0.05, s_cR=0.03, s_cH=0.02, s_pR=0.003, s_pH=0.003,
-        antiharm=0.0):
+        antiharm=0.0, template=None, pwH0=0.10):
     """Forward EKF + RTS smoother. Process-noise stds are per-sqrt(second):
        s_wR/s_wH angular-freq drift (s_wH SMALL = HR continuity),
        s_cR/s_cH harmonic-coeff drift, s_pR/s_pH phase jitter.
@@ -120,7 +161,11 @@ def run(y, fps, f0, fh0,
     cannot silently merge into a breathing-comb tooth (see brief 'lock harmonic').
     Returns dict with smoothed fR(bpm), fH(bpm), cardiac amplitude, filtered fH."""
     T = len(y); dt = 1.0 / fps
-    nR, nH = 2 * KR, 2 * KH
+    use_t = template is not None
+    if use_t:
+        p_t, q_t = template
+    nR = 2 * KR
+    nH = 2 if use_t else 2 * KH   # M2: (a_H,b_H) on [Tc,Ts]; M1: {a,b}_H comb
     n = 2 + nR + 2 + nH
     iPR, iWR = 0, 1
     iCR = 2                     # breathing coeffs iCR .. iCR+nR
@@ -131,12 +176,12 @@ def run(y, fps, f0, fh0,
     x = np.zeros(n)
     x[iWR] = 2 * np.pi * f0
     x[iWH] = 2 * np.pi * fh0
-    coef = ls_init(y, fps, f0, fh0)
+    coef = ls_init(y, fps, f0, fh0, template=template)
     x[iCR:iCR + nR] = coef[:nR]
     x[iCH:iCH + nH] = coef[nR:nR + nH]
     P = np.eye(n) * 1e-3
     P[iWR, iWR] = (2 * np.pi * 0.03) ** 2
-    P[iWH, iWH] = (2 * np.pi * 0.10) ** 2            # modest: trust the seed, avoid a jump
+    P[iWH, iWH] = (2 * np.pi * pwH0) ** 2            # smaller = trust the seed, avoid a jump
     for j in range(iCR, iCR + nR): P[j, j] = 1.0
     for j in range(iCH, iCH + nH): P[j, j] = 0.5
 
@@ -171,12 +216,19 @@ def run(y, fps, f0, fh0,
             dPR += k * (-a * sk + b * ck)
         H[iPR] = dPR
         dPH = 0.0
-        for m in range(1, KH + 1):
-            c, dd = xpr[iCH + 2 * (m - 1)], xpr[iCH + 2 * (m - 1) + 1]
-            cm, sm = np.cos(m * ph), np.sin(m * ph)
-            yhat += c * cm + dd * sm
-            H[iCH + 2 * (m - 1)] = cm; H[iCH + 2 * (m - 1) + 1] = sm
-            dPH += m * (-c * sm + dd * cm)
+        if use_t:                                    # M2: y_H = a_H*Tc + b_H*Ts, {p,q} frozen
+            aH, bH = xpr[iCH], xpr[iCH + 1]
+            Tc, Ts, dTc, dTs = _tmpl(ph, p_t, q_t)
+            yhat += aH * Tc + bH * Ts
+            H[iCH] = Tc; H[iCH + 1] = Ts             # d/d a_H, d/d b_H
+            dPH += aH * dTc + bH * dTs               # d/d phi_H
+        else:                                        # M1: free cardiac comb
+            for m in range(1, KH + 1):
+                c, dd = xpr[iCH + 2 * (m - 1)], xpr[iCH + 2 * (m - 1) + 1]
+                cm, sm = np.cos(m * ph), np.sin(m * ph)
+                yhat += c * cm + dd * sm
+                H[iCH + 2 * (m - 1)] = cm; H[iCH + 2 * (m - 1) + 1] = sm
+                dPH += m * (-c * sm + dd * cm)
         H[iPH] = dPH
         # update
         S = H @ Ppr @ H + R
@@ -214,7 +266,7 @@ def run(y, fps, f0, fh0,
     fR = xs[:, iWR] / (2 * np.pi) * 60.0
     fH = xs[:, iWH] / (2 * np.pi) * 60.0
     fH_filt = xf[:, iWH] / (2 * np.pi) * 60.0
-    # cardiac amplitude envelope (fundamental)
+    # cardiac amplitude envelope (hypot(a,b) both: template=in-phase/quad, M1=cos/sin)
     aH = np.hypot(xs[:, iCH], xs[:, iCH + 1])
     return dict(fR=fR, fH=fH, fH_filt=fH_filt, aH=aH, R=R)
 
@@ -243,8 +295,13 @@ def main():
     ap.add_argument("--fps", type=float, default=FPS)
     ap.add_argument("--fh0", type=float, default=None, help="f_H seed Hz (override)")
     ap.add_argument("--bin", type=int, default=None, help="range-bin number override")
-    ap.add_argument("--swH", type=float, default=0.05, help="omega_H drift std (continuity knob)")
+    ap.add_argument("--swH", type=float, default=0.015, help="omega_H drift std (continuity "
+                    "knob; 0.015 blocks the weak-signal template runaway yet passes the slow "
+                    "tachy2 descent; original M1 used 0.05 -> tachy2 floor-parked at 75)")
+    ap.add_argument("--tM", type=int, default=3, help="template harmonics used (1f,2f,3f; "
+                    "2f is the real fingerprint, 4f~noise+aliases -> runaway, dropped)")
     a = ap.parse_args()
+    tP, tQ = TEMPLATE_P[:a.tM], TEMPLATE_Q[:a.tM]
 
     # (path, fh0 prior [Hz, brief: bessel/wideband seed], bin=None -> auto SQI-top
     # chest bin per brief recipe, truth label). Same params for all three cubes.
@@ -259,7 +316,9 @@ def main():
         y, f0, binN_used = load_bin(path, a.fps, binN)
         fh0_auto = seed_fh0(y, a.fps, f0)
         fh0 = fh0_pri if fh0_pri is not None else fh0_auto
-        out = run(y, a.fps, f0, fh0, s_wH=a.swH)
+        # ablation: M1 free-sine cardiac vs M2 frozen JKL template, same EKF params
+        out_m1 = run(y, a.fps, f0, fh0, s_wH=a.swH, template=None)
+        out_tp = run(y, a.fps, f0, fh0, s_wH=a.swH, template=(tP, tQ))
         t = np.arange(len(y)) / a.fps
 
         tt, ff, P = cardiac_spectrogram(y, a.fps, f0)
@@ -268,29 +327,38 @@ def main():
         TR = {"tachy2_cube.npz": ([0, 60, 120], [131, 110, 91]),
               "tachy3_cube.npz": ([0, 120], [85, 85]),
               "sport33_cube.npz": ([0, 40, 80, 120], [101, 106, 95, 82])}
+
+        def mae(out):
+            if path not in TR:
+                return float("nan")
+            tr = np.interp(t, TR[path][0], TR[path][1])
+            m = (t >= 5) & (t <= t[-1] - 3)          # skip warmup + smoother edge
+            return float(np.mean(np.abs(out["fH"][m] - tr[m])))
+
         if path in TR:
             ax.plot(TR[path][0], TR[path][1], "b--", lw=1.6, alpha=0.7,
                     label="AppleWatch truth")
-        ax.plot(t, out["fH"], "r-", lw=2.2, label="EKF f_H (smoothed)")
-        ax.plot(t, out["fH_filt"], color="orange", lw=0.8, alpha=0.6,
-                label="f_H (forward)")
-        ax.plot(t, out["fR"] * 5, "c--", lw=1.0, alpha=0.7, label="5xf_R (harmonic)")
+        ax.plot(t, out_m1["fH"], color="orange", ls="--", lw=1.6, alpha=0.9,
+                label=f"M1 sine  (MAE {mae(out_m1):.1f})")
+        ax.plot(t, out_tp["fH"], "r-", lw=2.2,
+                label=f"M2 template (MAE {mae(out_tp):.1f})")
+        ax.plot(t, out_tp["fR"] * 5, "c--", lw=1.0, alpha=0.6, label="5xf_R (harmonic)")
         ax.axhline(fh0 * 60, color="g", ls=":", lw=1, label=f"seed {fh0*60:.0f}")
         ax.set_ylim(50, 160); ax.set_xlim(0, t[-1])
         ax.set_ylabel("bpm"); ax.set_xlabel("s")
-        seg = out["fH"]
-        head = np.median(seg[int(8 * a.fps):int(28 * a.fps)])
-        tail = np.median(seg[-int(25 * a.fps):-int(3 * a.fps)])   # skip smoother edge
-        ax.set_title(f"{path}  bin{binN_used}  truth {truth}  |  seed_auto={fh0_auto*60:.0f}"
-                     f"  f_R={f0*60:.0f}rpm  |  EKF f_H {head:.0f}->{tail:.0f} bpm")
+
+        def ht(out):
+            s = out["fH"]
+            return (np.median(s[int(8 * a.fps):int(28 * a.fps)]),
+                    np.median(s[-int(25 * a.fps):-int(3 * a.fps)]))
+        h1, l1 = ht(out_m1); h2, l2 = ht(out_tp)
+        ax.set_title(f"{path}  bin{binN_used}  truth {truth}  f_R={f0*60:.0f}rpm  |  "
+                     f"M1 {h1:.0f}->{l1:.0f}  M2 {h2:.0f}->{l2:.0f} bpm")
         ax.legend(fontsize=7, loc="upper right", ncol=2)
-        # console summary: start/mid/end smoothed f_H
-        seg = out["fH"]; q = len(seg)
-        print(f"{path:16s} bin{binN_used} truth {truth:14s} seed{fh0*60:4.0f}(auto{fh0_auto*60:3.0f})  "
-              f"f_H  0-30s={np.median(seg[int(5*a.fps):int(30*a.fps)]):5.0f}  "
-              f"mid={np.median(seg[q//2-int(10*a.fps):q//2+int(10*a.fps)]):5.0f}  "
-              f"end={np.median(seg[-int(25*a.fps):]):5.0f}  "
-              f"aH_med={np.median(out['aH']):.3f}")
+        print(f"{path:16s} bin{binN_used} truth {truth:14s} seed{fh0*60:4.0f}  "
+              f"| M1 {h1:3.0f}->{l1:3.0f} MAE{mae(out_m1):5.1f}  "
+              f"| M2 {h2:3.0f}->{l2:3.0f} MAE{mae(out_tp):5.1f}  "
+              f"aH_med={np.median(out_tp['aH']):.3f}")
 
     plt.tight_layout(); out_png = "joint_ekf.png"
     plt.savefig(out_png, dpi=115); print(f"saved {out_png}")
