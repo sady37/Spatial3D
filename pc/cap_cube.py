@@ -62,10 +62,11 @@ if a.reconfig or live < 5:
     t0 = time.time()
     while time.time() - t0 < pre: s.get_frame(timeout=0.5)
 else:
-    print("attached, settle 15s", flush=True); t0 = time.time()
-    while time.time() - t0 < 15: s.get_frame(timeout=0.5)
+    settle = a.preheat if a.preheat is not None else 15   # --preheat overrides
+    print(f"attached, settle {settle:.0f}s", flush=True); t0 = time.time()
+    while time.time() - t0 < settle: s.get_frame(timeout=0.5)
 
-acc = BinAccumulator(k=100000, n_ant=N_VIRT_ANT); bins = range(87, 271)
+acc = BinAccumulator(k=100000, n_ant=N_VIRT_ANT); bins = range(60, 271)
 print(f"capturing CUBE {a.dur:.0f}s (hold still)...", flush=True); t0 = time.time(); n = 0
 while time.time() - t0 < a.dur:
     f = s.get_frame(timeout=1.0)
