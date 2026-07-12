@@ -65,9 +65,13 @@ def fft_peak(x, fps, lo, hi):
     return f[m][np.argmax(S[m])] if m.any() else None
 
 
-def autocorr_peak(sig, fps, lo_bpm=48, hi_bpm=150):
+def autocorr_peak(sig, fps, lo_bpm=48, hi_bpm=150, interp=False):
     """Largest autocorrelation peak in a bpm range -> (bpm, normalized_height).
-    Height (0-1) measures periodicity strength: used to arbitrate low vs high band."""
+    Height (0-1) measures periodicity strength: used to arbitrate low vs high band.
+    interp=True adds parabolic sub-lag interpolation of the SAME peak -> a smooth
+    (non-quantized) bpm; the integer-lag grid steps ~6bpm near 80bpm, which makes a
+    continuous track look steppy. Default False keeps the validated integer-lag
+    value byte-identical (main path never sets interp)."""
     ac = np.correlate(sig, sig, "full")[len(sig) - 1:]
     if ac[0] <= 0:
         return None, 0.0
@@ -76,7 +80,13 @@ def autocorr_peak(sig, fps, lo_bpm=48, hi_bpm=150):
     if l1 <= l0 + 1 or l1 >= len(ac):
         return None, 0.0
     k = l0 + int(np.argmax(ac[l0:l1]))
-    return fps / k * 60, float(ac[k])
+    lag = float(k)
+    if interp and 0 < k < len(ac) - 1:                # refine the same peak lag
+        y0, y1, y2 = ac[k - 1], ac[k], ac[k + 1]
+        denom = y0 - 2 * y1 + y2
+        if abs(denom) > 1e-9:
+            lag = k + float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5))
+    return fps / lag * 60, float(ac[k])
 
 
 def autocorr_bpm(sig, fps, lo_bpm=48, hi_bpm=150):
@@ -118,17 +128,19 @@ def estimate_rr(chans, fps, topk=8):
     return rr, f0, spread, rr_f
 
 
-def hr_band_search(chans, fps, f0, lo, hi, topk=8):
+def hr_band_search(chans, fps, f0, lo, hi, topk=8, interp=False):
     """Autocorr-in-band HR over the SQI-top bins of ONE band. Returns dict with
     hr (median bpm), spread (inter-bin std), strength (median autocorr height =
-    periodicity confidence), hr_bc (beat-count x-check), ac list, top bins."""
+    periodicity confidence), hr_bc (beat-count x-check), ac list, top bins.
+    interp only refines the per-bin bpm (see autocorr_peak); default off."""
     hr_sqi = np.array([sqi(bandpass(c, fps, lo, hi, notch_f0=f0), fps, lo, hi)
                        for c in chans])
     top = np.argsort(hr_sqi)[::-1][:topk]
     ac, heights, bc = [], [], []
     for i in top:
         sig = bandpass(chans[i], fps, lo, hi, notch_f0=f0)
-        bpm, h = autocorr_peak(sig, fps, int(round(lo * 60)), int(round(hi * 60)))
+        bpm, h = autocorr_peak(sig, fps, int(round(lo * 60)), int(round(hi * 60)),
+                               interp=interp)
         if bpm: ac.append(bpm); heights.append(h)
         bc.append(beat_count(sig, fps, hi_bpm=int(round(hi * 60))))
     return dict(
@@ -181,13 +193,15 @@ def hr_fft_value(chans, fps, f0, lo, hi, topk=8):
 
 
 def estimate_hr(chans, fps, f0, topk=8, lo=1.0, hi=1.7,
-                tachy_hi=None, vote_frac=0.5):
+                tachy_hi=None, vote_frac=0.5, interp=False):
     """Arbitrated HR. Resting band [lo,hi]=[1.0,1.7] is the VALIDATED default and
     is always what's returned unless tachy_hi is set AND a majority of SQI-top
     bins show the cardiac period sitting above `hi` (region vote). The low edge
     stays at `lo` in every path, so the 0.7-1.0Hz breathing-harmonic residue is
-    never re-admitted. Returns a result dict; band='HIGH' => tachycardia."""
-    low = hr_band_search(chans, fps, f0, lo, hi, topk)
+    never re-admitted. interp only sub-lag-refines the resting-band bpm for a
+    smoother continuous track (off in the validated main path). Returns a result
+    dict; band='HIGH' => tachycardia."""
+    low = hr_band_search(chans, fps, f0, lo, hi, topk, interp=interp)
     out = dict(low=low, high=None, region=None, band="LOW", hr=low["hr"],
                spread=low["spread"], strength=low["strength"], hr_bc=low["hr_bc"])
     if tachy_hi and tachy_hi > hi:

@@ -22,7 +22,108 @@ prescribes on top of the per-window instantaneous estimate:
 import argparse
 from collections import deque
 import numpy as np
-from bcg_vitals import demod_channels, estimate_rr, estimate_hr, hr_band_search
+from bcg_vitals import (demod_channels, estimate_rr, estimate_hr, hr_band_search,
+                        bandpass, sqi, fft_peak, autocorr_peak, beat_count,
+                        RR_LO, RR_HI)
+
+
+# ============================================================================
+# AF (atrial fibrillation) suspicion — rhythm REGULARITY, not rate. Pure add-on
+# on the same phase-demod channels; does not touch the validated HR core.
+# ============================================================================
+# AF is the source of ~10% of ischemic (cardioembolic) strokes; its radar-visible
+# signature is IRREGULARITY, not speed. HARD FINDING (measured on sit39 @3.5m):
+# native cardiac SNR is too low to judge regularity — real seated sinus reads as
+# spread as synthetic AF, so we MUST gate on cardiac PRESENCE and otherwise abstain
+# ('indeterminate') rather than emit a false flag. The gate is scale-invariant
+# (cardiac-band / respiratory-band energy; breathing is always present so the ratio
+# is invariant to displacement gain) and does NOT penalize irregularity. THRESHOLDS
+# BELOW ARE PROVISIONAL — a scaffold from one synthetic AF + real sinus; they need a
+# real AF (or close-range strong sinus) capture to finalize.
+AF_CARD_GATE = 0.90      # cardiac/respiratory energy ratio floor to even classify
+AF_CONC_SINUS = 0.60     # fused-spectrum peak concentration: >= => regular
+AF_ENT_SINUS = 0.45      # normalized spectral entropy:        <= => regular
+AF_CONC_AF = 0.50        # <  => spread (irregular)
+AF_ENT_AF = 0.70         # >  => spread (irregular)
+AF_BAND_LO, AF_BAND_HI = 1.0, 2.2   # analyze same band the tachy probe uses
+
+
+def _fused_hr_spectrum(chans, fps, f0, top, lo, hi):
+    """SQI-weighted sum of the top bins' HR-band power spectra (feature-level
+    fusion, ref sleep算法.md option B): real beats are coherent across torso bins
+    and add; noise does not -> sharpens a genuine rhythm peak. Returns
+    (concentration, normalized_entropy)."""
+    Sf, f = None, None
+    for i in top:
+        sig = bandpass(chans[i], fps, lo, hi, notch_f0=f0)
+        w = sqi(sig, fps, lo, hi)
+        f = np.fft.rfftfreq(len(sig), 1 / fps)
+        S = np.abs(np.fft.rfft(sig - sig.mean())) ** 2
+        Sf = w * S if Sf is None else Sf + w * S
+    m = (f >= lo) & (f <= hi)
+    fb, Sb = f[m], Sf[m]
+    if Sb.sum() <= 0:
+        return 0.0, 1.0
+    p = fb[np.argmax(Sb)]
+    conc = float(Sb[(fb >= p - 0.15) & (fb <= p + 0.15)].sum() / Sb.sum())
+    Pn = Sb / Sb.sum()
+    ent = float(-(Pn * np.log(Pn + 1e-12)).sum() / np.log(len(Pn)))
+    return conc, ent
+
+
+def af_metrics(chans, fps, f0, topk=8):
+    """Per-window AF suspicion. Returns dict(state, concentration, entropy,
+    ac_strength, rr_cv, card_ratio); state in
+    {sinus, af_suspected, uncertain, indeterminate}. Gated on cardiac PRESENCE:
+    below the gate -> indeterminate (abstain), never a false flag."""
+    lo, hi = AF_BAND_LO, AF_BAND_HI
+    hr_sqi = np.array([sqi(bandpass(c, fps, lo, hi, notch_f0=f0), fps, lo, hi)
+                       for c in chans])
+    top = np.argsort(hr_sqi)[::-1][:topk]
+
+    conc, ent = _fused_hr_spectrum(chans, fps, f0, top, lo, hi)
+
+    # cardiac PRESENCE gate: cardiac-band / respiratory-band energy (per raw bin)
+    card = []
+    for i in top:
+        c = chans[i]
+        f = np.fft.rfftfreq(len(c), 1 / fps)
+        S = np.abs(np.fft.rfft(c - c.mean())) ** 2
+        Ehr = S[(f >= lo) & (f <= hi)].sum()
+        Err = S[(f >= RR_LO) & (f <= RR_HI)].sum()
+        card.append(Ehr / (Err + 1e-12))
+    card_ratio = float(np.median(card))
+
+    # autocorr strength (diagnostic) + time-domain R-R CV, per bin
+    strs, rr_cvs = [], []
+    for i in top:
+        sig = bandpass(chans[i], fps, lo, hi, notch_f0=f0)
+        _, st = autocorr_peak(sig, fps, int(lo * 60), int(hi * 60), interp=True)
+        strs.append(st)
+        s = sig / (sig.std() + 1e-9)
+        dist = max(1, int(fps / (180 / 60)))
+        try:
+            from scipy.signal import find_peaks
+            pk, _ = find_peaks(s, distance=dist, height=0.25)
+        except Exception:
+            pk = np.array([k for k in range(1, len(s) - 1)
+                           if s[k] > s[k - 1] and s[k] > s[k + 1] and s[k] > 0.25])
+        if len(pk) >= 5:
+            rr = np.diff(pk) / fps
+            rr_cvs.append(float(rr.std() / (rr.mean() + 1e-9)))
+    ac_strength = float(np.median(strs)) if strs else 0.0
+    rr_cv = float(np.median(rr_cvs)) if rr_cvs else 99.0
+
+    if card_ratio < AF_CARD_GATE:
+        state = "indeterminate"
+    elif conc >= AF_CONC_SINUS and ent <= AF_ENT_SINUS:
+        state = "sinus"
+    elif conc < AF_CONC_AF and ent > AF_ENT_AF:
+        state = "af_suspected"
+    else:
+        state = "uncertain"
+    return dict(state=state, concentration=conc, entropy=ent,
+                ac_strength=ac_strength, rr_cv=rr_cv, card_ratio=card_ratio)
 
 
 class HRKalman:
@@ -85,7 +186,7 @@ def backup_estimate(cube, bins, fps, center, half_w, tachy_hi):
     C = cube[:, i0:i1, :]
     chans = demod_channels(C, bins)
     _, f0, _, _ = estimate_rr(chans, fps)
-    res = estimate_hr(chans, fps, f0, tachy_hi=tachy_hi)
+    res = estimate_hr(chans, fps, f0, tachy_hi=tachy_hi, interp=True)
     return res["hr"], res["spread"], res["band"]
 
 
@@ -103,17 +204,22 @@ def run(cube, bins, fps, win_s=15.0, hop_s=1.5, tachy_hi=None,
     bw = int(backup_win_s * fps / 2)
     T = cube.shape[1]
     kf = HRKalman(); cont = Continuity()
+    af_hist = deque(maxlen=7)                       # rolling AF states -> alert
     rows = []
     for i in range(0, max(1, T - w + 1), hop):
         C = cube[:, i:i + w, :]
         chans = demod_channels(C, bins)
         _, f0, _, _ = estimate_rr(chans, fps)
-        res = estimate_hr(chans, fps, f0, tachy_hi=tachy_hi)
+        res = estimate_hr(chans, fps, f0, tachy_hi=tachy_hi, interp=True)
         hr_meas, spread, band = res["hr"], res["spread"], res["band"]
         quality = res["low"]["strength"]           # SQI proxy (autocorr height)
+        af = af_metrics(chans, fps, f0)            # rhythm regularity (gated)
+        af_hist.append(af["state"])
+        af_alert = sum(s == "af_suspected" for s in af_hist) >= 4  # sustained >~10s
         t = (i + w / 2) / fps
         if hr_meas is None:
-            rows.append((t, np.nan, kf.coast(), "none", 99.0, band, quality)); continue
+            rows.append((t, np.nan, kf.coast(), "none", 99.0, band, quality,
+                         af["state"], af["concentration"], af_alert)); continue
 
         conf_ok = (band == "HIGH") or (quality >= q_min)   # tachy vote self-gates
         val_ok = cont.check(hr_meas)
@@ -134,7 +240,8 @@ def run(cube, bins, fps, win_s=15.0, hop_s=1.5, tachy_hi=None,
             else:
                 hr_out = kf.coast()
                 src = "lowconf" if not conf_ok else "suspect"  # raw NOT emitted
-        rows.append((t, hr_meas, hr_out, src, spread, band, quality))
+        rows.append((t, hr_meas, hr_out, src, spread, band, quality,
+                     af["state"], af["concentration"], af_alert))
     return rows
 
 
@@ -193,11 +300,14 @@ def main():
     print(f"{a.path}: {len(rows)} windows ({a.win:.0f}s/{a.hop:.1f}s hop), "
           f"{K/a.fps:.0f}s @ {a.fps}fps"
           + (f", tachy ceiling {a.tachy}Hz" if tachy_hi else ""))
-    print(f"{'t(s)':>6} {'meas':>6} {'HR':>6}  {'src':<8} {'spread':>6} {'qual':>5} band")
-    for t, meas, hr, src, spread, band, qual in rows:
+    print(f"{'t(s)':>6} {'meas':>6} {'HR':>6}  {'src':<8} {'spread':>6} {'qual':>5} "
+          f"band  {'AF':<13} conc")
+    for t, meas, hr, src, spread, band, qual, af_st, af_conc, af_alert in rows:
         ms = f"{meas:6.0f}" if np.isfinite(meas) else "   -- "
         hs = f"{hr:6.1f}" if hr is not None else "   -- "
-        print(f"{t:6.1f} {ms} {hs}  {src:<8} {spread:6.1f} {qual:5.2f} {band}")
+        al = "  <<< AF ALERT" if af_alert else ""
+        print(f"{t:6.1f} {ms} {hs}  {src:<8} {spread:6.1f} {qual:5.2f} "
+              f"{band:<5} {af_st:<13} {af_conc:.2f}{al}")
     smooth = np.array([r[2] for r in rows if r[2] is not None], dtype=float)
     if len(smooth):
         print(f"\nKalman HR: median {np.median(smooth):.1f}, "
@@ -205,6 +315,10 @@ def main():
     src_ct = {}
     for r in rows: src_ct[r[3]] = src_ct.get(r[3], 0) + 1
     print("sources:", src_ct)
+    af_ct = {}
+    for r in rows: af_ct[r[7]] = af_ct.get(r[7], 0) + 1
+    n_alert = sum(1 for r in rows if r[9])
+    print("AF states:", af_ct, f"| sustained-alert windows: {n_alert}")
     if a.plot:
         plot(rows, a.plot, f"Continuous HR — {a.path}  (win {a.win:.0f}s, hop {a.hop:.1f}s)")
 
