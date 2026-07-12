@@ -10,3 +10,6 @@ dsp/build/
 # OS / editor
 .DS_Store
 xwrl68xx_xds110.ccxml
+
+# raw sleep-pad session data (177MB, kept local)
+sleepad/
