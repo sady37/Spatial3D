@@ -18,6 +18,9 @@ sleepad/
 #   pc/record/  = RAW recordings (incl. live 5-min files). NOT uploaded.
 #   pc/case/    = curated cubes the CURRENT algorithm uses. UPLOADED (whitelisted below).
 pc/*.log
-pc/**/*.npz          # ignore all cubes by default...
-!pc/case/*.npz       # ...except the curated algorithm case set
-pc/record/           # raw dir never uploaded (cubes, csv, anything)
+# ignore all cubes by default...
+pc/**/*.npz
+# ...except the curated algorithm case set
+!pc/case/*.npz
+# raw dir never uploaded (cubes, csv, anything)
+pc/record/
