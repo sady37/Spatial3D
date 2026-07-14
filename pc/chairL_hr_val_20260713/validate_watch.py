@@ -2,10 +2,13 @@
 on the sit and lie resting segments (wall-clock gated, walk excluded).
 
 Self-contained in this directory (reads the npz + watch CSV next to it, imports
-bcg_vitals from the parent pc/). Radar HR uses SUB-LAG interpolated autocorr (off
-the 18.78fps integer-lag grid 75.1/80.5) so a near-constant resting HR shows its
-true off-grid value (~76) instead of a quantized step. Independent beat-count as a
-cross-check. Writes results_per_window.csv + validate_watch.png (SIT top, LIE bottom).
+bcg_vitals from the parent pc/). Radar HR = SUB-LAG interpolated autocorr per bin,
+then a ROBUST FUSION over the top-K cardiac-SNR chest bins: trim 1/4 off each end
+and mean the middle half (25%-trimmed mean). This removes single-bin fragility —
+at sit (marginal cardiac SNR ~2-4) one bin can lock a spurious low value; trimming
+both ends drops that low outlier and any high outlier. Independent beat-count
+(same fusion) as a cross-check. Writes results_per_window.csv + validate_watch.png
+(SIT top, LIE bottom).
 
     .venv/bin/python3 validate_watch.py
 """
@@ -17,13 +20,24 @@ from bcg_vitals import demod_channels, bandpass, autocorr_peak, beat_count, RR_L
 
 WATCH = os.path.join(HERE, "watch_hr_0713.csv")
 WIN, STEP = 30.0, 10.0
+KBINS = 6                                                 # top cardiac-SNR chest bins fused
 SEGS = [
     ("chairL_sit_20260713_225001.npz", (22, 51, 0), (22, 54, 0), "SIT"),
     ("chairL_sit_20260713_225502.npz", (22, 56, 20), (22, 59, 0), "LIE"),
 ]
 
 
-def blind_chest(disp, fps, f0):
+def trimmed(vals):
+    """25%-trimmed mean: drop 1/4 off each end, mean the middle half."""
+    s = sorted(v for v in vals if v)
+    if not s:
+        return None
+    k = len(s); lo = k // 4
+    mid = s[lo:k - lo] if k - 2 * lo >= 1 else s
+    return float(np.mean(mid))
+
+
+def top_chest_bins(disp, fps, f0):
     N = disp.shape[1]; f = np.fft.rfftfreq(N, 1 / fps)
     rr = np.array([bandpass(d, fps, RR_LO, 0.6).std() for d in disp])
     body = rr > 0.12 * rr.max()
@@ -36,7 +50,7 @@ def blind_chest(disp, fps, f0):
         c = band & ~nh
         return X[np.where(c)[0][np.argmax(X[c])]] / (np.median(X[band & ~nh]) + 1e-9)
     csn = np.array([cs(disp[i]) if body[i] else 0 for i in range(disp.shape[0])])
-    return int(np.argmax(csn))
+    return list(np.argsort(csn)[::-1][:KBINS])
 
 
 def analyse(path, s0, s1):
@@ -54,40 +68,43 @@ def analyse(path, s0, s1):
     rr_amp = [bandpass(x, fps, RR_LO, 0.6).std() for x in disp]
     Xr = np.abs(np.fft.rfft(bandpass(disp[int(np.argmax(rr_amp))], fps, RR_LO, RR_HI)))
     m = (f >= RR_LO) & (f <= RR_HI); f0 = f[m][np.argmax(Xr[m])]
-    ch = blind_chest(disp, fps, f0)
-    return disp[ch], fps, tw, N, bins[ch], f0
+    chidx = top_chest_bins(disp, fps, f0)
+    return disp, fps, tw, N, chidx, [int(bins[c]) for c in chidx], f0
 
 
 def main():
     a = np.loadtxt(WATCH, delimiter=",", skiprows=1); wep, whr = a[:, 0], a[:, 1]
-    rows = [("segment", "wall", "radar_interp", "beatcount", "watch", "d_interp")]
+    rows = [("segment", "wall", "radar_fused", "beat_fused", "watch", "d")]
     panels, all_r, all_w = [], [], []
-    print("blind radar chest-bin HR (SUB-LAG interp)  vs  Apple Watch  (30s windows)\n")
+    print(f"blind radar chest-bin HR (interp + {KBINS}-bin 25%-trimmed fusion)  vs  Apple Watch\n")
     for path, s0, s1, lab in SEGS:
-        d, fps, tw, N, chbin, f0 = analyse(path, s0, s1)
-        sig = bandpass(d, fps, 1.0, 1.7); cbc = bandpass(d, fps, 0.9, 2.0)
-        print(f"=== {lab}  chest bin {chbin} ({chbin*0.0234:.2f}m)  RR={f0*60:.0f} ===")
+        disp, fps, tw, N, chidx, chbins, f0 = analyse(path, s0, s1)
+        sigs = [bandpass(disp[c], fps, 1.0, 1.7) for c in chidx]
+        cbcs = [bandpass(disp[c], fps, 0.9, 2.0) for c in chidx]
+        W = int(WIN * fps)
+        print(f"=== {lab}  chest bins {sorted(chbins)}  RR={f0*60:.0f} ===")
         print(f"  {'wall':>8} {'radar':>6} {'beat':>5} {'watch':>6} {'d':>5}")
-        T, R, B, W = [], [], [], []
+        T, R, B, Wv = [], [], [], []
         s = 0
-        while s + int(WIN * fps) <= N:
-            hr, _ = autocorr_peak(sig[s:s + int(WIN * fps)], fps, 60, 102, interp=True)
-            bc = beat_count(cbc[s:s + int(WIN * fps)], fps, hi_bpm=110)
-            tc = tw[s + int(WIN * fps) // 2]
+        while s + W <= N:
+            hrv = [autocorr_peak(sg[s:s + W], fps, 60, 102, interp=True)[0] for sg in sigs]
+            hr = trimmed(hrv)
+            bc = trimmed([beat_count(cb[s:s + W], fps, hi_bpm=110) for cb in cbcs])
+            tc = tw[s + W // 2]
             wm = (wep >= tc - WIN / 2) & (wep <= tc + WIN / 2)
             wv = float(np.mean(whr[wm])) if wm.any() else float(np.interp(tc, wep, whr))
             if hr:
-                T.append(tc); R.append(hr); B.append(bc); W.append(wv)
+                T.append(tc); R.append(hr); B.append(bc); Wv.append(wv)
                 wall = time.strftime("%H:%M:%S", time.localtime(tc))
                 print(f"  {wall:>8} {hr:6.1f} {bc:5.0f} {wv:6.0f} {hr-wv:+5.1f}")
                 rows.append((lab, wall, f"{hr:.1f}", f"{bc:.0f}", f"{wv:.0f}", f"{hr-wv:+.1f}"))
             s += int(STEP * fps)
-        R, B, W = np.array(R), np.array(B), np.array(W)
-        mae = np.mean(np.abs(R - W))
-        print(f"  -> {lab}: radar median {np.median(R):.1f}, watch median {np.median(W):.0f}, "
-              f"MAE={mae:.1f}, bias={np.mean(R-W):+.1f}\n")
-        panels.append((lab, chbin, np.array(T), R, B, W, mae))
-        all_r += list(R); all_w += list(W)
+        R, B, Wv = np.array(R), np.array(B), np.array(Wv)
+        mae = np.mean(np.abs(R - Wv))
+        print(f"  -> {lab}: radar median {np.median(R):.1f}, watch median {np.median(Wv):.0f}, "
+              f"MAE={mae:.1f}, bias={np.mean(R-Wv):+.1f}\n")
+        panels.append((lab, sorted(chbins), np.array(T), R, B, Wv, mae))
+        all_r += list(R); all_w += list(Wv)
     all_r, all_w = np.array(all_r), np.array(all_w)
     print(f"OVERALL: MAE={np.mean(np.abs(all_r-all_w)):.1f} bpm, bias={np.mean(all_r-all_w):+.1f} "
           f"(n={len(all_r)} windows)")
@@ -95,21 +112,20 @@ def main():
         csv.writer(fh).writerows(rows)
     print("saved results_per_window.csv")
 
-    # --- figure: SIT top, LIE bottom ---
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(2, 1, figsize=(11, 7.5), sharex=False)
-        for k, (lab, chbin, T, R, B, W, mae) in enumerate(panels):
-            t = (T - T[0])
-            ax[k].plot(t, W, "k-o", lw=2, ms=4, label="Apple Watch")
-            ax[k].plot(t, R, "C1.-", lw=1.6, ms=7, label=f"radar interp-autocorr (bin {chbin})")
+        fig, ax = plt.subplots(2, 1, figsize=(11, 7.5))
+        for k, (lab, chbins, T, R, B, Wv, mae) in enumerate(panels):
+            t = T - T[0]
+            ax[k].plot(t, Wv, "k-o", lw=2, ms=4, label="Apple Watch")
+            ax[k].plot(t, R, "C1.-", lw=1.6, ms=7, label=f"radar fused ({KBINS} bins, 25%-trim)")
             ax[k].plot(t, B, "C0x--", lw=.8, ms=6, alpha=.7, label="radar beat-count (x-check)")
             for yy in (70.4, 75.1, 80.5):
                 ax[k].axhline(yy, color="grey", ls=":", lw=.6, alpha=.6)
-            ax[k].set_title(f"{lab} — MAE {mae:.1f} bpm  (grey dotted = autocorr integer-lag grid)")
-            ax[k].set_ylabel("HR (bpm)"); ax[k].set_ylim(66, 96); ax[k].legend(fontsize=8, loc="upper right")
-            ax[k].set_xlabel("time in segment (s)")
-        fig.suptitle("blind radar chest-bin HR vs Apple Watch — sub-lag interpolated", y=1.0)
+            ax[k].set_title(f"{lab} — MAE {mae:.1f} bpm  (bins {chbins[0]}-{chbins[-1]})")
+            ax[k].set_ylabel("HR (bpm)"); ax[k].set_ylim(66, 96)
+            ax[k].legend(fontsize=8, loc="upper right"); ax[k].set_xlabel("time in segment (s)")
+        fig.suptitle("blind radar chest-bin HR vs Apple Watch — multi-bin trimmed fusion", y=1.0)
         fig.tight_layout(); fig.savefig(os.path.join(HERE, "validate_watch.png"), dpi=120)
         print("saved validate_watch.png")
     except Exception as e:
