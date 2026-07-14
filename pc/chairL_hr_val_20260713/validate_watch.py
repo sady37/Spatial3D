@@ -132,7 +132,8 @@ def main():
             ax[k].set_title(f"{lab} — MAE {mae:.1f} bpm  (bins {chbins[0]}-{chbins[-1]})")
             ax[k].set_ylabel("HR (bpm)"); ax[k].set_ylim(66, 96)
             ax[k].legend(fontsize=8, loc="upper right"); ax[k].set_xlabel("time in segment (s)")
-        fig.suptitle("blind radar chest-bin HR vs Apple Watch — multi-bin trimmed fusion", y=1.0)
+        fig.suptitle("blind radar HR vs Apple Watch — RR-anchored chest-end cluster "
+                     f"(overall MAE {np.mean(np.abs(all_r-all_w)):.1f} bpm)", y=1.0)
         fig.tight_layout(); fig.savefig(os.path.join(HERE, "validate_watch.png"), dpi=120)
         print("saved validate_watch.png")
     except Exception as e:
