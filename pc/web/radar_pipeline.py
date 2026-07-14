@@ -191,7 +191,7 @@ def _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount):
     if pts.shape[0] == 0:
         return None
     room = to_room(pts[:, :6], tilt, mnt)
-    z, x, rng, P = room[:, 2], room[:, 0], room[:, 5], room[:, 3]
+    x, y, z, P, rng = room[:, 0], room[:, 1], room[:, 2], room[:, 3], room[:, 5]
     order = np.argsort(z)
     cw = np.cumsum(P[order]) / P.sum()
     z90 = float(z[order][np.searchsorted(cw, 0.9)])         # energy-weighted Z-90pct
@@ -203,9 +203,13 @@ def _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount):
         pose = "stand"
     else:
         pose = "sit"
-    xc = float((x * P).sum() / P.sum()); rc = float((rng * P).sum() / P.sum())
-    return dict(pose=pose, z90=round(z90, 2), floor_frac=round(floor_frac, 2), x=round(xc, 2),
-                range_m=round(rc, 2), n_moving=int(pts.shape[0]), motion=float(men.max()))
+    xc = float((x * P).sum() / P.sum())                     # energy-weighted room centroid
+    yc = float((y * P).sum() / P.sum())
+    zc = float((z * P).sum() / P.sum())
+    rc = float((rng * P).sum() / P.sum())
+    return dict(pose=pose, z90=round(z90, 2), floor_frac=round(floor_frac, 2),
+                x=round(xc, 2), y=round(yc, 2), z=round(zc, 2), range_m=round(rc, 2),
+                n_moving=int(pts.shape[0]), motion=float(men.max()))
 
 
 def measurable_range(bins, dr):
@@ -262,7 +266,7 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     mp = _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount)
     if mp:
         out["pose"] = mp["pose"]; out["pose_z90"] = mp["z90"]; out["pose_floor_frac"] = mp["floor_frac"]
-        out["target"] = dict(range_m=mp["range_m"], x=mp["x"], z=mp["z90"],
+        out["target"] = dict(range_m=mp["range_m"], x=mp["x"], y=mp["y"], z=mp["z"],
                              calibrated=(tilt_deg is not None and h_mount is not None))
     else:
         out["pose"] = "unknown"; out["pose_z90"] = None; out["pose_floor_frac"] = None; out["target"] = None

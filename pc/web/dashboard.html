@@ -58,6 +58,7 @@
       <span id="pose-sit" class="pill p-dim">SIT</span>
       <span id="pose-fall" class="pill p-dim">FALL</span>
     </div>
+    <div class="row"><span class="k">位置 X / Y / Z (m)</span><span id="posexyz">—</span></div>
     <div class="row"><span class="k">运动点高度 Z90 (m)</span><span id="posez">—</span></div>
     <div class="row"><span class="k">地板带能量占比 (≤0.4m)</span><span id="posefrac">—</span></div>
     <div class="muted">FALL = 地板带(Z≤0.4m)运动能量占比 &gt;70%（人平摊在地）。运动带协方差，无需基线。</div>
@@ -208,6 +209,8 @@ async function tick(){
   const pcls={stand:"p-ok",sit:"p-warn",fall:"p-bad"};
   for(const k in poses){const el=document.getElementById(poses[k]);
     el.className="pill "+(st.pose===k?pcls[k]:"p-dim");}
+  const t=st.target;
+  document.getElementById("posexyz").textContent=t?`${fmt(t.x,2)} / ${fmt(t.y,2)} / ${fmt(t.z,2)}`:"—";
   document.getElementById("posez").textContent=fmt(st.pose_z90,2);
   document.getElementById("posefrac").textContent=st.pose_floor_frac!=null?(st.pose_floor_frac*100).toFixed(0)+"%":"—";
 
