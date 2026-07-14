@@ -15,10 +15,11 @@ both ends drops that low outlier and any high outlier. Independent beat-count
 import os, sys, time, csv
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
+CASE = os.path.join(os.path.dirname(HERE), "case")        # shared cubes+watch (de-duped)
 sys.path.insert(0, os.path.dirname(HERE))                 # parent pc/ -> bcg_vitals
 from bcg_vitals import demod_channels, bandpass, autocorr_peak, beat_count, RR_LO, RR_HI
 
-WATCH = os.path.join(HERE, "watch_hr_0713.csv")
+WATCH = os.path.join(CASE, "watch_hr_0713.csv")
 WIN, STEP = 30.0, 10.0
 KBINS = 6                                                 # top cardiac-SNR chest bins fused
 SEGS = [
@@ -60,7 +61,7 @@ def hr_cluster(disp, fps, f0):
 
 
 def analyse(path, s0, s1):
-    d = np.load(os.path.join(HERE, path), allow_pickle=True)
+    d = np.load(os.path.join(CASE, path), allow_pickle=True)
     n = int(d["counts"].astype(int).min())
     ts = np.asarray(d["frame_ts"], float)[:n]; t0 = float(d["block_start_epoch"])
     base = list(time.localtime(t0))
