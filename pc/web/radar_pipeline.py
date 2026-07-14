@@ -33,11 +33,18 @@ EL_RANGE = (-45.0, 20.0)
 # --- HR confidence gate (stop reporting a harmonic-locked value as if it were HR) ---
 STRENGTH_MIN = 0.30              # min autocorr periodicity strength to trust the value
 HARM_MARGIN_BPM = 5.0           # HR within this of any k*RR => likely a breathing harmonic
-# --- pose from the RR (breathing) energy centroid height (room frame) ---
-FALL_Z = 0.6                     # z below this = on the floor
-SIT_STAND_Z = 1.05               # z in [FALL_Z, this) = sitting; >= this = standing
-POSE_TILT_DEFAULT = 0.0          # radar horizontal, ~1 m surface: rough default so pose
-POSE_MOUNT_DEFAULT = 1.0         # shows live; pass --tilt/--mount for a calibrated height
+# --- pose from the MOTION-band spatial covariance (validated 2026-07-14) ---
+# Per bin, bandpass the slow-time to the motion band, take the covariance of the
+# RESIDUAL -> MUSIC angle of the MOVING scatterers (the person), rejecting static
+# clutter (no motion) and thermal noise (non-coherent). The moving points' HEIGHT
+# separates posture: lie Z90 ~0.2m (floor) vs sit ~1.9-2.3m (upright). No baseline.
+MOTION_LO, MOTION_HI = 0.1, 3.0  # Hz: breathing + body sway/fidget
+POSE_TILT_DEFAULT = 35.0         # validated rig geometry (fall-detection-design memory):
+POSE_MOUNT_DEFAULT = 2.3         # 2.3 m high, 35 deg down. Relative separation, not absolute.
+FALL_Z90 = 1.0                   # moving-point Z-90pct below this = lying/on-floor
+STAND_Z90 = 2.6                  # above this = standing; between = sitting (provisional)
+POSE_EL_RANGE = (-45.0, 45.0)    # MUST reach +45: a seated upper body sits at ~+22 deg
+                                 # (the old +20 clip hid it and broke pose)
 
 
 # ---------------------------------------------------------------- HR (chairL) --
@@ -145,50 +152,53 @@ def _hr_confidence(hr, strength, rr):
     return "ok", "ok"
 
 
-def _rr_centroid(cube_win, disp, bins, dr, fps, tilt_deg, h_mount):
-    """Breathing-energy-WEIGHTED spatial centroid (per user: pose from the RR
-    centroid, not a single MUSIC peak -> far more stable). Each breathing bin's
-    DOA is weighted by its RR-band displacement amplitude; the weighted mean is
-    the torso centroid. Returns dict(range_m, x, z, calibrated)."""
-    rr_amp = np.array([np.std(bandpass(d, fps, RR_LO, RR_HI)) for d in disp])
-    if rr_amp.max() <= 0:
-        return None
-    body = np.where(rr_amp > 0.25 * rr_amp.max())[0]        # the breathing bins
-    if len(body) == 0:
-        return None
-    covs = _window_covariances(cube_win, bins, [int(bins[i]) for i in body])
-    if not covs:
-        return None
+def _cbandpass(X, fps, lo, hi):
+    """Complex slow-time bandpass per antenna (X = (T, n_ant)), DC removed."""
+    F = np.fft.fft(X - X.mean(0), axis=0)
+    f = np.fft.fftfreq(X.shape[0], 1 / fps)
+    F[(np.abs(f) < lo) | (np.abs(f) > hi)] = 0
+    return np.fft.ifft(F, axis=0)
+
+
+def _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount):
+    """POSE from the moving scatterers' height. Per bin: bandpass slow-time to the
+    motion band, covariance of the residual = MOVING-target spatial covariance
+    (static clutter has no motion; noise is non-coherent) -> MUSIC angle of the
+    person. The moving points' Z-90pct separates lie (~0.2m) from sit (~1.9m). No
+    baseline needed. Returns dict(pose, z90, x, range_m, n_moving, motion) or None."""
     tilt = POSE_TILT_DEFAULT if tilt_deg is None else tilt_deg
     mnt = POSE_MOUNT_DEFAULT if h_mount is None else h_mount
+    covs, men = {}, np.zeros(len(bins))
+    for i in range(len(bins)):
+        M = _cbandpass(cube_win[i], fps, MOTION_LO, MOTION_HI)
+        men[i] = float(np.mean(np.abs(M) ** 2))
+        covs[int(bins[i])] = (M.conj().T @ M) / M.shape[0]
+    if men.max() <= 0:
+        return None
+    keep = {int(bins[i]): covs[int(bins[i])] for i in range(len(bins))
+            if men[i] > 0.2 * men.max()}                    # the person's moving bins
     try:
-        pts = covariances_to_points(covs, awrl6844_array(), dr=dr,
-                                    az_range=AZ_RANGE, el_range=EL_RANGE,
-                                    resolution_deg=2.0, max_peaks_per_bin=1)
+        pts = covariances_to_points(keep, awrl6844_array(), dr=dr,
+                                    az_range=AZ_RANGE, el_range=POSE_EL_RANGE,
+                                    resolution_deg=2.0, max_peaks_per_bin=2, min_rel_db=-10)
     except Exception:
         return None
     if pts.shape[0] == 0:
         return None
-    amp_by_bin = {int(bins[i]): float(rr_amp[i]) for i in body}
-    room = to_room(pts[:, :3], tilt, mnt)                   # (M,3) room x,y,z
-    w = np.array([amp_by_bin.get(int(b), 0.0) for b in pts[:, 4]])  # RR-energy weights
-    if w.sum() <= 0:
-        return None
-    c = (room * w[:, None]).sum(0) / w.sum()                # weighted centroid
-    rng = float((pts[:, 5] * w).sum() / w.sum())
-    return dict(range_m=round(rng, 2), x=round(float(c[0]), 2),
-                z=round(float(c[2]), 2), calibrated=(tilt_deg is not None and h_mount is not None))
-
-
-def _pose(z):
-    """Fall / Sit / Stand from the breathing-centroid height (room frame)."""
-    if z is None:
-        return "unknown"
-    if z < FALL_Z:
-        return "fall"
-    if z < SIT_STAND_Z:
-        return "sit"
-    return "stand"
+    room = to_room(pts[:, :6], tilt, mnt)
+    z, x, rng, P = room[:, 2], room[:, 0], room[:, 5], room[:, 3]
+    order = np.argsort(z)
+    cw = np.cumsum(P[order]) / P.sum()
+    z90 = float(z[order][np.searchsorted(cw, 0.9)])         # energy-weighted Z-90pct
+    if z90 < FALL_Z90:
+        pose = "fall"
+    elif z90 >= STAND_Z90:
+        pose = "stand"
+    else:
+        pose = "sit"
+    xc = float((x * P).sum() / P.sum()); rc = float((rng * P).sum() / P.sum())
+    return dict(pose=pose, z90=round(z90, 2), x=round(xc, 2), range_m=round(rc, 2),
+                n_moving=int(pts.shape[0]), motion=float(men.max()))
 
 
 def measurable_range(bins, dr):
@@ -230,7 +240,7 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     if not out["present"]:
         out.update(hr=None, rr=None, hr_strength=None, hr_confident=False,
                    hr_level="none", hr_reason="empty", fall=False, pose="empty",
-                   pose_calibrated=False, target=None, hr_diag=None)
+                   pose_z90=None, pose_calibrated=False, target=None, hr_diag=None)
         return out
 
     rr, f0, _, _ = estimate_rr(disp, fps)
@@ -241,11 +251,14 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     out["hr"] = hr; out["hr_strength"] = strength; out["hr_diag"] = diag
     out["hr_level"] = level; out["hr_reason"] = reason; out["hr_confident"] = (level == "ok")
 
-    # pose from the RR (breathing) energy centroid — stable vs single-peak MUSIC.
-    tgt = _rr_centroid(cube_win, disp, bins, dr, fps, tilt_deg, h_mount)
-    out["target"] = tgt
-    z = tgt["z"] if tgt else None
-    out["pose"] = _pose(z)
-    out["pose_calibrated"] = bool(tgt and tgt.get("calibrated"))
+    # pose from the MOTION-band spatial covariance (moving-scatterer height).
+    mp = _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount)
+    if mp:
+        out["pose"] = mp["pose"]; out["pose_z90"] = mp["z90"]
+        out["target"] = dict(range_m=mp["range_m"], x=mp["x"], z=mp["z90"],
+                             calibrated=(tilt_deg is not None and h_mount is not None))
+    else:
+        out["pose"] = "unknown"; out["pose_z90"] = None; out["target"] = None
+    out["pose_calibrated"] = bool(mp)
     out["fall"] = (out["pose"] == "fall")
     return out
