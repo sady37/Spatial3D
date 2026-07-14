@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radar Vitals — live</title>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;
+        --ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+  header b{font-size:16px} header .src{color:var(--dim)}
+  .wrap{padding:16px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));max-width:1200px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .card h3{margin:0 0 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .big{font-size:44px;font-weight:700;line-height:1}
+  .unit{font-size:16px;color:var(--dim);font-weight:400}
+  .row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
+  .row:last-child{border:0} .row .k{color:var(--dim)}
+  .pill{display:inline-block;padding:3px 10px;border-radius:20px;font-weight:600;font-size:13px}
+  .p-ok{background:rgba(63,185,80,.15);color:var(--ok)} .p-bad{background:rgba(248,81,73,.15);color:var(--bad)}
+  .p-warn{background:rgba(210,153,34,.15);color:var(--warn)} .p-dim{background:#21262d;color:var(--dim)}
+  canvas{width:100%;background:#0a0d12;border-radius:8px;border:1px solid var(--line)}
+  .ctl{display:flex;flex-direction:column;gap:8px}
+  .ctl label{display:flex;justify-content:space-between;color:var(--dim);font-size:12px}
+  input[type=range]{width:100%}
+  .cmp{display:flex;gap:18px;align-items:flex-end}
+  .cmp .d{color:var(--dim);font-size:13px}
+  .muted{color:var(--dim);font-size:12px}
+  .diff-ok{color:var(--ok)} .diff-bad{color:var(--bad)}
+</style>
+</head>
+<body>
+<header>
+  <b>Radar Vitals</b>
+  <span class="src" id="src">—</span>
+  <span class="src" id="clock"></span>
+  <span class="src" id="stat"></span>
+</header>
+
+<div class="wrap">
+  <!-- presence / fall -->
+  <div class="card">
+    <h3>状态 Presence / Fall</h3>
+    <div style="margin-bottom:12px"><span id="present" class="pill p-dim">—</span>
+      <span id="posture" class="pill p-dim">—</span></div>
+    <div class="row"><span class="k">占用集中度 conc</span><span id="conc">—</span></div>
+    <div class="row"><span class="k">簇宽 span (m)</span><span id="span">—</span></div>
+    <div class="row"><span class="k">目标距离 D (m)</span><span id="rng">—</span></div>
+    <div class="row"><span class="k">窗口 window</span><span id="win">—</span></div>
+  </div>
+
+  <!-- RR -->
+  <div class="card">
+    <h3>呼吸 RR</h3>
+    <div class="big"><span id="rr">—</span> <span class="unit">/min</span></div>
+    <div class="muted" style="margin-top:8px">腹端 bin <span id="abbin">—</span></div>
+  </div>
+
+  <!-- HR + watch -->
+  <div class="card">
+    <h3>心率 HR — vs Apple Watch</h3>
+    <div class="cmp">
+      <div><div class="big" style="color:var(--acc)"><span id="hr">—</span></div><div class="d">雷达 radar</div></div>
+      <div><div class="big"><span id="whr">—</span></div><div class="d">watch</div></div>
+      <div><div class="big" style="font-size:26px"><span id="hrdiff">—</span></div><div class="d">Δ bpm</div></div>
+    </div>
+    <div class="row" style="margin-top:10px"><span class="k">胸端 bin (选定)</span><span id="chbin">—</span></div>
+    <div class="row"><span class="k">簇 cluster</span><span id="cluster">—</span></div>
+    <div class="row"><span class="k">cardiac-SNR / 周期强度</span><span id="hrq">—</span></div>
+  </div>
+
+  <!-- bin control -->
+  <div class="card">
+    <h3>Bin 位置 (HR 搜索窗)</h3>
+    <div class="ctl">
+      <label>下界 bin_lo <span id="blv">—</span></label><input type="range" id="blo">
+      <label>上界 bin_hi <span id="bhv">—</span></label><input type="range" id="bhi">
+      <div class="muted">留空=全体自动选胸端。拖动=强制在此 range-bin 范围内选 HR bin，实时看算法反应。</div>
+      <button id="reset" style="align-self:flex-start;margin-top:4px;background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 12px;cursor:pointer">自动 (全范围)</button>
+    </div>
+  </div>
+
+  <!-- top-down -->
+  <div class="card" style="grid-column:span 1">
+    <h3>俯视 Top-down — X (横向) × D (距离)</h3>
+    <canvas id="top" width="520" height="360"></canvas>
+  </div>
+
+  <!-- side -->
+  <div class="card" style="grid-column:span 1">
+    <h3>侧视 Side — D (距离) × Z (高度), 倒地判定</h3>
+    <canvas id="side" width="520" height="300"></canvas>
+  </div>
+</div>
+
+<script>
+let META=null, binLo=null, binHi=null;
+
+function pill(el,txt,cls){el.textContent=txt;el.className="pill "+cls}
+
+async function loadMeta(){
+  META=await (await fetch("/api/meta")).json();
+  const m=META.source, r=META.range;
+  document.getElementById("src").textContent=`${m.kind} · ${m.name} · ${m.fps||"?"}fps · bins ${r.bin_lo}-${r.bin_hi}`;
+  const blo=document.getElementById("blo"), bhi=document.getElementById("bhi");
+  blo.min=bhi.min=r.bin_lo; blo.max=bhi.max=r.bin_hi;
+  blo.value=r.bin_lo; bhi.value=r.bin_hi;
+  document.getElementById("blv").textContent=r.bin_lo;
+  document.getElementById("bhv").textContent=r.bin_hi;
+  blo.oninput=bhi.oninput=()=>{ binLo=+blo.value; binHi=+bhi.value;
+    document.getElementById("blv").textContent=binLo;
+    document.getElementById("bhv").textContent=binHi; };
+  document.getElementById("reset").onclick=()=>{ binLo=binHi=null;
+    blo.value=r.bin_lo; bhi.value=r.bin_hi;
+    document.getElementById("blv").textContent=r.bin_lo;
+    document.getElementById("bhv").textContent=r.bin_hi; };
+}
+
+function fmt(v,d=0){return v==null?"—":(+v).toFixed(d)}
+
+function drawTop(st){
+  const c=document.getElementById("top"), g=c.getContext("2d"), r=META.range;
+  const W=c.width,H=c.height,pad=40; g.clearRect(0,0,W,H);
+  const xr=[r.x_min,r.x_max], dr=[r.d_min,r.d_max];
+  const X=x=>pad+(x-xr[0])/(xr[1]-xr[0])*(W-2*pad);
+  const Y=d=>H-pad-(d-dr[0])/(dr[1]-dr[0])*(H-2*pad);
+  // coverage fan (az) as filled trapezoid at d_min..d_max
+  g.fillStyle="rgba(88,166,255,.06)"; g.strokeStyle="#30363d";
+  g.beginPath();
+  const az=r.az_deg.map(a=>a*Math.PI/180);
+  g.moveTo(X(dr[0]*Math.tan(az[0])),Y(dr[0]));
+  g.lineTo(X(dr[1]*Math.tan(az[0])),Y(dr[1]));
+  g.lineTo(X(dr[1]*Math.tan(az[1])),Y(dr[1]));
+  g.lineTo(X(dr[0]*Math.tan(az[1])),Y(dr[0]));
+  g.closePath(); g.fill(); g.stroke();
+  // axes labels
+  g.fillStyle="#8b949e"; g.font="11px sans-serif";
+  g.fillText("X "+xr[0]+"m",4,H-pad+14); g.fillText(xr[1]+"m",W-pad,H-pad+14);
+  g.fillText("D "+dr[1]+"m",X(0)-10,pad-8); g.fillText(dr[0]+"m",X(0)-10,H-pad+14);
+  g.fillStyle="#f0f6fc"; g.beginPath(); g.arc(X(0),Y(dr[0]),4,0,7); g.fill(); // radar origin
+  // target
+  if(st&&st.target){
+    const t=st.target, col=st.fall?"#f85149":"#3fb950";
+    g.fillStyle=col; g.beginPath(); g.arc(X(t.x),Y(t.range_m),9,0,7); g.fill();
+    g.fillStyle="#e6edf3"; g.fillText(`(${t.x}, D${t.range_m})`,X(t.x)+12,Y(t.range_m));
+  }
+}
+
+function drawSide(st){
+  const c=document.getElementById("side"), g=c.getContext("2d"), r=META.range;
+  const W=c.width,H=c.height,pad=40; g.clearRect(0,0,W,H);
+  const dr=[r.d_min,r.d_max], zr=[Math.min(0,r.z_min),Math.max(1.8,r.z_max)];
+  const X=d=>pad+(d-dr[0])/(dr[1]-dr[0])*(W-2*pad);
+  const Y=z=>H-pad-(z-zr[0])/(zr[1]-zr[0])*(H-2*pad);
+  // fall zone (z<0.6)
+  g.fillStyle="rgba(248,81,73,.08)"; g.fillRect(pad,Y(0.6),W-2*pad,Y(zr[0])-Y(0.6));
+  g.strokeStyle="#30363d"; g.strokeRect(pad,pad,W-2*pad,H-2*pad);
+  // floor
+  g.strokeStyle="#484f58"; g.beginPath(); g.moveTo(pad,Y(0)); g.lineTo(W-pad,Y(0)); g.stroke();
+  g.fillStyle="#8b949e"; g.font="11px sans-serif";
+  g.fillText("Z 高度",4,pad-8); g.fillText("floor 0",W-pad+2,Y(0)+4);
+  g.fillText("D "+dr[0],pad,H-pad+14); g.fillText(dr[1]+"m",W-pad-20,H-pad+14);
+  g.fillStyle="#f85149"; g.fillText("倒地区 <0.6m",pad+6,Y(0.3));
+  if(st&&st.target){
+    const t=st.target, col=st.fall?"#f85149":"#3fb950";
+    g.strokeStyle=col; g.beginPath(); g.moveTo(X(t.range_m),Y(0)); g.lineTo(X(t.range_m),Y(t.z)); g.stroke();
+    g.fillStyle=col; g.beginPath(); g.arc(X(t.range_m),Y(t.z),9,0,7); g.fill();
+    g.fillStyle="#e6edf3"; g.fillText("Z"+t.z+"m",X(t.range_m)+12,Y(t.z));
+  }
+}
+
+async function tick(){
+  if(!META){await loadMeta();}
+  let url="/api/state";
+  if(binLo!=null&&binHi!=null) url+=`?bin_lo=${Math.min(binLo,binHi)}&bin_hi=${Math.max(binLo,binHi)}`;
+  let st;
+  try{ st=await (await fetch(url)).json(); }
+  catch(e){ document.getElementById("stat").textContent="连接断开…"; return; }
+  document.getElementById("clock").textContent=new Date().toLocaleTimeString();
+  if(st.warming){ document.getElementById("stat").textContent="预热中 (需 ≥5s 数据)…"; return; }
+  if(st.error){ document.getElementById("stat").textContent="err: "+st.error; return; }
+  document.getElementById("stat").textContent="";
+
+  // presence / fall
+  const pe=document.getElementById("present");
+  if(st.present){pill(pe,"有人 PRESENT","p-ok")} else {pill(pe,"无人 EMPTY","p-dim")}
+  const po=document.getElementById("posture");
+  const pm={upright:["直立 UPRIGHT","p-ok"],on_floor:["倒地 FALL","p-bad"],
+            low:["低姿 LOW","p-warn"],uncalibrated:["未标定挂载","p-dim"],
+            unknown:["? 姿态","p-dim"],empty:["—","p-dim"]};
+  const pv=pm[st.posture]||["—","p-dim"]; pill(po,pv[0],pv[1]);
+  document.getElementById("conc").textContent=fmt(st.occ_conc,2);
+  document.getElementById("span").textContent=fmt(st.occ_span,3);
+  document.getElementById("rng").textContent=fmt(st.range_m,2);
+  document.getElementById("win").textContent=(st.win_s||"—")+"s @"+(st.fps||"—")+"fps";
+
+  // RR / HR
+  document.getElementById("rr").textContent=fmt(st.rr);
+  document.getElementById("hr").textContent=fmt(st.hr,1);
+  document.getElementById("whr").textContent=fmt(st.watch_hr,0);
+  const hd=document.getElementById("hrdiff");
+  if(st.hr!=null&&st.watch_hr!=null){const d=st.hr-st.watch_hr;
+    hd.textContent=(d>=0?"+":"")+d.toFixed(1);
+    hd.className=Math.abs(d)<=5?"diff-ok":"diff-bad";
+  } else hd.textContent="—";
+  const dg=st.hr_diag||{};
+  document.getElementById("abbin").textContent=dg.abdomen_bin??"—";
+  document.getElementById("chbin").textContent=dg.chest_bin??"—";
+  document.getElementById("cluster").textContent=(dg.cluster_bins||[]).join(", ")||"—";
+  document.getElementById("hrq").textContent=(dg.csnr??"—")+" / "+fmt(st.hr_strength,2);
+
+  drawTop(st); drawSide(st);
+}
+setInterval(tick,1000); tick();
+</script>
+</body>
+</html>
