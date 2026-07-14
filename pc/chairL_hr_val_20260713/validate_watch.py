@@ -28,29 +28,35 @@ SEGS = [
 
 
 def trimmed(vals):
-    """25%-trimmed mean: drop 1/4 off each end, mean the middle half."""
+    """Robust center: drop >=1 off each end (median for tiny clusters), mean the rest."""
     s = sorted(v for v in vals if v)
     if not s:
         return None
-    k = len(s); lo = k // 4
+    k = len(s); lo = max(1, k // 4) if k >= 3 else 0
     mid = s[lo:k - lo] if k - 2 * lo >= 1 else s
     return float(np.mean(mid))
 
 
-def top_chest_bins(disp, fps, f0):
+def hr_cluster(disp, fps, f0):
+    """Physically-grounded chest cluster (no scatter/硬凑): find the CONTIGUOUS body
+    range span (breathing present), then take the cardiac hotspot = max-cSNR bin
+    (chest end, low breathing) +/-2 CLAMPED to the body span. HR fuses only these.
+    Abdomen (high-breathing end) is deliberately excluded (it pulls HR to k*RR)."""
     N = disp.shape[1]; f = np.fft.rfftfreq(N, 1 / fps)
     rr = np.array([bandpass(d, fps, RR_LO, 0.6).std() for d in disp])
-    body = rr > 0.12 * rr.max()
+    above = np.where(rr > 0.15 * rr.max())[0]
+    lo_b, hi_b = int(above.min()), int(above.max())      # contiguous body span
 
-    def cs(d):
-        X = 2 * np.abs(np.fft.rfft(d - d.mean())) / N
+    def cs(i):
+        d = disp[i]; X = 2 * np.abs(np.fft.rfft(d - d.mean())) / N
         band = (f >= 1.0) & (f <= 1.7); nh = np.zeros_like(f, bool)
         for k in range(1, 12):
             nh |= np.abs(f - k * f0) <= 0.035
         c = band & ~nh
         return X[np.where(c)[0][np.argmax(X[c])]] / (np.median(X[band & ~nh]) + 1e-9)
-    csn = np.array([cs(disp[i]) if body[i] else 0 for i in range(disp.shape[0])])
-    return list(np.argsort(csn)[::-1][:KBINS])
+    csn = {i: cs(i) for i in range(lo_b, hi_b + 1)}
+    hot = max(csn, key=csn.get)                           # cardiac hotspot = chest
+    return [i for i in range(hot - 2, hot + 3) if lo_b <= i <= hi_b]
 
 
 def analyse(path, s0, s1):
@@ -68,7 +74,7 @@ def analyse(path, s0, s1):
     rr_amp = [bandpass(x, fps, RR_LO, 0.6).std() for x in disp]
     Xr = np.abs(np.fft.rfft(bandpass(disp[int(np.argmax(rr_amp))], fps, RR_LO, RR_HI)))
     m = (f >= RR_LO) & (f <= RR_HI); f0 = f[m][np.argmax(Xr[m])]
-    chidx = top_chest_bins(disp, fps, f0)
+    chidx = hr_cluster(disp, fps, f0)
     return disp, fps, tw, N, chidx, [int(bins[c]) for c in chidx], f0
 
 
@@ -76,7 +82,8 @@ def main():
     a = np.loadtxt(WATCH, delimiter=",", skiprows=1); wep, whr = a[:, 0], a[:, 1]
     rows = [("segment", "wall", "radar_fused", "beat_fused", "watch", "d")]
     panels, all_r, all_w = [], [], []
-    print(f"blind radar chest-bin HR (interp + {KBINS}-bin 25%-trimmed fusion)  vs  Apple Watch\n")
+    print("blind radar HR = contiguous chest cluster (cardiac hotspot +/-2, trimmed) "
+          "vs Apple Watch\n")
     for path, s0, s1, lab in SEGS:
         disp, fps, tw, N, chidx, chbins, f0 = analyse(path, s0, s1)
         sigs = [bandpass(disp[c], fps, 1.0, 1.7) for c in chidx]
@@ -118,7 +125,7 @@ def main():
         for k, (lab, chbins, T, R, B, Wv, mae) in enumerate(panels):
             t = T - T[0]
             ax[k].plot(t, Wv, "k-o", lw=2, ms=4, label="Apple Watch")
-            ax[k].plot(t, R, "C1.-", lw=1.6, ms=7, label=f"radar fused ({KBINS} bins, 25%-trim)")
+            ax[k].plot(t, R, "C1.-", lw=1.6, ms=7, label=f"radar chest cluster {chbins}")
             ax[k].plot(t, B, "C0x--", lw=.8, ms=6, alpha=.7, label="radar beat-count (x-check)")
             for yy in (70.4, 75.1, 80.5):
                 ax[k].axhline(yy, color="grey", ls=":", lw=.6, alpha=.6)
