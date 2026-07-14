@@ -41,8 +41,12 @@ HARM_MARGIN_BPM = 5.0           # HR within this of any k*RR => likely a breathi
 MOTION_LO, MOTION_HI = 0.1, 3.0  # Hz: breathing + body sway/fidget
 POSE_TILT_DEFAULT = 35.0         # validated rig geometry (fall-detection-design memory):
 POSE_MOUNT_DEFAULT = 2.3         # 2.3 m high, 35 deg down. Relative separation, not absolute.
-FALL_Z90 = 1.0                   # moving-point Z-90pct below this = lying/on-floor
-STAND_Z90 = 2.6                  # above this = standing; between = sitting (provisional)
+FALL_Z90 = 1.0                   # moving-point Z-90pct below this = low (near floor)
+FALL_EXTENT = 1.0                # AND vertical Z-extent (z90-z10) below this = PLANAR:
+                                 # head/chest/abdomen co-planar (user's fall criterion).
+                                 # lie ~0.77m vs upright ~3.4m -> clean 4x separation,
+                                 # far more robust than absolute height alone.
+STAND_Z90 = 2.6                  # upright: above this = standing; else sitting (provisional)
 POSE_EL_RANGE = (-45.0, 45.0)    # MUST reach +45: a seated upper body sits at ~+22 deg
                                  # (the old +20 clip hid it and broke pose)
 
@@ -189,16 +193,21 @@ def _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount):
     z, x, rng, P = room[:, 2], room[:, 0], room[:, 5], room[:, 3]
     order = np.argsort(z)
     cw = np.cumsum(P[order]) / P.sum()
-    z90 = float(z[order][np.searchsorted(cw, 0.9)])         # energy-weighted Z-90pct
-    if z90 < FALL_Z90:
+    z10 = float(z[order][np.searchsorted(cw, 0.1)])
+    z90 = float(z[order][np.searchsorted(cw, 0.9)])         # energy-weighted percentiles
+    extent = z90 - z10                                       # vertical Z-spread of the body
+    # FALL = LOW and PLANAR (head/chest/abdomen co-planar -> thin Z-band near the floor).
+    # UPRIGHT = a tall Z-column (head above abdomen). Z-extent is calibration-robust:
+    # it compares body parts to each other, not to an absolute floor.
+    if z90 < FALL_Z90 and extent < FALL_EXTENT:
         pose = "fall"
     elif z90 >= STAND_Z90:
         pose = "stand"
     else:
         pose = "sit"
     xc = float((x * P).sum() / P.sum()); rc = float((rng * P).sum() / P.sum())
-    return dict(pose=pose, z90=round(z90, 2), x=round(xc, 2), range_m=round(rc, 2),
-                n_moving=int(pts.shape[0]), motion=float(men.max()))
+    return dict(pose=pose, z90=round(z90, 2), z_extent=round(extent, 2), x=round(xc, 2),
+                range_m=round(rc, 2), n_moving=int(pts.shape[0]), motion=float(men.max()))
 
 
 def measurable_range(bins, dr):
@@ -240,7 +249,7 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     if not out["present"]:
         out.update(hr=None, rr=None, hr_strength=None, hr_confident=False,
                    hr_level="none", hr_reason="empty", fall=False, pose="empty",
-                   pose_z90=None, pose_calibrated=False, target=None, hr_diag=None)
+                   pose_z90=None, pose_extent=None, pose_calibrated=False, target=None, hr_diag=None)
         return out
 
     rr, f0, _, _ = estimate_rr(disp, fps)
@@ -254,11 +263,11 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     # pose from the MOTION-band spatial covariance (moving-scatterer height).
     mp = _pose_from_motion(cube_win, bins, dr, fps, tilt_deg, h_mount)
     if mp:
-        out["pose"] = mp["pose"]; out["pose_z90"] = mp["z90"]
+        out["pose"] = mp["pose"]; out["pose_z90"] = mp["z90"]; out["pose_extent"] = mp["z_extent"]
         out["target"] = dict(range_m=mp["range_m"], x=mp["x"], z=mp["z90"],
                              calibrated=(tilt_deg is not None and h_mount is not None))
     else:
-        out["pose"] = "unknown"; out["pose_z90"] = None; out["target"] = None
+        out["pose"] = "unknown"; out["pose_z90"] = None; out["pose_extent"] = None; out["target"] = None
     out["pose_calibrated"] = bool(mp)
     out["fall"] = (out["pose"] == "fall")
     return out

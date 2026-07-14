@@ -58,9 +58,9 @@
       <span id="pose-sit" class="pill p-dim">SIT</span>
       <span id="pose-fall" class="pill p-dim">FALL</span>
     </div>
-    <div class="row"><span class="k">质心高度 Z (m)</span><span id="posez">—</span></div>
-    <div class="row"><span class="k">标定 calibrated</span><span id="posecal">—</span></div>
-    <div class="muted">未标定时 Z 为近似值（默认 tilt0/高1m）；<code>--tilt --mount</code> 后为真实高度。</div>
+    <div class="row"><span class="k">运动点高度 Z90 (m)</span><span id="posez">—</span></div>
+    <div class="row"><span class="k">垂直跨度 Z-extent (m)</span><span id="poseext">—</span></div>
+    <div class="muted">FALL = 低(Z90&lt;1m) 且 平(跨度&lt;1m，头腹共面)；直立=纵向大跨度。运动带协方差，无需基线。</div>
   </div>
 
   <!-- RR -->
@@ -208,9 +208,8 @@ async function tick(){
   const pcls={stand:"p-ok",sit:"p-warn",fall:"p-bad"};
   for(const k in poses){const el=document.getElementById(poses[k]);
     el.className="pill "+(st.pose===k?pcls[k]:"p-dim");}
-  const tz=st.target?st.target.z:null;
-  document.getElementById("posez").textContent=fmt(tz,2);
-  document.getElementById("posecal").textContent=st.pose_calibrated?"是(真实高度)":"否(近似)";
+  document.getElementById("posez").textContent=fmt(st.pose_z90,2);
+  document.getElementById("poseext").textContent=fmt(st.pose_extent,2);
 
   // RR
   document.getElementById("rr").textContent=fmt(st.rr);
