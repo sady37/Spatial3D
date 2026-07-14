@@ -20,8 +20,8 @@ from bcg_vitals import demod_channels, bandpass, autocorr_peak, RR_LO, RR_HI
 
 TRUTH = 77.0                                   # oximeter 74-81, avg ~77 (REPORT ONLY)
 HRLO, HRHI = 1.0, 1.7                          # validated resting cardiac band
-BLOCKS = ["chairL_20260713_183013.npz", "chairL_20260713_183514.npz",
-          "chairL_20260713_184015.npz", "chairL_20260713_184515.npz"]
+BLOCKS = ["case/chairL_20260713_183013.npz", "case/chairL_20260713_183514.npz",
+          "case/chairL_20260713_184015.npz", "case/chairL_20260713_184515.npz"]
 T0, T1 = 60.0, 300.0                           # skip the just-sat-down transient
 
 

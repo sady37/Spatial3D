@@ -11,10 +11,11 @@ import numpy as np
 from bcg_vitals import demod_channels, estimate_rr, estimate_hr, occupancy
 
 FPS = 18.78
+CASE = "case/"                      # curated cubes live here (raw ones in record/, not tracked)
 CUBES = [("sit33_cube.npz", 82), ("sit39_cube.npz", 81),
          ("lie41_cube.npz", 77), ("fall20_cube.npz", 80),
          ("sidesit_cube.npz", None)]
-EMPTY = [("emptyL_cube.npz", None), ("base_cube.npz", None)]
+EMPTY = [("emptyL_cube.npz", None)]
 
 
 def run(path):
@@ -33,7 +34,7 @@ print("STEP 1 — radar resting RR/HR (current algorithm)\n")
 print("%-18s %-8s | RR   | HR(bpm) band  strength | truth  err" % ("cube", "present"))
 for path, truth in CUBES:
     try:
-        occ, rr, hr, shp = run(path)
+        occ, rr, hr, shp = run(CASE + path)
     except FileNotFoundError:
         print("  %-18s (missing)" % path); continue
     err = "" if truth is None or hr["hr"] is None else "%+.0f" % (hr["hr"] - truth)
@@ -46,7 +47,7 @@ for path, truth in CUBES:
 print("\nempty-room null (should read present=N):")
 for path, _ in EMPTY:
     try:
-        occ, rr, hr, _ = run(path)
+        occ, rr, hr, _ = run(CASE + path)
         print("  %-16s present=%-3s disp_rms=%.3f  (rr=%s hr=%s)" % (
             path.replace("_cube.npz", ""), "Y" if occ["present"] else "N",
             occ["disp_rms"], "%.0f" % rr if rr else "--",

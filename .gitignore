@@ -14,7 +14,10 @@ xwrl68xx_xds110.ccxml
 # raw sleep-pad session data (177MB, kept local)
 sleepad/
 
-# radar raw captures (383MB, kept local) + run logs
-pc/*.npz
+# radar captures + run logs.
+#   pc/record/  = RAW recordings (incl. live 5-min files). NOT uploaded.
+#   pc/case/    = curated cubes the CURRENT algorithm uses. UPLOADED (whitelisted below).
 pc/*.log
-pc/**/*.npz
+pc/**/*.npz          # ignore all cubes by default...
+!pc/case/*.npz       # ...except the curated algorithm case set
+pc/record/           # raw dir never uploaded (cubes, csv, anything)

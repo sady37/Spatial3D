@@ -20,12 +20,15 @@ python3 radar_server.py live
 python3 radar_server.py live --tilt 35 --mount 2.0      # 提供挂载标定 → 启用高度Z/倒地
 python3 radar_server.py live --record chairL            # 同一只读流边显示边存 5-min 文件
 
-# 串口只能开一个：跑 live 时不要再单独跑 cap_stream。--record 就是把 cap_stream 的
-# 录制合并进来，按墙钟 5-min 桶(:00–:04, :05–:09 …)各存 chairL_<桶起始>.npz(cap_stream 同格式)。
+# 串口只能开一个：跑 live 时不要再单独跑 cap_stream。--record 把 cap_stream 的录制合并进来，
+# 按墙钟 5-min 桶(:00–:04, :05–:09 …)各存一个文件到 pc/record/chairL_<桶起始>.npz(cap_stream 同格式)。
 # 停止(Ctrl-C)会把当前未满的桶也 flush 落盘。
+#
+# 目录约定：pc/record/=原始录制,不上传(gitignore);  pc/case/=算法验证所需,上传。
+# 录制默认进 record/;确认某个 cube 是验证要用的,再 `cp pc/record/xxx.npz pc/case/` 并提交。
 
 # 2) 回放验证（无硬件，对手表逐窗对比）
-python3 radar_server.py "../chairL_hr_val_20260713/chairL_sit_20260713_225001.npz@../chairL_hr_val_20260713/watch_hr_0713.csv"
+python3 radar_server.py "../case/chairL_sit_20260713_225001.npz@../case/watch_hr_0713.csv"
 
 # 浏览器打开 http://127.0.0.1:8765
 ```

@@ -90,7 +90,12 @@ def main():
             globals()[setter] = float(argv[i + 1]); del argv[i:i + 2]
     record_prefix = None
     if "--record" in argv:
-        i = argv.index("--record"); record_prefix = argv[i + 1]; del argv[i:i + 2]
+        i = argv.index("--record"); name = argv[i + 1]; del argv[i:i + 2]
+        # recordings ALWAYS land in pc/record/ (raw, gitignored). A bare name ->
+        # pc/record/<name>_<5min-stamp>.npz; only cp what validation needs into pc/case/.
+        rec_dir = os.path.join(os.path.dirname(HERE), "record")
+        os.makedirs(rec_dir, exist_ok=True)
+        record_prefix = name if os.path.sep in name else os.path.join(rec_dir, name)
     spec = argv[0] if argv else "live"
     port = int(argv[1]) if len(argv) > 1 else 8765
     _src = make_source(spec, record_prefix=record_prefix)
