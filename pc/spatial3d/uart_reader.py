@@ -133,6 +133,7 @@ class RadarSession:
                 time.sleep(0.005)
                 continue
             self.frames_read += 1
+            frame.rx_ts = time.time()          # wall-clock at receipt (ms-precision, for offline alignment)
             try:
                 self._q.put_nowait(frame)
             except queue.Full:

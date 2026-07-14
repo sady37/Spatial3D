@@ -13,3 +13,7 @@ xwrl68xx_xds110.ccxml
 
 # raw sleep-pad session data (177MB, kept local)
 sleepad/
+
+# radar raw captures (383MB, kept local) + run logs
+pc/*.npz
+pc/*.log
