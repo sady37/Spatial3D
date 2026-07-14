@@ -17,3 +17,4 @@ sleepad/
 # radar raw captures (383MB, kept local) + run logs
 pc/*.npz
 pc/*.log
+pc/**/*.npz
