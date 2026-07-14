@@ -40,15 +40,27 @@
 </header>
 
 <div class="wrap">
-  <!-- presence / fall -->
+  <!-- presence -->
   <div class="card">
-    <h3>状态 Presence / Fall</h3>
-    <div style="margin-bottom:12px"><span id="present" class="pill p-dim">—</span>
-      <span id="posture" class="pill p-dim">—</span></div>
+    <h3>状态 Presence</h3>
+    <div style="margin-bottom:12px"><span id="present" class="pill p-dim">—</span></div>
     <div class="row"><span class="k">占用集中度 conc</span><span id="conc">—</span></div>
     <div class="row"><span class="k">簇宽 span (m)</span><span id="span">—</span></div>
     <div class="row"><span class="k">目标距离 D (m)</span><span id="rng">—</span></div>
     <div class="row"><span class="k">窗口 window</span><span id="win">—</span></div>
+  </div>
+
+  <!-- pose (from RR centroid) -->
+  <div class="card">
+    <h3>姿态 Pose — RR 质心高度</h3>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <span id="pose-stand" class="pill p-dim">STAND</span>
+      <span id="pose-sit" class="pill p-dim">SIT</span>
+      <span id="pose-fall" class="pill p-dim">FALL</span>
+    </div>
+    <div class="row"><span class="k">质心高度 Z (m)</span><span id="posez">—</span></div>
+    <div class="row"><span class="k">标定 calibrated</span><span id="posecal">—</span></div>
+    <div class="muted">未标定时 Z 为近似值（默认 tilt0/高1m）；<code>--tilt --mount</code> 后为真实高度。</div>
   </div>
 
   <!-- RR -->
@@ -60,7 +72,7 @@
 
   <!-- HR + watch -->
   <div class="card">
-    <h3>心率 HR — vs Apple Watch</h3>
+    <h3>心率 HR — vs Apple Watch &nbsp;<span id="hrconf" class="pill p-dim">—</span></h3>
     <div class="cmp">
       <div><div class="big" style="color:var(--acc)"><span id="hr">—</span></div><div class="d">雷达 radar</div></div>
       <div><div class="big"><span id="whr">—</span></div><div class="d">watch</div></div>
@@ -183,22 +195,34 @@ async function tick(){
   if(st.error){ document.getElementById("stat").textContent="err: "+st.error; return; }
   document.getElementById("stat").textContent="";
 
-  // presence / fall
+  // presence
   const pe=document.getElementById("present");
   if(st.present){pill(pe,"有人 PRESENT","p-ok")} else {pill(pe,"无人 EMPTY","p-dim")}
-  const po=document.getElementById("posture");
-  const pm={upright:["直立 UPRIGHT","p-ok"],on_floor:["倒地 FALL","p-bad"],
-            low:["低姿 LOW","p-warn"],uncalibrated:["未标定挂载","p-dim"],
-            unknown:["? 姿态","p-dim"],empty:["—","p-dim"]};
-  const pv=pm[st.posture]||["—","p-dim"]; pill(po,pv[0],pv[1]);
   document.getElementById("conc").textContent=fmt(st.occ_conc,2);
   document.getElementById("span").textContent=fmt(st.occ_span,3);
   document.getElementById("rng").textContent=fmt(st.range_m,2);
   document.getElementById("win").textContent=(st.win_s||"—")+"s @"+(st.fps||"—")+"fps";
 
-  // RR / HR
+  // pose (RR centroid): light the active of STAND/SIT/FALL
+  const poses={stand:"pose-stand",sit:"pose-sit",fall:"pose-fall"};
+  const pcls={stand:"p-ok",sit:"p-warn",fall:"p-bad"};
+  for(const k in poses){const el=document.getElementById(poses[k]);
+    el.className="pill "+(st.pose===k?pcls[k]:"p-dim");}
+  const tz=st.target?st.target.z:null;
+  document.getElementById("posez").textContent=fmt(tz,2);
+  document.getElementById("posecal").textContent=st.pose_calibrated?"是(真实高度)":"否(近似)";
+
+  // RR
   document.getElementById("rr").textContent=fmt(st.rr);
-  document.getElementById("hr").textContent=fmt(st.hr,1);
+
+  // HR + confidence gate: trusted -> blue value + green badge; else grey + reason
+  const hrEl=document.getElementById("hr"), hc=document.getElementById("hrconf");
+  hrEl.textContent=fmt(st.hr,1);
+  const lvl=st.hr_level;
+  if(lvl==="ok"){pill(hc,"可信","p-ok"); hrEl.style.color="var(--acc)";}
+  else if(lvl==="harmonic"){pill(hc,"存疑·"+(st.hr_reason||""),"p-warn"); hrEl.style.color="var(--warn)";}
+  else if(lvl==="weak"){pill(hc,"遮蔽·弱周期","p-bad"); hrEl.style.color="var(--dim)";}
+  else{pill(hc,"—","p-dim"); hrEl.style.color="var(--dim)";}
   document.getElementById("whr").textContent=fmt(st.watch_hr,0);
   const hd=document.getElementById("hrdiff");
   if(st.hr!=null&&st.watch_hr!=null){const d=st.hr-st.watch_hr;

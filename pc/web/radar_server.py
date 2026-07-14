@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import radar_pipeline as pipe
 from radar_source import make_source
 
-WIN_S = 30.0
+WIN_S = 45.0            # 1.5x the 30s baseline: steadier real-time HR/RR, finer freq res
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 _src = None
@@ -88,29 +88,53 @@ def main():
         if flag in argv:
             i = argv.index(flag)
             globals()[setter] = float(argv[i + 1]); del argv[i:i + 2]
-    record_prefix = None
+    # Recording is PART OF THE LIVE SERVICE — on by default so no session is ever
+    # lost. Custom name via --record NAME; disable only with --no-record.
+    rec_name = "live"
     if "--record" in argv:
-        i = argv.index("--record"); name = argv[i + 1]; del argv[i:i + 2]
-        # recordings ALWAYS land in pc/record/ (raw, gitignored). A bare name ->
-        # pc/record/<name>_<5min-stamp>.npz; only cp what validation needs into pc/case/.
-        rec_dir = os.path.join(os.path.dirname(HERE), "record")
-        os.makedirs(rec_dir, exist_ok=True)
-        record_prefix = name if os.path.sep in name else os.path.join(rec_dir, name)
+        i = argv.index("--record"); rec_name = argv[i + 1]; del argv[i:i + 2]
+    no_record = "--no-record" in argv
+    if no_record:
+        argv.remove("--no-record")
     spec = argv[0] if argv else "live"
     port = int(argv[1]) if len(argv) > 1 else 8765
+    record_prefix = None
+    if spec == "live" and not no_record:
+        # recordings ALWAYS land in pc/record/ (raw, gitignored) as
+        # pc/record/<name>_<5min-stamp>.npz; cp what validation needs into pc/case/.
+        rec_dir = os.path.join(os.path.dirname(HERE), "record")
+        os.makedirs(rec_dir, exist_ok=True)
+        record_prefix = rec_name if os.path.sep in rec_name else os.path.join(rec_dir, rec_name)
     _src = make_source(spec, record_prefix=record_prefix)
     _src.start()
+    # live source needs a moment for the reader thread to see the first frames
+    # (bins are empty until then); wait so measurable_range has a range to report.
+    for _ in range(150):
+        m = _src.meta()
+        if m["bins"]:
+            break
+        time.sleep(0.1)
     m = _src.meta()
+    if not m["bins"]:
+        print("WARN: no radar frames yet (sensor streaming? ports free?). Serving anyway.",
+              flush=True)
     _meta = dict(source=m, win_s=WIN_S, mount_calibrated=(TILT is not None and MOUNT is not None),
                  tilt_deg=TILT, h_mount=MOUNT,
-                 range=pipe.measurable_range(m["bins"], m["dr"]))
+                 range=pipe.measurable_range(m["bins"], m["dr"]) if m["bins"] else None)
     rec = f"  recording 5-min files -> {record_prefix}_*.npz" if record_prefix else ""
     print(f"source={m['kind']} ({m['name']})  bins {min(m['bins']) if m['bins'] else '?'}-"
           f"{max(m['bins']) if m['bins'] else '?'}  serving http://127.0.0.1:{port}{rec}", flush=True)
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # graceful stop on Ctrl-C AND SIGTERM (plain `pkill`) so the read-only serial
+    # attach is released cleanly and never wedges the firmware. NOTE: `kill -9`
+    # (SIGKILL) is uncatchable and CAN wedge the UART -> then power-cycle the radar.
+    import signal
+    def _graceful(*_a):
+        _src.stop(); srv.shutdown()
+    signal.signal(signal.SIGINT, _graceful)
+    signal.signal(signal.SIGTERM, _graceful)
     try:
-        ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
-    except KeyboardInterrupt:
-        pass
+        srv.serve_forever()
     finally:
         _src.stop()
 

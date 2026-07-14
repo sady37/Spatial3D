@@ -30,8 +30,14 @@ from spatial3d.music_collect import to_room, TILT_DEG, H_MOUNT
 HRLO, HRHI = 1.0, 1.7            # validated resting cardiac band
 AZ_RANGE = (-45.0, 45.0)
 EL_RANGE = (-45.0, 20.0)
-FALL_Z_MAX = 0.6                 # m; breathing centroid below this (room frame) = on the floor
-STAND_Z_MIN = 0.9               # m; above this = upright torso
+# --- HR confidence gate (stop reporting a harmonic-locked value as if it were HR) ---
+STRENGTH_MIN = 0.30              # min autocorr periodicity strength to trust the value
+HARM_MARGIN_BPM = 5.0           # HR within this of any k*RR => likely a breathing harmonic
+# --- pose from the RR (breathing) energy centroid height (room frame) ---
+FALL_Z = 0.6                     # z below this = on the floor
+SIT_STAND_Z = 1.05               # z in [FALL_Z, this) = sitting; >= this = standing
+POSE_TILT_DEFAULT = 0.0          # radar horizontal, ~1 m surface: rough default so pose
+POSE_MOUNT_DEFAULT = 1.0         # shows live; pass --tilt/--mount for a calibrated height
 
 
 # ---------------------------------------------------------------- HR (chairL) --
@@ -54,29 +60,39 @@ def _cardiac_snr(disp, fps, f0):
     return float(X[j] / (floor + 1e-9)), float(f[j] * 60)
 
 
-def _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo=None, hr_bin_hi=None):
-    """RR-anchored chest-cluster HR (chairL, watch MAE 1.5).
+CHEST_SEARCH_BINS = 20          # search the chest within +-this of the abdomen anchor
+CHEST_ALPHA = 0.3               # C/B ratio softener (avoid /0 at zero-breathing bins)
 
-    abdomen = max breathing amplitude bin. Body = bins with real breathing.
-    chest = body bin maximizing cardiac-SNR (naturally opposite the abdomen, low
-    breathing). HR = interp-autocorr[HRLO,HRHI] over the chest +/-2 CONTIGUOUS
-    cluster, median-fused (trimmed of the single-bin outliers). If hr_bin_lo/hi
-    given, restrict the chest search to that range-bin window (web bin control)."""
+
+def _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo=None, hr_bin_hi=None):
+    """RR-anchored, GRADIENT chest selection (user's body-model: from the breathing
+    anchor, walk down the fluctuation gradient -> chest = adjacent bin where
+    breathing has DROPPED but cardiac is present). Validated on case cubes: this
+    picks the low-breathing/cardiac bin (chairL 172/182, lie41 168), i.e. the
+    C/B-ratio peak, NOT the abdomen (whose high cardiac-SNR is harmonic leakage).
+
+    chest = argmax over the anchor neighbourhood of  cardiac_snr / (B/B_anchor + a)
+    -> favours cardiac-strong AND breathing-weak. HR = interp-autocorr[HRLO,HRHI]
+    over the chest +/-2 contiguous cluster, median-fused. hr_bin_lo/hi restricts
+    the search to a range-bin window (web bin control)."""
     rr_amp = np.array([bandpass(d, fps, RR_LO, 0.6).std() for d in disp])
-    ab = int(np.argmax(rr_amp))
-    body = rr_amp > 0.12 * rr_amp.max()
-    csnr = np.zeros(len(bins))
+    ab = int(np.argmax(rr_amp))                       # STEP 1: breathing anchor = abdomen
+    b_anchor = rr_amp[ab] + 1e-9
+    # STEP 2: gradient chest score in the anchor neighbourhood
+    score = np.full(len(bins), -1.0)
     for i in range(len(bins)):
-        if not body[i]:
+        if abs(int(bins[i]) - int(bins[ab])) > CHEST_SEARCH_BINS:
             continue
         if hr_bin_lo is not None and not (hr_bin_lo <= int(bins[i]) <= hr_bin_hi):
             continue
-        csnr[i], _ = _cardiac_snr(disp[i], fps, f0)
-    if csnr.max() <= 0:
+        c, _ = _cardiac_snr(disp[i], fps, f0)
+        score[i] = c / (rr_amp[i] / b_anchor + CHEST_ALPHA)   # C/B ratio (gradient)
+    if score.max() <= 0:
         return None, None, dict(abdomen_bin=int(bins[ab]), chest_bin=None, csnr=0.0)
-    ch = int(np.argmax(csnr))
-    # contiguous +/-2 cluster around the chest bin, still within the body span
-    cl = [i for i in range(max(0, ch - 2), min(len(bins), ch + 3)) if body[i]]
+    ch = int(np.argmax(score))
+    csnr_ch, _ = _cardiac_snr(disp[ch], fps, f0)
+    # contiguous +/-2 cluster around the chest bin
+    cl = list(range(max(0, ch - 2), min(len(bins), ch + 3)))
     hrs, hts = [], []
     for i in cl:
         bpm, h = autocorr_peak(bandpass(disp[i], fps, HRLO, HRHI), fps,
@@ -84,11 +100,12 @@ def _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo=None, hr_bin_hi=None):
         if bpm:
             hrs.append(bpm); hts.append(h)
     if not hrs:
-        return None, None, dict(abdomen_bin=int(bins[ab]), chest_bin=int(bins[ch]), csnr=float(csnr[ch]))
+        return None, None, dict(abdomen_bin=int(bins[ab]), chest_bin=int(bins[ch]), csnr=round(float(csnr_ch), 1))
     hr = float(np.median(hrs))
     strength = float(np.median(hts))
     diag = dict(abdomen_bin=int(bins[ab]), chest_bin=int(bins[ch]),
-                cluster_bins=[int(bins[i]) for i in cl], csnr=round(float(csnr[ch]), 1))
+                cluster_bins=[int(bins[i]) for i in cl], csnr=round(float(csnr_ch), 1),
+                chest_score=round(float(score[ch]), 1))
     return round(hr, 1), round(strength, 2), diag
 
 
@@ -108,15 +125,42 @@ def _window_covariances(cube_win, bins, want_bins):
     return covs
 
 
-def _target_xyz(cube_win, bins, dr, center_bin, tilt_deg=None, h_mount=None):
-    """MUSIC DOA of the breathing target (strongest peak on the bins around the
-    occupied range). Returns range_m + cross-range x (both mount-INDEPENDENT), and
-    height z ONLY when a mount calibration (tilt_deg,h_mount) is supplied — z and
-    therefore fall are meaningless without the real rig geometry."""
-    want = [b for b in bins if abs(int(b) - int(center_bin)) <= 3]
-    covs = _window_covariances(cube_win, bins, want)
+def _hr_confidence(hr, strength, rr):
+    """Three-level trust so a harmonic-lock isn't shown as a real reading, WITHOUT
+    hiding a value that is often right. Returns (level, reason):
+      'weak'      periodicity too weak -> don't trust the number at all
+      'harmonic'  strong but sits on a breathing harmonic k*RR -> COULD be the
+                  residue the estimator locks onto; show it but mark 存疑
+      'ok'        strong AND clear of every harmonic -> trust
+    (At normal RR the true resting HR often coincides with ~6*RR — the wall — so
+    'harmonic' is common at rest and does NOT mean the value is wrong, only unproven.)"""
+    if hr is None:
+        return "none", "无"
+    if strength is None or strength < STRENGTH_MIN:
+        return "weak", "弱周期"
+    if rr and rr > 0:
+        k = round(hr / rr)
+        if k >= 1 and abs(hr - k * rr) <= HARM_MARGIN_BPM:
+            return "harmonic", f"≈{k}×RR"
+    return "ok", "ok"
+
+
+def _rr_centroid(cube_win, disp, bins, dr, fps, tilt_deg, h_mount):
+    """Breathing-energy-WEIGHTED spatial centroid (per user: pose from the RR
+    centroid, not a single MUSIC peak -> far more stable). Each breathing bin's
+    DOA is weighted by its RR-band displacement amplitude; the weighted mean is
+    the torso centroid. Returns dict(range_m, x, z, calibrated)."""
+    rr_amp = np.array([np.std(bandpass(d, fps, RR_LO, RR_HI)) for d in disp])
+    if rr_amp.max() <= 0:
+        return None
+    body = np.where(rr_amp > 0.25 * rr_amp.max())[0]        # the breathing bins
+    if len(body) == 0:
+        return None
+    covs = _window_covariances(cube_win, bins, [int(bins[i]) for i in body])
     if not covs:
         return None
+    tilt = POSE_TILT_DEFAULT if tilt_deg is None else tilt_deg
+    mnt = POSE_MOUNT_DEFAULT if h_mount is None else h_mount
     try:
         pts = covariances_to_points(covs, awrl6844_array(), dr=dr,
                                     az_range=AZ_RANGE, el_range=EL_RANGE,
@@ -125,14 +169,26 @@ def _target_xyz(cube_win, bins, dr, center_bin, tilt_deg=None, h_mount=None):
         return None
     if pts.shape[0] == 0:
         return None
-    p = pts[np.argmax(pts[:, 3])]             # [x,y,z_radar,power,bin,range]
-    rng = float(p[5])
-    x_cross = round(float(p[0]), 2)           # radar-frame cross-range: mount-independent
-    out = dict(range_m=round(rng, 2), x=x_cross, z=None, calibrated=False)
-    if tilt_deg is not None and h_mount is not None:
-        room = to_room(p[None, :3], tilt_deg, h_mount)[0]
-        out.update(x=round(float(room[0]), 2), z=round(float(room[2]), 2), calibrated=True)
-    return out
+    amp_by_bin = {int(bins[i]): float(rr_amp[i]) for i in body}
+    room = to_room(pts[:, :3], tilt, mnt)                   # (M,3) room x,y,z
+    w = np.array([amp_by_bin.get(int(b), 0.0) for b in pts[:, 4]])  # RR-energy weights
+    if w.sum() <= 0:
+        return None
+    c = (room * w[:, None]).sum(0) / w.sum()                # weighted centroid
+    rng = float((pts[:, 5] * w).sum() / w.sum())
+    return dict(range_m=round(rng, 2), x=round(float(c[0]), 2),
+                z=round(float(c[2]), 2), calibrated=(tilt_deg is not None and h_mount is not None))
+
+
+def _pose(z):
+    """Fall / Sit / Stand from the breathing-centroid height (room frame)."""
+    if z is None:
+        return "unknown"
+    if z < FALL_Z:
+        return "fall"
+    if z < SIT_STAND_Z:
+        return "sit"
+    return "stand"
 
 
 def measurable_range(bins, dr):
@@ -172,31 +228,24 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     out["range_m"] = live["range_m"]
 
     if not out["present"]:
-        out.update(hr=None, rr=None, hr_strength=None, fall=False, posture="empty",
-                   target=None, hr_diag=None)
+        out.update(hr=None, rr=None, hr_strength=None, hr_confident=False,
+                   hr_level="none", hr_reason="empty", fall=False, pose="empty",
+                   pose_calibrated=False, target=None, hr_diag=None)
         return out
 
     rr, f0, _, _ = estimate_rr(disp, fps)
     out["rr"] = round(rr) if rr else None
 
     hr, strength, diag = _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo, hr_bin_hi)
+    level, reason = _hr_confidence(hr, strength, rr)
     out["hr"] = hr; out["hr_strength"] = strength; out["hr_diag"] = diag
+    out["hr_level"] = level; out["hr_reason"] = reason; out["hr_confident"] = (level == "ok")
 
-    center = diag.get("chest_bin") or int(round(live["range_m"] / dr))
-    tgt = _target_xyz(cube_win, bins, dr, center, tilt_deg, h_mount)
+    # pose from the RR (breathing) energy centroid — stable vs single-peak MUSIC.
+    tgt = _rr_centroid(cube_win, disp, bins, dr, fps, tilt_deg, h_mount)
     out["target"] = tgt
-
-    # posture / fall from the breathing-target height (room frame). ONLY when the
-    # mount is calibrated — z is otherwise meaningless (would false-alarm FALL).
-    # Heuristic v1: upright torso centroid >=0.9m; a person on the floor <0.6m.
-    if tgt is not None and tgt.get("calibrated"):
-        z = tgt["z"]
-        if z < FALL_Z_MAX:
-            out["posture"] = "on_floor"; out["fall"] = True
-        elif z >= STAND_Z_MIN:
-            out["posture"] = "upright"; out["fall"] = False
-        else:
-            out["posture"] = "low"; out["fall"] = False
-    else:
-        out["posture"] = "uncalibrated"; out["fall"] = False
+    z = tgt["z"] if tgt else None
+    out["pose"] = _pose(z)
+    out["pose_calibrated"] = bool(tgt and tgt.get("calibrated"))
+    out["fall"] = (out["pose"] == "fall")
     return out

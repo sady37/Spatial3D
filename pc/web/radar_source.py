@@ -109,7 +109,7 @@ class LiveSource:
     CLI = "/dev/cu.usbmodem0000RA441"
     DATA = "/dev/cu.usbmodem0000RA444"
 
-    def __init__(self, maxwin_s=45.0, record_prefix=None, block_s=300.0, bins=range(60, 271)):
+    def __init__(self, maxwin_s=65.0, record_prefix=None, block_s=300.0, bins=range(60, 271)):
         self.maxwin_s = maxwin_s
         self.dr = DR_M
         self.buf = {}                          # bin -> deque[(ts, vec16)]
