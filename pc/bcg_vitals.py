@@ -250,6 +250,68 @@ def estimate_hr(chans, fps, f0, topk=8, lo=1.0, hi=1.7,
     return out
 
 
+def chest_decoupled_hr(chans, fps, bins=None, lo=0.9, hi=2.3,
+                       min_offset=3, breath_max_frac=0.5, q_conf=0.25):
+    """Range-decoupled chest HR — the SPATIAL escape from RR-harmonic entanglement.
+
+    When HR == k*RR the cardiac line is frequency-coincident with a breathing
+    harmonic and NO frequency method (FFT/autocorr/notch) can split them. But the
+    chest (heart) and abdomen (breathing) sit in DIFFERENT range bins on radial /
+    long-axis geometry, so read HR at the CHEST CLUSTER — bins range-separated from
+    the abdomen where breathing (and thus its harmonic) is suppressed, so the
+    co-frequent cardiac pokes out. CRITICAL: do NOT harmonic-mask here (space has
+    already suppressed breathing; masking by frequency would kill the on-harmonic
+    cardiac). Validated 2026-07-14: chairL 76 (truth ~80), lie_long 68 (truth 71,
+    HR==8xRR) — both where the stock estimate_hr locks the 80.6 harmonic artifact.
+
+    REQUIRES chest/abdomen in different range bins: face-on/seated colocated
+    geometry has no chest bin -> returns decoupled=False. Still MARGINAL (cardiac
+    coherence q~0.4 at the noise floor, ~±2-5 bpm). ⚠️ v1 GATING IS UNRELIABLE (TODO):
+    `confident` (median q>=q_conf) is NOT trustworthy — validated chairL reads q0.22
+    (flagged low yet correct) while a colocated seated capture can read q>=0.25 and be
+    confidently WRONG; and `decoupled=True` false-fires on SECONDARY-REFLECTION bins
+    that sit >=min_offset from the abdomen but are not the real chest. Robust gating
+    (chest must belong to the SAME contiguous breathing body cluster as the abdomen;
+    reject far reflection clusters) is the open problem. Reliable today ONLY on clean
+    radial/long-axis captures (validated lie_long). Do not blind-trust `confident`.
+
+    Returns dict(hr, decoupled, confident, abdomen, chest, q, per_bin, reason).
+    """
+    nbin = len(chans)
+    def _bin(i):
+        return int(bins[i]) if bins is not None else i
+    Pb = np.array([(np.abs(np.fft.rfft(bandpass(c, fps, RR_LO, RR_HI))) ** 2).sum()
+                   for c in chans])
+    ab = int(np.argmax(Pb))
+    # chest candidates: range-separated from the abdomen, breathing suppressed,
+    # but still on the body (breathing above the noise floor, not an empty bin)
+    cand = [i for i in range(nbin)
+            if 0.01 * Pb[ab] < Pb[i] < breath_max_frac * Pb[ab]
+            and abs(_bin(i) - _bin(ab)) >= min_offset]
+    if not cand:
+        return dict(hr=None, decoupled=False, confident=False, abdomen=_bin(ab),
+                    chest=[], q=0.0, per_bin=[], reason="colocated (no chest bin)")
+    rows = []
+    for i in cand:
+        x = bandpass(chans[i], fps, lo, hi)
+        f = np.fft.rfftfreq(len(x), 1 / fps)
+        S = np.abs(np.fft.rfft(x - x.mean())) ** 2
+        m = (f >= lo) & (f <= hi)
+        fftpk = f[m][np.argmax(S[m])] * 60
+        ac, q = autocorr_peak(x, fps, int(lo * 60), int(hi * 60))
+        rows.append((i, fftpk, ac, q))
+    rows.sort(key=lambda r: -r[3])                       # by cardiac coherence q
+    top = rows[:max(3, len(rows) // 2)]                  # high-coherence half
+    # per bin: trust FFT&autoc mean where they agree (<=8bpm), else the sharper FFT
+    vals = [(fp + ac) / 2 if abs(fp - ac) <= 8 else fp for (_, fp, ac, q) in top]
+    hr = float(np.median(vals))
+    qm = float(np.median([r[3] for r in top]))
+    return dict(hr=hr, decoupled=True, confident=qm >= q_conf, abdomen=_bin(ab),
+                chest=[_bin(r[0]) for r in top], q=qm,
+                per_bin=[(_bin(r[0]), round(r[1], 1), round(r[2], 1), round(r[3], 2))
+                         for r in top], reason="")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path")
