@@ -157,6 +157,40 @@ def _hr_confidence(hr, strength, rr):
     return "ok", "ok"
 
 
+try:
+    from scipy.signal import find_peaks as _find_peaks
+except Exception:
+    _find_peaks = None
+
+# breath-pause: normal breathing is CONTINUOUS (I->E, cycle ~3-5s, no gap >~2s), so the
+# honest real-time signal is the TIME SINCE THE LAST BREATH, shown live in the RR window —
+# it sits at ~0-4s while breathing and CLIMBS during a hold. Stateless: pause = window_end -
+# last breath peak, so it grows as the window slides.
+# ⚠️ 4m LIMITATION (verified 2026-07-14): at ~4m seated, a SHALLOW breather and a BREATH-HOLD
+# produce the SAME low-amplitude RR-band signal — no prominence floor separates them (a floor
+# high enough to catch a hold false-alarms resting sit39 at 21s; a floor low enough to pass
+# shallow breaths lets hold-noise reset the pause). So BREATH_PROM is set CONSERVATIVE: at 4m
+# it won't false-alarm resting (better to MISS a far hold than cry wolf) and won't reliably
+# catch holds either. The design is correct and works at CLOSE range / contact (breaths clear
+# of noise -> pause climbs cleanly). Same SNR wall as HR. Re-tune BREATH_PROM at deploy range.
+BREATH_PROM = 0.012          # mm — min peak prominence for a real breath excursion
+
+def _breath_pause(disp, fps):
+    """(pause_s, breath_interval_s, n_breaths) on the strongest-breathing bin."""
+    Pb = np.array([np.mean(bandpass(d, fps, RR_LO, RR_HI) ** 2) for d in disp])
+    ab = int(np.argmax(Pb))
+    x = bandpass(disp[ab], fps, RR_LO, RR_HI)
+    win_s = len(x) / fps
+    prom = max(BREATH_PROM, 0.5 * float(np.median(np.abs(x))))
+    if _find_peaks is None:
+        return None, None, 0
+    pk, _ = _find_peaks(x, distance=max(1, int(fps * 2.0)), prominence=prom)
+    tt = pk / fps
+    interval = float(np.median(np.diff(tt))) if len(tt) > 1 else None
+    pause_s = float(win_s - tt[-1]) if len(tt) else float(win_s)
+    return round(pause_s, 1), (round(interval, 1) if interval else None), len(tt)
+
+
 def _cbandpass(X, fps, lo, hi):
     """Complex slow-time bandpass per antenna (X = (T, n_ant)), DC removed."""
     F = np.fft.fft(X - X.mean(0), axis=0)
@@ -256,6 +290,13 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
 
     rr, f0, _, _ = estimate_rr(disp, fps)
     out["rr"] = round(rr) if rr else None
+
+    # breathing pause (seconds since last breath) shown live in the RR window; climbs on a
+    # hold. Alert if it exceeds 1.8x this person's own interval (>=6s floor); marginal at 4m.
+    pause_s, b_interval, n_breaths = _breath_pause(disp, fps)
+    out["pause_s"] = pause_s; out["breath_interval_s"] = b_interval
+    thr = max(7.0, 2.0 * (b_interval or 4.0))   # conservative: avoid resting false-alarm @4m
+    out["breathing"] = ("pause" if (pause_s is not None and pause_s >= thr) else "normal")
 
     hr, strength, diag = _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo, hr_bin_hi)
     level, reason = _hr_confidence(hr, strength, rr)

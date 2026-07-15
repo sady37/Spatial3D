@@ -20,8 +20,19 @@ import bcg_vitals as bv
 import living_gate as lg
 
 APNEA_MIN_S = 10.0          # sustained amplitude cessation to call apnea
-APNEA_FRAC = 0.30           # amplitude below this fraction of baseline = cessation
+APNEA_FRAC = 0.45           # amplitude below this fraction of the BREATHING level = cessation.
+                            # Reference is the 75th-pct amplitude (the breathing level), NOT
+                            # the median: shallow seated breathing (~22um) + a breath-hold
+                            # (~10um) is 45% of median, so a median-based 30% floor misses it;
+                            # a real hold at 4m only drops to the cardiac/noise ~8-12um floor.
 ERRATIC_CV = 0.55           # IBI coefficient-of-variation above this = erratic breathing
+CESS_ABS = 0.015            # mm — ABSOLUTE cessation floor. A breath-hold drops to the
+                            # cardiac+noise floor (~6-13um @4m); SHALLOW breathing sits above
+                            # it (~19-27um). A pure amplitude FRACTION can't separate them
+                            # (a deep breather's shallow phase is an even lower fraction of
+                            # its own peak than a real hold), so require BOTH amp<frac*ref AND
+                            # amp<CESS_ABS. NOTE: 4m-tuned; the floor tracks range/noise, so
+                            # re-check on a different mount/distance.
 # Presence uses the validated SCENE-INVARIANT living_gate (RR-band spatial concentration +
 # chest-sized cluster), NOT an absolute displacement floor: a noisy empty room varies by
 # environment (2um one session, 12um another) and defeats any fixed floor — a real empty
@@ -106,7 +117,7 @@ def find_apnea(t_amp, amp, baseline, refl, refl_base, fps):
     """Sustained (>= APNEA_MIN_S) breathing cessation, split by body reflection into APNEA
     (reflection retained -> person present holding breath) vs ABSENCE (reflection lost ->
     person left). Returns (apnea_events, absence_events), each (start_s, end_s, dur_s)."""
-    low = amp < APNEA_FRAC * baseline
+    low = (amp < APNEA_FRAC * baseline) & (amp < CESS_ABS)   # relative AND absolute floor
     apnea, absence, i, n = [], [], 0, len(low)
     while i < n:
         if low[i]:
@@ -146,13 +157,17 @@ def monitor(cube, bins, fps, dr=None):
 
     t_rr, rr = continuous_rr(resp, fps)
     times, ibi = breath_cycles(resp, fps, f0)
-    t_amp, amp = amplitude_track(disp_raw, fps)
-    t_ref, refl = reflection_track(cube[ab_idx], fps)
-    baseline = float(np.median(amp)) if len(amp) else 0.0
+    # short 4s window keeps a breath-hold SHARP (a long adaptive window smooths the hold
+    # amplitude up and shortens its sustained-low span -> misses it). Shallow-breathing
+    # false-positives are handled by the ABSOLUTE cessation floor (CESS_ABS), not the window.
+    t_amp, amp = amplitude_track(disp_raw, fps, win=4.0, hop=1.0)
+    t_ref, refl = reflection_track(cube[ab_idx], fps, win=4.0, hop=1.0)
+    baseline = float(np.median(amp)) if len(amp) else 0.0        # depth reporting
+    breathing_ref = float(np.percentile(amp, 75)) if len(amp) else 0.0  # apnea reference
     refl_base = float(np.median(refl)) if len(refl) else 0.0
     present = bool(occ["present"])                     # scene-invariant living_gate verdict
-    apnea, absence = (find_apnea(t_amp, amp, baseline, refl, refl_base, fps)
-                      if (present and baseline > 0) else ([], []))
+    apnea, absence = (find_apnea(t_amp, amp, breathing_ref, refl, refl_base, fps)
+                      if (present and breathing_ref > 0) else ([], []))
 
     rr_med = float(rr_est) if rr_est else (float(np.median(rr)) if len(rr) else None)
     rr_track_mad = float(np.median(np.abs(rr - rr_med))) if len(rr) > 1 else 0.0  # robust

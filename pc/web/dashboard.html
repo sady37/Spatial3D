@@ -70,7 +70,9 @@
   <div class="card">
     <h3>呼吸 RR</h3>
     <div class="big"><span id="rr">—</span> <span class="unit">/min</span></div>
-    <div class="muted" style="margin-top:8px">腹端 bin <span id="abbin">—</span></div>
+    <div style="margin-top:8px">暂停 <span id="pause" style="font-weight:700">—</span> <span class="unit">s</span>
+      <span id="breathflag" class="muted"></span></div>
+    <div class="muted" style="margin-top:4px">腹端 bin <span id="abbin">—</span></div>
   </div>
 
   <!-- HR + watch -->
@@ -237,8 +239,12 @@ async function tick(){
   document.getElementById("posez").textContent=fmt(st.pose_z90,2);
   document.getElementById("posefrac").textContent=st.pose_floor_frac!=null?(st.pose_floor_frac*100).toFixed(0)+"%":"—";
 
-  // RR
+  // RR + breathing pause (seconds since last breath; climbs on a hold)
   document.getElementById("rr").textContent=fmt(st.rr);
+  var pel=document.getElementById("pause"), bf=document.getElementById("breathflag");
+  pel.textContent = (st.pause_s==null? "—" : st.pause_s.toFixed(1));
+  if(st.breathing==="pause"){ pel.style.color="#f85149"; bf.textContent="⚠ 呼吸中断"; bf.style.color="#f85149"; }
+  else { pel.style.color=""; bf.textContent=""; }
 
   // HR + confidence gate: trusted -> blue value + green badge; else grey + reason
   const hrEl=document.getElementById("hr"), hc=document.getElementById("hrconf");
