@@ -31,12 +31,13 @@ from collections import deque
 PERSIST_S = 25.0
 PERSIST_FRAC = 0.5
 _present_hist = deque()   # (t, present_bool) from each fresh compute
-# breath-HOLD hold-over: living_window is breathing-based, so a breath-hold reads 'absent'
-# and shuts off the pause counter exactly when it should climb. Keep presence while the
-# static BODY REFLECTION persists near its breathing-time level (person there, not breathing);
-# only a LOST reflection = truly left.
+# Presence: RR (breathing) OPENS THE DOOR (living_window establishes a person via the RR-band
+# spatial concentration, and rejects empty-room noise). Once open, the static BODY REFLECTION
+# HOLDS presence for up to HOLD_MAX_S during a breath-hold (person there, not breathing) — a
+# breath-hold otherwise reads 'absent' and shuts off the pause counter when it should climb.
+# Reflection lost, or the hold exceeds HOLD_MAX_S -> 'left'.
 HOLD_REFL_FRAC = 0.6
-HOLD_MAX_S = 90.0         # cap the hold-over so a real departure eventually reads 'left'
+HOLD_MAX_S = 60.0         # body reflection holds presence 60s after breathing stops (user spec)
 _refl_ema = None
 _last_present_t = 0.0
 
