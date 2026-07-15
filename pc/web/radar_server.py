@@ -31,6 +31,14 @@ from collections import deque
 PERSIST_S = 25.0
 PERSIST_FRAC = 0.5
 _present_hist = deque()   # (t, present_bool) from each fresh compute
+# breath-HOLD hold-over: living_window is breathing-based, so a breath-hold reads 'absent'
+# and shuts off the pause counter exactly when it should climb. Keep presence while the
+# static BODY REFLECTION persists near its breathing-time level (person there, not breathing);
+# only a LOST reflection = truly left.
+HOLD_REFL_FRAC = 0.6
+HOLD_MAX_S = 90.0         # cap the hold-over so a real departure eventually reads 'left'
+_refl_ema = None
+_last_present_t = 0.0
 
 _src = None
 _meta = None
@@ -59,6 +67,19 @@ def _state(bin_lo, bin_hi):
         st["watch_hr"] = watch_hr
         st["warming"] = False
     with _lock:
+        # breath-HOLD hold-over (before persistence): if breathing stopped but the body
+        # reflection persists near its breathing-time level and we were present recently,
+        # keep presence and mark 'pause' so the pause counter shows; a lost reflection = left.
+        global _refl_ema, _last_present_t
+        br = st.get("breathing_present"); refl = st.get("body_refl")
+        if br and refl:
+            _refl_ema = refl if _refl_ema is None else 0.9 * _refl_ema + 0.1 * refl
+            _last_present_t = now
+        elif (not br) and refl and _refl_ema and not st.get("warming"):
+            if refl >= HOLD_REFL_FRAC * _refl_ema and now - _last_present_t < HOLD_MAX_S:
+                st["present"] = True          # person present (breathing state from pause_s)
+            else:
+                st["breathing"] = "left"
         # presence PERSISTENCE: a single living_window verdict flickers to 'present' on
         # an elevated-noise empty room (leaked RR=18 with nobody there). Keep the last
         # PERSIST_S of verdicts and require a majority — a lone flicker no longer counts.

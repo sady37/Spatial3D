@@ -278,25 +278,37 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     out = dict(fps=round(fps, 2), win_s=round(T / fps, 1), n_bins=len(bins))
 
     live = living_window(disp, bins, dr, fps)
-    out["present"] = bool(live["present"])
+    breathing_present = bool(live["present"])
     out["occ_conc"] = live["conc"]; out["occ_span"] = live["span"]
     out["range_m"] = live["range_m"]
 
-    if not out["present"]:
-        out.update(hr=None, rr=None, hr_strength=None, hr_confident=False,
-                   hr_level="none", hr_reason="empty", fall=False, pose="empty",
-                   pose_z90=None, pose_floor_frac=None, pose_calibrated=False, target=None, hr_diag=None)
-        return out
+    # ALWAYS-computed (even when breathing stops): pause since last breath + body reflection.
+    # living_window is BREATHING-based, so a breath-HOLD reads 'absent' and would shut off the
+    # pause counter exactly when it should climb. Compute pause_s + reflection here and let the
+    # server hold presence via the static reflection (person still there, just not breathing).
+    pause_s, b_interval, n_breaths = _breath_pause(disp, fps)
+    body_refl = float(np.abs(cube_win.mean(1)).mean(1).max())   # peak static reflection
+    out["pause_s"] = pause_s; out["breath_interval_s"] = b_interval
+    out["body_refl"] = body_refl; out["breathing_present"] = breathing_present
+    out["present"] = breathing_present            # server may override to True during a hold
+    # breathing state comes from pause_s DIRECTLY (not living_window, which false-reads
+    # 'absent' during/after a hold even while the person is breathing).
+    thr = max(7.0, 2.0 * (b_interval or 4.0))     # conservative: avoid resting false-alarm @4m
+    out["breathing"] = ("pause" if (pause_s is not None and pause_s >= thr) else "normal")
 
+    # RR computed ALWAYS (person may be present via reflection even when living_window
+    # false-reads 'absent' while breathing) — otherwise RR blanks out during/after a hold.
     rr, f0, _, _ = estimate_rr(disp, fps)
     out["rr"] = round(rr) if rr else None
 
-    # breathing pause (seconds since last breath) shown live in the RR window; climbs on a
-    # hold. Alert if it exceeds 1.8x this person's own interval (>=6s floor); marginal at 4m.
-    pause_s, b_interval, n_breaths = _breath_pause(disp, fps)
-    out["pause_s"] = pause_s; out["breath_interval_s"] = b_interval
-    thr = max(7.0, 2.0 * (b_interval or 4.0))   # conservative: avoid resting false-alarm @4m
-    out["breathing"] = ("pause" if (pause_s is not None and pause_s >= thr) else "normal")
+    if not breathing_present:
+        # living_window says no breathing: keep RR/pause/reflection for the server's
+        # hold-vs-left decision; skip the heavy HR/pose.
+        out.update(hr=None, hr_strength=None, hr_confident=False,
+                   hr_level="none", hr_reason="no-breath", fall=False, pose="unknown",
+                   pose_z90=None, pose_floor_frac=None, pose_calibrated=False, target=None,
+                   hr_diag=None)
+        return out
 
     hr, strength, diag = _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo, hr_bin_hi)
     level, reason = _hr_confidence(hr, strength, rr)
