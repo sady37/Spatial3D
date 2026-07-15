@@ -169,6 +169,16 @@ except Exception:
 # hold and hides it). pause_s = seconds since the last completed breath. The waveform itself is
 # streamed to the dashboard so a person can read holds/irregularity directly.
 BREATH_PROM = 0.010          # mm — floor to reject noise wiggles; cycle timescale does the rest
+AMP_FLOOR = 0.015            # mm — body-bin breathing amplitude below this = empty/environmental
+                            # micro-motion (this room's empty floor ~9um; ideal ~3um), NOT
+                            # breathing (seated 36um, lying 559um = 4-60x above). Verified the
+                            # empty 'fluctuation' is a real per-bin ~9um oscillation (not phase
+                            # noise, not common-mode) — only ABSOLUTE amplitude separates it.
+QMIN = 0.35                  # min breathing periodicity (autocorr) to count as REAL breathing.
+                            # Empty-room phase noise (~10um) has NO periodicity -> no RR; real
+                            # breathing (even shallow 20-30um > the ~10um noise floor) is
+                            # periodic -> RR. (The 'weak' signal is the HEARTBEAT, ~2-3um <
+                            # noise floor — NOT breathing, which is always > stationary noise.)
 _SOS = {}
 
 def _rr_sos(fps):
@@ -194,10 +204,18 @@ def _breath_wave(disp, fps, ds_hz=4.0):
         tt = np.array([])
     pause_s = float(win_s - tt[-1]) if len(tt) else float(win_s)
     interval = float(np.median(np.diff(tt))) if len(tt) > 1 else None
+    # breathing QUALITY = periodicity: autocorrelation peak at a breath-period lag (1.5-10s).
+    # Real breathing is smooth + quasi-periodic -> high; broadband noise (fluctuation without
+    # a breathing SHAPE/FREQUENCY) -> low. This rejects 'any wiggle looks like breathing'.
+    d = w - w.mean()
+    ac = np.correlate(d, d, "full")[len(d) - 1:]
+    ac = ac / (ac[0] + 1e-12)
+    lo, hi = int(1.5 * fps), min(len(ac) - 1, int(10.0 * fps))
+    quality = float(np.max(ac[lo:hi])) if hi > lo else 0.0
     step = max(1, int(round(fps / ds_hz)))
     wave = [round(float(v) * 1000.0, 1) for v in w[::step]]          # um, downsampled
     marks = [round(float(t), 2) for t in tt]
-    return wave, marks, round(pause_s, 1), (round(interval, 1) if interval else None), round(win_s, 1)
+    return wave, marks, round(pause_s, 1), (round(interval, 1) if interval else None), round(win_s, 1), round(quality, 2)
 
 
 def _cbandpass(X, fps, lo, hi):
@@ -295,30 +313,37 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     # living_window is BREATHING-based, so a breath-HOLD reads 'absent' and would shut off the
     # pause counter exactly when it should climb. Compute pause_s + reflection here and let the
     # server hold presence via the static reflection (person still there, just not breathing).
-    wave, marks, pause_s, b_interval, wave_s = _breath_wave(disp, fps)
-    body_refl = float(np.abs(cube_win.mean(1)).mean(1).max())   # peak static reflection
+    wave, marks, pause_s, b_interval, wave_s, quality = _breath_wave(disp, fps)
+    Pb = np.array([np.mean(bandpass(d, fps, RR_LO, RR_HI) ** 2) for d in disp])
+    ab_idx = int(np.argmax(Pb))                                 # the person's (abdomen) bin
+    refl_bins = np.abs(cube_win.mean(1)).mean(1)                # per-bin STATIC reflection
     out["pause_s"] = pause_s; out["breath_interval_s"] = b_interval
     out["breath_wave"] = wave; out["breath_marks"] = marks; out["breath_wave_s"] = wave_s
-    out["body_refl"] = body_refl; out["breathing_present"] = breathing_present
-    out["present"] = breathing_present            # server may override to True during a hold
-    # breathing state comes from pause_s DIRECTLY (not living_window, which false-reads
-    # 'absent' during/after a hold even while the person is breathing).
-    thr = max(7.0, 2.0 * (b_interval or 4.0))     # conservative: avoid resting false-alarm @4m
+    out["breath_ptp"] = (round(max(wave) - min(wave), 1) if wave else 0.0)   # window breath peak-to-peak (um)
+    out["breath_quality"] = quality                            # breathing periodicity (shape/freq gate)
+    out["breath_bin_idx"] = ab_idx
+    # ABSOLUTE-AMPLITUDE presence gate: the body bin's breathing amplitude must clear the
+    # empty/environmental micro-motion floor. This is what actually separates empty (~9um) from
+    # breathing (36um+) — spatial concentration/periodicity/SNR-ratio all failed (empty noise
+    # has band amplitude + non-uniform bins). RR is reported ONLY when this AND living_window pass.
+    body_amp = float(np.std(bandpass(disp[ab_idx], fps, RR_LO, RR_HI)))
+    out["body_amp"] = round(body_amp * 1000, 1)   # um
+    breathing_present = breathing_present and (body_amp >= AMP_FLOOR)
+    out["breathing_present"] = breathing_present
+    out["present"] = breathing_present
+    thr = max(7.0, 2.0 * (b_interval or 4.0))
     out["breathing"] = ("pause" if (pause_s is not None and pause_s >= thr) else "normal")
 
-    # RR computed ALWAYS (person may be present via reflection even when living_window
-    # false-reads 'absent' while breathing) — otherwise RR blanks out during/after a hold.
-    rr, f0, _, _ = estimate_rr(disp, fps)
-    out["rr"] = round(rr) if rr else None
-
     if not breathing_present:
-        # living_window says no breathing: keep RR/pause/reflection for the server's
-        # hold-vs-left decision; skip the heavy HR/pose.
-        out.update(hr=None, hr_strength=None, hr_confident=False,
+        # no real breathing (empty / environmental micro-motion / person left) -> no RR.
+        out.update(rr=None, hr=None, hr_strength=None, hr_confident=False,
                    hr_level="none", hr_reason="no-breath", fall=False, pose="unknown",
                    pose_z90=None, pose_floor_frac=None, pose_calibrated=False, target=None,
                    hr_diag=None)
         return out
+
+    rr, f0, _, _ = estimate_rr(disp, fps)
+    out["rr"] = round(rr) if rr else None
 
     hr, strength, diag = _hr_chest_cluster(disp, bins, fps, f0, hr_bin_lo, hr_bin_hi)
     level, reason = _hr_confidence(hr, strength, rr)

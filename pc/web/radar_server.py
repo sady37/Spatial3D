@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import radar_pipeline as pipe
 from radar_source import make_source
 
-WIN_S = 45.0            # 1.5x the 30s baseline: steadier real-time HR/RR, finer freq res
+WIN_S = 20.0            # analysis window (user 2026-07-14, per sleepad validation 20-30s) —
+                        # shorter window = faster real-time response to holds / person leaving
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Presence PERSISTENCE: living_window (single window) false-positives ~11% on an
@@ -40,6 +41,7 @@ HOLD_REFL_FRAC = 0.6
 HOLD_MAX_S = 60.0         # body reflection holds presence 60s after breathing stops (user spec)
 _refl_ema = None
 _last_present_t = 0.0
+_person_bin = None       # remembered range-bin of the person (for range-specific hold-over)
 
 _src = None
 _meta = None
@@ -68,19 +70,12 @@ def _state(bin_lo, bin_hi):
         st["watch_hr"] = watch_hr
         st["warming"] = False
     with _lock:
-        # breath-HOLD hold-over (before persistence): if breathing stopped but the body
-        # reflection persists near its breathing-time level and we were present recently,
-        # keep presence and mark 'pause' so the pause counter shows; a lost reflection = left.
-        global _refl_ema, _last_present_t
-        br = st.get("breathing_present"); refl = st.get("body_refl")
-        if br and refl:
-            _refl_ema = refl if _refl_ema is None else 0.9 * _refl_ema + 0.1 * refl
-            _last_present_t = now
-        elif (not br) and refl and _refl_ema and not st.get("warming"):
-            if refl >= HOLD_REFL_FRAC * _refl_ema and now - _last_present_t < HOLD_MAX_S:
-                st["present"] = True          # person present (breathing state from pause_s)
-            else:
-                st["breathing"] = "left"
+        # NOTE: a static-reflection 'breath-hold hold-over' was tried and REMOVED — the
+        # background/empty-chair reflects ~the same as the still body, so it can't tell a
+        # breath-HOLD from a person LEAVING (both = no breathing), and it kept RR showing
+        # for 60s after the person left. Presence now strictly follows BREATHING (below).
+        # Consequence: a breath-hold also reads 'no breathing' — this radar cannot separate
+        # hold from departure by static reflection. Prioritize: no breathing => no RR.
         # presence PERSISTENCE: a single living_window verdict flickers to 'present' on
         # an elevated-noise empty room (leaked RR=18 with nobody there). Keep the last
         # PERSIST_S of verdicts and require a majority — a lone flicker no longer counts.

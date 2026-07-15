@@ -266,7 +266,8 @@ async function tick(){
   if(st.breathing==="pause"){ pel.style.color="#f85149"; bf.textContent="⚠ 呼吸中断"; bf.style.color="#f85149"; }
   else if(st.breathing==="left"){ pel.style.color=""; bf.textContent="已离开"; bf.style.color="#8b949e"; }
   else { pel.style.color=""; bf.textContent=""; }
-  drawBreath(st.breath_wave, st.breath_marks, st.breath_wave_s);
+  if(st.present){ drawBreath(st.breath_wave, st.breath_marks, st.breath_wave_s); }
+  else { drawBreath(null, null, st.breath_wave_s); }   // no person -> blank the curve
 
   // HR + confidence gate: trusted -> blue value + green badge; else grey + reason
   const hrEl=document.getElementById("hr"), hc=document.getElementById("hrconf");
