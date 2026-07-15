@@ -22,6 +22,16 @@ from radar_source import make_source
 WIN_S = 45.0            # 1.5x the 30s baseline: steadier real-time HR/RR, finer freq res
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Presence PERSISTENCE: living_window (single window) false-positives ~11% on an
+# elevated-noise empty room (12um clutter passes the concentration/cluster test now and
+# then), which leaked 'RR=18' with nobody present. Require a MAJORITY of the last
+# PERSIST_S of per-window verdicts (the validated living_present logic, applied to the
+# real-time stream) — a lone flicker no longer declares a person.
+from collections import deque
+PERSIST_S = 25.0
+PERSIST_FRAC = 0.5
+_present_hist = deque()   # (t, present_bool) from each fresh compute
+
 _src = None
 _meta = None
 _shutdown = None     # set in main() to the graceful stop fn (for /api/quit)
@@ -49,6 +59,21 @@ def _state(bin_lo, bin_hi):
         st["watch_hr"] = watch_hr
         st["warming"] = False
     with _lock:
+        # presence PERSISTENCE: a single living_window verdict flickers to 'present' on
+        # an elevated-noise empty room (leaked RR=18 with nobody there). Keep the last
+        # PERSIST_S of verdicts and require a majority — a lone flicker no longer counts.
+        p = st.get("present")
+        if p is not None and not st.get("warming"):
+            _present_hist.append((now, bool(p)))
+            while _present_hist and now - _present_hist[0][0] > PERSIST_S:
+                _present_hist.popleft()
+            flags = [f for _, f in _present_hist]
+            frac = sum(flags) / len(flags) if flags else 0.0
+            st["present_frac"] = round(frac, 2)
+            if len(flags) >= 5 and frac < PERSIST_FRAC and st.get("present"):
+                st.update(present=False, hr=None, rr=None, hr_strength=None,
+                          hr_confident=False, hr_level="none", hr_reason="empty",
+                          fall=False, pose="empty")
         _cache.update(t=now, key=key, state=st)
     return st
 
