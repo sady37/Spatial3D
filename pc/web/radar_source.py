@@ -115,6 +115,9 @@ class LiveSource:
         self.maxwin_s = maxwin_s
         self.dr = DR_M
         self.buf = {}                          # bin -> deque[(ts, vec16)]
+        self._scene = {"points": None, "targets": [], "t": 0.0}  # People_Tracking live scene
+        self._z_hist = deque(maxlen=7)         # primary-track Z, ~0.7s median-smoothed
+        self._pc_hist = deque()                # (ts, xyz, snr) 3001 points, ~0.5s accum
         self._lock = threading.Lock()
         self._run = False
         self._thr = None
@@ -126,6 +129,7 @@ class LiveSource:
         self.rec_bins = bins
         self._rec_acc = None
         self._rec_ts = []
+        self._sc_frames = []                    # People_Tracking scene/320 record buffer
         self._rec_bucket = None                 # int(epoch // block_s) of current file
         self._rec_on = bool(save_on)            # runtime SAVE switch; stream runs regardless
         self._ctl = None                        # pending on/off/status req (serviced in reader)
@@ -157,6 +161,47 @@ class LiveSource:
         print(f"[rec] SAVED {out}: {len(binsA)} bins, {len(self._rec_ts)} frames, {dur:.0f}s", flush=True)
         return out
 
+    def _flush_scene(self):
+        """Save the current 5-min block of People_Tracking scene/320 to
+        <prefix>_scene_<bucketstart>.npz (cap_320 schema + per-frame track XYZ)."""
+        if not self.record_prefix or not self._sc_frames:
+            return None
+        out = f"{self.record_prefix}_scene_{self._bucket_stamp(self._rec_bucket)}.npz"
+        if os.path.exists(out):
+            k = 2
+            while os.path.exists(f"{out[:-4]}_{k}.npz"):
+                k += 1
+            out = f"{out[:-4]}_{k}.npz"
+        ts, n_points = [], []
+        e_frame, e_tid, e_bin, e_vel, e_range, e_vec = [], [], [], [], [], []
+        t_frame, t_tid, t_x, t_y, t_z = [], [], [], [], []
+        n_ant = 0
+        for fi, fr in enumerate(self._sc_frames):
+            ts.append(fr["ts"]); n_points.append(fr["n_points"])
+            for e in fr["tbc"]:
+                e_frame.append(fi); e_tid.append(e.tid); e_bin.append(e.range_bin)
+                e_vel.append(e.vel_mmps); e_range.append(e.range_m); e_vec.append(e.vec)
+                n_ant = len(e.vec)
+            for t in fr["tgts"]:
+                t_frame.append(fi); t_tid.append(t.tid)
+                t_x.append(t.x); t_y.append(t.y); t_z.append(t.z)
+        np.savez_compressed(
+            out,
+            ts=np.asarray(ts, np.float64), n_points=np.asarray(n_points, np.int32),
+            n_ant=np.int32(n_ant),
+            e_frame=np.asarray(e_frame, np.int32), e_tid=np.asarray(e_tid, np.int32),
+            e_bin=np.asarray(e_bin, np.int32), e_vel=np.asarray(e_vel, np.int16),
+            e_range=np.asarray(e_range, np.float32),
+            e_vec=(np.stack(e_vec).astype(np.complex64) if e_vec
+                   else np.empty((0, n_ant), np.complex64)),
+            t_frame=np.asarray(t_frame, np.int32), t_tid=np.asarray(t_tid, np.int32),
+            t_x=np.asarray(t_x, np.float32), t_y=np.asarray(t_y, np.float32),
+            t_z=np.asarray(t_z, np.float32),
+            block_start_epoch=np.float64(self._rec_bucket * self.block_s))
+        print(f"[rec] SAVED {out}: {len(ts)} frames, {len(e_frame)} 320-entries, "
+              f"{len(t_frame)} track-pts", flush=True)
+        return out
+
     def _service_ctl(self):
         """Serviced in the reader thread (sole owner of rec state) so the SAVE
         switch never races with accumulation. ON => resume 5-min rolling. OFF =>
@@ -171,14 +216,18 @@ class LiveSource:
             req["result"] = {"saving": True}
         elif act == "off":
             path = self._flush_block()          # 立即落盘当前这段
+            sc_path = self._flush_scene()
             self._rec_on = False
             self._rec_acc = None
             self._rec_ts = []
+            self._sc_frames = []
             self._rec_bucket = None
-            req["result"] = {"saving": False, "saved": path}
+            req["result"] = {"saving": False, "saved": sc_path or path}
         else:                                   # status
-            dur = (self._rec_ts[-1] - self._rec_ts[0]) if len(self._rec_ts) > 1 else 0.0
-            req["result"] = {"saving": self._rec_on, "frames": len(self._rec_ts),
+            tseq = self._rec_ts if len(self._rec_ts) > 1 else [f["ts"] for f in self._sc_frames]
+            frames = max(len(self._rec_ts), len(self._sc_frames))
+            dur = (tseq[-1] - tseq[0]) if len(tseq) > 1 else 0.0
+            req["result"] = {"saving": self._rec_on, "frames": frames,
                              "dur_s": round(dur, 1)}
         req["ev"].set()
         self._ctl = None
@@ -210,11 +259,14 @@ class LiveSource:
         if self._rec_bucket is None:
             self._rec_bucket = bucket
             self._rec_acc = BinAccumulator(k=200000, n_ant=N_VIRT_ANT)
+            self._sc_frames = []
         elif bucket != self._rec_bucket:
             self._flush_block()
+            self._flush_scene()
             self._rec_bucket = bucket
             self._rec_acc = BinAccumulator(k=200000, n_ant=N_VIRT_ANT)
             self._rec_ts = []
+            self._sc_frames = []
 
     def _record(self, ra, ts):
         """Accumulate one frame into the current block (rotation is time-driven in
@@ -248,6 +300,51 @@ class LiveSource:
                 print(f"[live] frames resumed after {now - last_frame_w:.0f}s gap.", flush=True)
                 stale = False
             last_frame_w = now
+            # People_Tracking SCENE (points + tracks) — every frame, independent of
+            # range_antenna (which is None on the People_Tracking firmware).
+            try:
+                sc_ts = getattr(f, "rx_ts", None) or now
+                pts = f.detected_points(); tgts = f.targets()
+                tbc = f.track_bin_cube()
+                ncube = len(tbc.entries) if tbc is not None else 0
+                if tgts:
+                    self._z_hist.append(float(tgts[0].z))
+                z_smooth = float(np.median(self._z_hist)) if self._z_hist else None
+                # accumulate the 3001 minor point cloud over ~0.5s for the block-person
+                pc = f.point_cloud()
+                if pc is not None and len(pc.xyz):
+                    self._pc_hist.append((sc_ts, pc.xyz, pc.snr))
+                while self._pc_hist and self._pc_hist[0][0] < now - 0.5:
+                    self._pc_hist.popleft()
+                if self._pc_hist:
+                    pc_xyz = np.concatenate([p[1] for p in self._pc_hist])
+                    pc_snr = np.concatenate([p[2] for p in self._pc_hist])
+                else:
+                    pc_xyz = np.empty((0, 3), np.float32); pc_snr = np.empty(0, np.float32)
+                self._scene = {"points": pts, "targets": tgts, "t": sc_ts, "n_cube": ncube,
+                               "z_smooth": z_smooth,
+                               "y0": float(tgts[0].y) if tgts else None,
+                               "pc_xyz": pc_xyz, "pc_snr": pc_snr}
+                # Feed the breathing/HR pipeline: this firmware emits the slow-time cube
+                # as TLV 320 (per STILL-track per-bin 16-ant zero-Doppler vectors), NOT
+                # range_antenna. Route those into the SAME per-bin buffer window() reads,
+                # so RR/HR compute whenever a still track is present.
+                if tbc is not None and tbc.entries:
+                    cutoff = now - self.maxwin_s
+                    with self._lock:
+                        for e in tbc.entries:
+                            dq = self.buf.setdefault(int(e.range_bin), deque())
+                            dq.append((sc_ts, np.asarray(e.vec, np.complex64)))
+                            while dq and dq[0][0] < cutoff:
+                                dq.popleft()
+                # record the scene/320 stream on the same 5-min buckets as the cube,
+                # gated by the SAME write switch (single upstream control).
+                if self.record_prefix and self._rec_on and self._rec_bucket is not None:
+                    self._sc_frames.append({
+                        "ts": sc_ts, "n_points": len(pts), "tgts": tgts,
+                        "tbc": tbc.entries if tbc is not None else []})
+            except Exception:
+                pass
             ra = f.range_antenna()
             if ra is None:
                 continue
@@ -275,6 +372,7 @@ class LiveSource:
             self._thr.join(timeout=2.0)
         if self._rec_on:
             self._flush_block()                          # save the partial current block
+            self._flush_scene()                          # + partial People_Tracking scene/320
         if self._sess:
             try:
                 self._sess.close(stop_sensor=False)      # READ-ONLY: never stop the sensor
@@ -286,6 +384,10 @@ class LiveSource:
             bins = sorted(self.buf)
         return dict(bins=bins, dr=self.dr, kind=self.kind, name=self.name,
                     fps=None, duration_s=None)
+
+    def scene(self):
+        """Latest People_Tracking points + tracks (for the /api/scene panel)."""
+        return self._scene
 
     def window(self, win_s):
         now = time.time()

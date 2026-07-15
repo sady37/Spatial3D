@@ -24,3 +24,6 @@ pc/**/*.npz
 !pc/case/*.npz
 # raw dir never uploaded (cubes, csv, anything)
 pc/record/
+
+# TI reference demos (third-party, not part of our source)
+ti_ref/

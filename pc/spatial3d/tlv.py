@@ -6,16 +6,19 @@ exact TLV type IDs and point struct can vary between demos, so verify against
 the L-SDK demo's `<demo>_output.h` once the radar is streaming (use the `dump`
 tool to capture real bytes).
 
-Frame layout (little-endian):
-    magic[8]        = 02 01 04 03 06 05 08 07
-    version         uint32
-    totalPacketLen  uint32   (whole frame incl. this header)
-    platform        uint32
-    frameNumber     uint32
-    timeCpuCycles   uint32
-    numDetectedObj  uint32
-    numTLVs         uint32
-    subFrameNumber  uint32
+Frame layout (little-endian) — People_Tracking `MmwDemo_output_message_headerID`,
+44 bytes (NOTE: the SBR/People_Tracking demo splits detected-obj into Major+Minor,
+so this header is 44B / 9 uint32, not the classic 40B / 8 uint32 mmw-demo header):
+    magic[8]            = 02 01 04 03 06 05 08 07
+    version             uint32
+    totalPacketLen      uint32   (whole frame incl. this header, padded to SEGMENT_LEN=32)
+    platform            uint32
+    frameNumber         uint32
+    timeCpuCycles       uint32
+    numDetectedObjMajor uint32
+    numDetectedObjMinor uint32
+    numTLVs             uint32
+    subFrameNumber      uint32
     -- then numTLVs of: [type uint32][length uint32][payload length bytes]
 """
 
@@ -29,8 +32,8 @@ MAGIC = bytes([0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07])
 
 import struct
 
-_HDR = struct.Struct("<8s8I")   # magic + 8 uint32
-HEADER_SIZE = _HDR.size          # 40
+_HDR = struct.Struct("<8s9I")   # magic + 9 uint32 (People_Tracking headerID, 44B)
+HEADER_SIZE = _HDR.size          # 44
 _TLV_HDR = struct.Struct("<2I")  # type, length
 
 # Common TLV type IDs (standard mmWave demo). Confirm against L-SDK.
@@ -57,6 +60,32 @@ _BYTES_PER_ANT = 4                          # cmplx16ImRe_t: int16 imag + int16 
 # Detected-point struct: x, y, z, doppler  (float32 each) = 16 bytes.
 _POINT = struct.Struct("<4f")
 
+# --- Tracker-driven per-bin zero-Doppler cube (Spatial3D firmware feature) ---
+# MMWDEMO_OUTPUT_EXT_MSG_TRACK_BIN_CUBE. Emitted by the trackBinCubeCfg-enabled
+# People_Tracking build: for each STILL/fallen track, the zero-Doppler antenna
+# vector at the track's range bin +- halfWin.
+#   [u16 num_entries][u16 num_virt_ant]
+#   per entry: [u32 tid][u16 range_bin][i16 vel_mmps][f32 range_m]
+#              then num_virt_ant * cmplx16ImRe_t (int16 imag, int16 real -- imag FIRST)
+TLV_TRACK_BIN_CUBE = 320
+_TBC_SUBHDR = struct.Struct("<2H")   # num_entries, num_virt_ant
+_TBC_ENTRY = struct.Struct("<IHhf")  # tid, range_bin, vel_mmps(int16), range_m(float32) = 12 B
+
+# People_Tracking demo TLV ids (People_Tracking mmwave_demo_mss.h enum).
+TLV_TARGET_LIST = 308        # trackerProc_Target array (GTRACK_3D, 112 B each)
+TLV_TARGET_INDEX = 309
+TLV_STATS = 6
+TLV_POINT_CLOUD = 3001       # minor-motion spherical compressed point cloud
+# trackerProc_Target GTRACK_3D: tid, pos[3], vel[3], acc[3], ec[16], g, conf = 112 B.
+# We decode only the leading tid + pos + vel (first 40 B) and stride the full 112.
+_TARGET = struct.Struct("<I9f")      # tid, posX,posY,posZ, velX,velY,velZ, accX,accY,accZ
+_TARGET_SIZE = 112
+# TLV 3001 minor-motion point cloud: a unit (scale) header then quantized spherical
+# points (MmwDemo_output_message_UARTpointCloud).
+_PC_UNIT = struct.Struct("<5f")      # elevationUnit, azimuthUnit, dopplerUnit, rangeUnit, snrUnit
+_PC_DT = np.dtype([("el", "<i1"), ("az", "<i1"), ("dop", "<i2"),
+                   ("rng", "<u2"), ("snr", "<u2")])   # 8 B/point
+
 
 @dataclass
 class FrameHeader:
@@ -65,7 +94,8 @@ class FrameHeader:
     platform: int
     frame_number: int
     time_cpu_cycles: int
-    num_detected_obj: int
+    num_detected_obj: int          # numDetectedObjMajor
+    num_detected_obj_minor: int
     num_tlvs: int
     sub_frame_number: int
 
@@ -85,6 +115,44 @@ class RangeAntenna:
     @property
     def num_bins(self) -> int:
         return self.data.shape[0]
+
+
+@dataclass
+class TrackBinEntry:
+    """One (track, range-bin) zero-Doppler antenna vector from TLV 320."""
+    tid: int
+    range_bin: int
+    vel_mmps: int       # track |velocity| in mm/s (int16, diagnostic)
+    range_m: float      # range_bin * rangeStep, metres
+    vec: np.ndarray     # (num_virt_ant,) complex64 zero-Doppler antenna vector
+
+
+@dataclass
+class TrackBinCube:
+    """Per-still/fallen-track per-bin zero-Doppler antenna vectors (TLV 320)."""
+    num_virt_ant: int
+    entries: list["TrackBinEntry"] = field(default_factory=list)
+
+    def by_track(self) -> dict[int, np.ndarray]:
+        """{tid: (n_bins, num_virt_ant) complex64}, bins ordered by range_bin.
+        The per-track slab is the input to server-side MUSIC (angle -> person vs
+        furniture) and slow-time phase (breathing) once accumulated over frames."""
+        grouped: dict[int, list[np.ndarray]] = {}
+        for e in sorted(self.entries, key=lambda e: (e.tid, e.range_bin)):
+            grouped.setdefault(e.tid, []).append(e.vec)
+        return {tid: np.stack(v) for tid, v in grouped.items()}
+
+
+@dataclass
+class Target:
+    """One tracked target from TLV 308 (trackerProc_Target, GTRACK_3D)."""
+    tid: int
+    x: float; y: float; z: float          # position, metres (relative to radar)
+    vx: float; vy: float; vz: float        # velocity, m/s
+
+    @property
+    def speed(self) -> float:
+        return float(np.hypot(np.hypot(self.vx, self.vy), self.vz))
 
 
 @dataclass
@@ -112,6 +180,27 @@ class Frame:
         TLV. These are indexed by RANGE BIN, not by detection. Prefer range_antenna()."""
         ra = self.range_antenna()
         return None if ra is None else ra.data
+
+    def track_bin_cube(self) -> "TrackBinCube | None":
+        """Tracker-driven per-bin zero-Doppler cube (TLV 320). None if absent."""
+        for t in self.tlvs:
+            if t.type == TLV_TRACK_BIN_CUBE:
+                return parse_track_bin_cube(t.payload)
+        return None
+
+    def targets(self) -> list["Target"]:
+        """Tracked targets from TLV 308 (empty list if no tracker output)."""
+        for t in self.tlvs:
+            if t.type == TLV_TARGET_LIST:
+                return parse_target_list(t.payload)
+        return []
+
+    def point_cloud(self) -> "PointCloud | None":
+        """Minor-motion point cloud (TLV 3001), Cartesian + SNR. None if absent."""
+        for t in self.tlvs:
+            if t.type == TLV_POINT_CLOUD:
+                return parse_point_cloud(t.payload)
+        return None
 
 
 def parse_detected_points(payload: bytes) -> np.ndarray:
@@ -146,6 +235,78 @@ def parse_range_antenna(payload: bytes) -> RangeAntenna:
 # Backward-compat alias (old name); returns just the (num_bins, 16) array.
 def parse_antenna_complex(payload: bytes) -> np.ndarray:
     return parse_range_antenna(payload).data
+
+
+def parse_track_bin_cube(payload: bytes) -> TrackBinCube:
+    """Parse the tracker-driven per-bin zero-Doppler cube TLV (type 320).
+
+    Wire: [u16 num_entries][u16 num_virt_ant] then per entry
+    [u32 tid][u16 range_bin][i16 vel_mmps][f32 range_m] +
+    num_virt_ant * cmplx16ImRe_t (int16 imag, int16 real -- imag FIRST).
+    """
+    if len(payload) < _TBC_SUBHDR.size:
+        return TrackBinCube(0, [])
+    n_ent, n_ant = _TBC_SUBHDR.unpack_from(payload, 0)
+    off = _TBC_SUBHDR.size
+    vec_bytes = n_ant * _BYTES_PER_ANT
+    entries: list[TrackBinEntry] = []
+    for _ in range(n_ent):
+        if off + _TBC_ENTRY.size + vec_bytes > len(payload):
+            break
+        tid, rbin, vel, rng = _TBC_ENTRY.unpack_from(payload, off)
+        off += _TBC_ENTRY.size
+        raw = np.frombuffer(payload[off:off + vec_bytes], dtype="<i2").astype(np.float32)
+        off += vec_bytes
+        raw = raw.reshape(n_ant, 2)                    # (num_virt_ant, [imag, real])
+        vec = (raw[:, 1] + 1j * raw[:, 0]).astype(np.complex64)
+        entries.append(TrackBinEntry(int(tid), int(rbin), int(vel), float(rng), vec))
+    return TrackBinCube(int(n_ant), entries)
+
+
+@dataclass
+class PointCloud:
+    """Minor-motion point cloud (TLV 3001), decoded to Cartesian + SNR (radar frame)."""
+    xyz: np.ndarray      # (N,3) float32 metres
+    snr: np.ndarray      # (N,) float32 linear
+    doppler: np.ndarray  # (N,) float32 m/s
+
+
+def parse_point_cloud(payload: bytes) -> PointCloud:
+    """Parse TLV 3001: [5f unit header] then N x (i8 el, i8 az, i16 dop, u16 rng, u16 snr).
+    el/az in unit-radians, rng in unit-metres -> Cartesian x,y,z (radar frame)."""
+    empty = PointCloud(np.empty((0, 3), np.float32), np.empty(0, np.float32),
+                       np.empty(0, np.float32))
+    if len(payload) < _PC_UNIT.size:
+        return empty
+    elU, azU, dopU, rngU, snrU = _PC_UNIT.unpack_from(payload, 0)
+    body = payload[_PC_UNIT.size:]
+    n = len(body) // _PC_DT.itemsize
+    if n == 0:
+        return empty
+    a = np.frombuffer(body[:n * _PC_DT.itemsize], dtype=_PC_DT)
+    el = a["el"].astype(np.float32) * elU
+    az = a["az"].astype(np.float32) * azU
+    r = a["rng"].astype(np.float32) * rngU
+    ce = np.cos(el)
+    xyz = np.stack([r * ce * np.sin(az), r * ce * np.cos(az), r * np.sin(el)],
+                   axis=1).astype(np.float32)
+    return PointCloud(xyz, a["snr"].astype(np.float32) * snrU,
+                      a["dop"].astype(np.float32) * dopU)
+
+
+def parse_target_list(payload: bytes) -> list[Target]:
+    """Parse TLV 308: array of trackerProc_Target (GTRACK_3D, 112 B each).
+
+    Only the leading tid + position + velocity are decoded; the error covariance,
+    gate gain and confidence tail are skipped by striding _TARGET_SIZE.
+    """
+    out: list[Target] = []
+    n = len(payload) // _TARGET_SIZE
+    for i in range(n):
+        off = i * _TARGET_SIZE
+        tid, px, py, pz, vx, vy, vz, _ax, _ay, _az = _TARGET.unpack_from(payload, off)
+        out.append(Target(int(tid), px, py, pz, vx, vy, vz))
+    return out
 
 
 def parse_frame(buf: bytes) -> Frame:
@@ -194,13 +355,22 @@ def read_frame(stream) -> Frame:
     return parse_frame(header_buf + body)
 
 
+def _encode_cmplx16(cx: np.ndarray) -> bytes:
+    """(..., N) complex64 -> cmplx16ImRe_t bytes (int16 imag first, then real)."""
+    pairs = np.stack([cx.imag, cx.real], axis=-1)   # imag first, then real
+    return np.rint(pairs).astype("<i2").tobytes()
+
+
 def build_frame(points: np.ndarray, frame_number: int = 1,
-                range_antenna: tuple[int, np.ndarray] | None = None) -> bytes:
+                range_antenna: tuple[int, np.ndarray] | None = None,
+                track_bin_cube: "TrackBinCube | None" = None) -> bytes:
     """Encode points into a TI frame (for tests / offline replay).
 
     If *range_antenna* is provided as (start_bin, data) where data is
     (num_bins, 16) complex64, a TLV_RANGE_ANTENNA (type 8) block is appended,
     encoded as int16 cmplx16ImRe_t (imag first) to match the firmware.
+    If *track_bin_cube* is provided, a TLV_TRACK_BIN_CUBE (type 320) block is
+    appended with the same cmplx16 encoding.
     """
     pts = np.asarray(points, dtype="<f4").reshape(-1, 4)
     tlv_payload = pts.tobytes()
@@ -210,13 +380,22 @@ def build_frame(points: np.ndarray, frame_number: int = 1,
     if range_antenna is not None:
         start_bin, data = range_antenna
         cx = np.asarray(data, dtype=np.complex64).reshape(-1, _NUM_VIRT_ANT)
-        # cmplx16ImRe_t: imag first, then real (int16)
-        pairs = np.stack([cx.imag, cx.real], axis=-1)
-        ints = np.rint(pairs).astype("<i2")
-        ra_payload = _RA_SUBHDR.pack(start_bin, cx.shape[0]) + ints.tobytes()
+        ra_payload = _RA_SUBHDR.pack(start_bin, cx.shape[0]) + _encode_cmplx16(cx)
         tlv += _TLV_HDR.pack(TLV_RANGE_ANTENNA, len(ra_payload)) + ra_payload
         num_tlvs += 1
 
+    if track_bin_cube is not None:
+        tbc = track_bin_cube
+        body = _TBC_SUBHDR.pack(len(tbc.entries), tbc.num_virt_ant)
+        for e in tbc.entries:
+            vec = np.asarray(e.vec, dtype=np.complex64).reshape(tbc.num_virt_ant)
+            body += _TBC_ENTRY.pack(e.tid, e.range_bin, e.vel_mmps, e.range_m)
+            body += _encode_cmplx16(vec)
+        tlv += _TLV_HDR.pack(TLV_TRACK_BIN_CUBE, len(body)) + body
+        num_tlvs += 1
+
     total = HEADER_SIZE + len(tlv)
-    header = _HDR.pack(MAGIC, 1, total, 0, frame_number, 0, len(pts), num_tlvs, 0)
+    # version, totalPacketLen, platform, frameNumber, timeCpuCycles,
+    # numDetectedObjMajor, numDetectedObjMinor, numTLVs, subFrameNumber
+    header = _HDR.pack(MAGIC, 1, total, 0, frame_number, 0, len(pts), 0, num_tlvs, 0)
     return header + tlv

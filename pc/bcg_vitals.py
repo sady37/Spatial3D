@@ -136,6 +136,58 @@ def estimate_rr(chans, fps, topk=8):
     return rr, f0, spread, rr_f
 
 
+def rr_mode_vote(chans, fps, lo=RR_LO, hi=RR_HI, topk=8, weight_sqi=True, refine=True):
+    """RR via MODE over the SQI-top bins (TI vitalsign.c histogram vote, adapted).
+
+    ⚠️ DIAGNOSTIC ONLY — NOT a net win over estimate_rr's median (verified
+    2026-07-15, do not promote to the main path). It marginally beats median on a
+    genuinely bimodal case (chairL 15 vs 16, median pulled by 2 harmonic bins) but
+    REGRESSES on chairR/fall20 (locks a false mode at the RR_LO band edge where
+    residual baseline drift piles up; median survives by taking the middle). And it
+    does NOT solve RR-harmonic entanglement: when the 2x-harmonic bins carry the top
+    SQI, median AND mode both lock the harmonic together (see chest_decoupled_hr —
+    the SPATIAL range-decoupling is the only real escape). TI's Δphase differencing
+    doesn't transfer either (our demod_channels already unwrap+bandpasses; np.diff
+    over-differentiates → RR jumps to 27-32). Kept only for per-bin distribution
+    inspection (bimodal split diagnosis).
+
+    Drop-in alternative to estimate_rr's MEDIAN, over the SAME SQI-top-`topk` bin
+    selection (so the comparison isolates mode-vs-median, and off-body/band-edge
+    drift bins stay excluded — voting over ALL 44 bins let baseline drift pile a
+    false mode at the 0.12Hz band edge). MEDIAN lands BETWEEN the clusters when the
+    per-bin RR is BIMODAL (some bins lock the fundamental, others its 2x breathing
+    harmonic); the MODE picks the dominant cluster. SQI-weighted votes, 3-bin
+    smoothed argmax (TI-style), refined to sub-rpm by the SQI-weighted mean of the
+    votes within +-1.5rpm of the winner.
+    Returns (rr_rpm, mode_bin_rpm, n_votes, per_bin_rpm)."""
+    s = np.array([sqi(bandpass(c, fps, lo, hi), fps, lo, hi) for c in chans])
+    top = np.argsort(s)[::-1][:topk]
+    hi_rpm = int(np.ceil(hi * 60)) + 3
+    hist = np.zeros(hi_rpm)
+    per, wts = [], []
+    for i in top:
+        ff = fft_peak(chans[i], fps, lo, hi)
+        if not ff:
+            continue
+        rpm = ff * 60.0
+        w = float(s[i]) if weight_sqi else 1.0
+        b = int(round(rpm))
+        if 0 <= b < hi_rpm:
+            hist[b] += w
+            per.append(rpm); wts.append(w)
+    if hist.sum() == 0:
+        return None, None, 0, []
+    sm = np.convolve(hist, [1.0, 1.0, 1.0], mode="same")
+    mode_bin = int(np.argmax(sm))
+    rr = float(mode_bin)
+    if refine:
+        per_a, wts_a = np.array(per), np.array(wts)
+        near = np.abs(per_a - mode_bin) <= 1.5
+        if near.any():
+            rr = float(np.average(per_a[near], weights=wts_a[near]))
+    return rr, float(mode_bin), len(per), per
+
+
 def occupancy(chans, fps, topk=8):
     """Presence gate from BREATHING COHERENCE — the upstream 'is a person here?'
     check that HR/tachy/AF all depend on. A stationary person has coherent
@@ -350,6 +402,10 @@ def main():
     rr_conf = "HIGH" if rr_spread < 2 else ("MED" if rr_spread < 4 else "LOW")
     print(f"RR (median) = {rr:.0f} rpm  [{rr_conf}, bin-spread {rr_spread:.1f}]  "
           f"(f0={f0:.3f}Hz, 5th harm={5*f0*60:.0f}bpm)  per-bin: {[round(v) for v in rr_f]}")
+    rr_v, mode_bin, nv, per_v = rr_mode_vote(chans, a.fps)
+    if rr_v is not None:
+        print(f"RR (mode-vote) = {rr_v:.0f} rpm  [{nv} bins voted, mode-bin "
+              f"{mode_bin:.0f}]  all-bin: {sorted(round(v) for v in per_v)}")
 
     # --- HR: at ~4m the cardiac phase is WEAKER than the breathing-harmonic
     # residue, so any "find the strongest peak" (FFT argmax, harmonic-sum, or

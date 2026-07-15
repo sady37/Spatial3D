@@ -8,6 +8,9 @@ from spatial3d.tlv import (
     MAGIC,
     TLV_DETECTED_POINTS,
     TLV_RANGE_ANTENNA,
+    TLV_TRACK_BIN_CUBE,
+    TrackBinCube,
+    TrackBinEntry,
     build_frame,
     parse_frame,
     read_frame,
@@ -53,3 +56,32 @@ def test_range_antenna_roundtrip():
     assert ra.start_bin == 7
     assert ra.num_bins == 3
     np.testing.assert_allclose(ra.data, data, rtol=0, atol=0)
+
+
+def test_track_bin_cube_roundtrip():
+    # two tracks: tid 1 has 3 bins (still), tid 2 has 2 bins; 16 virtual antennas.
+    def vec(seed):
+        return (np.arange(16) + seed + 1j * np.arange(16, 0, -1)).astype(np.complex64)
+    entries = [
+        TrackBinEntry(tid=1, range_bin=40, vel_mmps=20, range_m=3.40, vec=vec(0)),
+        TrackBinEntry(tid=1, range_bin=41, vel_mmps=20, range_m=3.49, vec=vec(100)),
+        TrackBinEntry(tid=1, range_bin=42, vel_mmps=20, range_m=3.57, vec=vec(200)),
+        TrackBinEntry(tid=2, range_bin=18, vel_mmps=5, range_m=1.53, vec=vec(300)),
+        TrackBinEntry(tid=2, range_bin=19, vel_mmps=5, range_m=1.62, vec=vec(400)),
+    ]
+    tbc_in = TrackBinCube(num_virt_ant=16, entries=entries)
+    frame = parse_frame(build_frame(POINTS, track_bin_cube=tbc_in))
+    assert frame.tlvs[-1].type == TLV_TRACK_BIN_CUBE
+    tbc = frame.track_bin_cube()
+    assert tbc is not None
+    assert tbc.num_virt_ant == 16
+    assert len(tbc.entries) == 5
+    e0 = tbc.entries[0]
+    assert (e0.tid, e0.range_bin, e0.vel_mmps) == (1, 40, 20)
+    np.testing.assert_allclose(e0.range_m, 3.40, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(e0.vec, vec(0), rtol=0, atol=0)
+    # by_track groups a track's bins into a (n_bins, 16) slab ordered by range_bin
+    slabs = tbc.by_track()
+    assert set(slabs) == {1, 2}
+    assert slabs[1].shape == (3, 16) and slabs[2].shape == (2, 16)
+    np.testing.assert_allclose(slabs[1][2], vec(200), rtol=0, atol=0)
