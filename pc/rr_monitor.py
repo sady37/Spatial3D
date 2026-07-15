@@ -17,13 +17,17 @@ vitals-priority-pivot). Design grounded in the actual signal (rr_monitor calibra
 import argparse
 import numpy as np
 import bcg_vitals as bv
+import living_gate as lg
 
 APNEA_MIN_S = 10.0          # sustained amplitude cessation to call apnea
 APNEA_FRAC = 0.30           # amplitude below this fraction of baseline = cessation
 ERRATIC_CV = 0.55           # IBI coefficient-of-variation above this = erratic breathing
-DEPTH_FLOOR = 0.008         # mm — time-local breathing depth below this = no real breathing
-                            # (cleaner than occupancy's RR-band floor: empty ~2um vs real
-                            # 25-138um = 13x, robust to an elevated-noise 'empty')
+# Presence uses the validated SCENE-INVARIANT living_gate (RR-band spatial concentration +
+# chest-sized cluster), NOT an absolute displacement floor: a noisy empty room varies by
+# environment (2um one session, 12um another) and defeats any fixed floor — a real empty
+# capture (12um clutter @seated-4m) fooled the old floor into 'REGULAR breathing @20rpm'.
+# living_gate rejects it (concentration/cluster are scene-invariant). See memory
+# vitals-occupancy-gate.
 
 
 def _analytic(x):
@@ -120,7 +124,7 @@ def find_apnea(t_amp, amp, baseline, refl, refl_base, fps):
     return apnea, absence
 
 
-def monitor(cube, bins, fps):
+def monitor(cube, bins, fps, dr=None):
     """Full RR monitor. Returns dict with the RR track, regularity, depth, pattern, apnea.
 
     PATTERN precedence: NO_BREATHING (presence gate) > APNEA (sustained cessation) >
@@ -131,7 +135,8 @@ def monitor(cube, bins, fps):
     FFT-RR track std, which carries estimator noise (harmonic hopping) not real irregularity.
     """
     chans = bv.demod_channels(cube, bins)
-    occ = bv.occupancy(chans, fps)
+    dr = float(dr) if dr is not None else bv.DR
+    occ = lg.living_present(chans, bins, dr, fps)     # scene-invariant living-person gate
     Pb = np.array([np.mean(bv.bandpass(c, fps, bv.RR_LO, bv.RR_HI) ** 2) for c in chans])
     ab_idx = int(np.argmax(Pb))
     resp = bv.bandpass(chans[ab_idx], fps, bv.RR_LO, bv.RR_HI)
@@ -145,8 +150,7 @@ def monitor(cube, bins, fps):
     t_ref, refl = reflection_track(cube[ab_idx], fps)
     baseline = float(np.median(amp)) if len(amp) else 0.0
     refl_base = float(np.median(refl)) if len(refl) else 0.0
-    # presence = occupancy AND a real time-local breathing depth (rejects elevated-noise empty)
-    present = bool(occ["present"] and baseline >= DEPTH_FLOOR)
+    present = bool(occ["present"])                     # scene-invariant living_gate verdict
     apnea, absence = (find_apnea(t_amp, amp, baseline, refl, refl_base, fps)
                       if (present and baseline > 0) else ([], []))
 
@@ -167,7 +171,7 @@ def monitor(cube, bins, fps):
         pattern = "REGULAR"
     rr_conf = "HIGH" if spread < 2 else ("MED" if spread < 4 else "LOW")
     return dict(rr_rpm=rr_med, rr_track_mad=rr_track_mad, rr_conf=rr_conf, f0=f0, abd_bin=ab,
-                present=present, disp_rms_um=occ["disp_rms"] * 1000,
+                present=present, present_frac=occ.get("present_frac", 0.0),
                 ibi_cv=ibi_cv, n_breaths=len(times), depth_mm=baseline, depth_cv=depth_cv,
                 pattern=pattern, apnea=apnea, absence=absence,
                 t_rr=t_rr, rr_track=rr, t_amp=t_amp, amp=amp)
@@ -181,12 +185,13 @@ def main():
     d = np.load(a.path, allow_pickle=True)
     bins = d["bins"].astype(int); K = int(d["counts"].astype(int).min())
     cube = np.asarray(d["snapshots"], np.complex64)[:, :K, :]
-    r = monitor(cube, bins, a.fps)
+    dr = float(d["dr_m"]) if "dr_m" in d.files else None
+    r = monitor(cube, bins, a.fps, dr=dr)
     if r["rr_rpm"] is not None:
         print(f"RR = {r['rr_rpm']:.0f} rpm  [{r['rr_conf']}, track-MAD {r['rr_track_mad']:.1f}]  "
               f"(abd bin{r['abd_bin']}, {r['n_breaths']} breaths)")
     else:
-        print(f"RR = --  (no breathing detected; disp {r['disp_rms_um']:.0f}um)")
+        print(f"RR = --  (no living person; living_gate present_frac {r['present_frac']:.0%})")
     print(f"regularity: IBI-CV {r['ibi_cv']:.2f}   depth {r['depth_mm']*1000:.0f}um "
           f"(CV {r['depth_cv']:.2f})   present={r['present']}")
     tail = ""
