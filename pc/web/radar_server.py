@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 _src = None
 _meta = None
+_shutdown = None     # set in main() to the graceful stop fn (for /api/quit)
 TILT = None          # mount tilt (deg) + height (m): set via --tilt/--mount to
 MOUNT = None         # enable height Z / fall; without them fall stays disabled.
 _cache = {"t": 0.0, "key": None, "state": None}
@@ -75,6 +76,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(_state(bl, bh)))
             except Exception as e:
                 return self._send(200, json.dumps({"error": str(e)}))
+        if u.path in ("/api/rec/on", "/api/rec/off"):
+            # SAVE switch: the stream/serve keep running; only disk persistence
+            # toggles. ON => 5-min rolling files (0-4,5-9,...) unchanged. OFF =>
+            # stop immediately, flushing the current partial (last record = now).
+            on = u.path.endswith("/on")
+            r = _src.rec_set(on) if hasattr(_src, "rec_set") else {"error": "not a live source"}
+            return self._send(200, json.dumps(r))
+        if u.path == "/api/rec/status":
+            r = _src.rec_status() if hasattr(_src, "rec_status") else {"saving": False}
+            return self._send(200, json.dumps(r))
+        if u.path == "/api/quit":
+            # graceful programmatic shutdown (== Ctrl+C): flush + release the
+            # read-only serial attach without stopping the sensor.
+            self._send(200, json.dumps({"quitting": True}))
+            if _shutdown:
+                threading.Thread(target=_shutdown, daemon=True).start()
+            return
         self._send(404, "{}")
 
     def log_message(self, *a):
@@ -96,6 +114,9 @@ def main():
     no_record = "--no-record" in argv
     if no_record:
         argv.remove("--no-record")
+    save_off = "--save-off" in argv            # start with WRITE off (stream only)
+    if save_off:
+        argv.remove("--save-off")
     spec = argv[0] if argv else "live"
     port = int(argv[1]) if len(argv) > 1 else 8765
     record_prefix = None
@@ -105,7 +126,7 @@ def main():
         rec_dir = os.path.join(os.path.dirname(HERE), "record")
         os.makedirs(rec_dir, exist_ok=True)
         record_prefix = rec_name if os.path.sep in rec_name else os.path.join(rec_dir, rec_name)
-    _src = make_source(spec, record_prefix=record_prefix)
+    _src = make_source(spec, record_prefix=record_prefix, save_on=not save_off)
     _src.start()
     # live source needs a moment for the reader thread to see the first frames
     # (bins are empty until then); wait so measurable_range has a range to report.
@@ -129,8 +150,10 @@ def main():
     # attach is released cleanly and never wedges the firmware. NOTE: `kill -9`
     # (SIGKILL) is uncatchable and CAN wedge the UART -> then power-cycle the radar.
     import signal
+    global _shutdown
     def _graceful(*_a):
         _src.stop(); srv.shutdown()
+    _shutdown = _graceful                                 # exposed via /api/quit
     signal.signal(signal.SIGINT, _graceful)
     signal.signal(signal.SIGTERM, _graceful)
     try:

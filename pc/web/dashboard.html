@@ -37,6 +37,8 @@
   <span class="src" id="src">—</span>
   <span class="src" id="clock"></span>
   <span class="src" id="stat"></span>
+  <button id="recbtn" title="打开=按 5 分钟滚动落盘；关闭=立即中止(以当前为最后一笔)"
+    style="margin-left:auto;background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:600;font-size:13px">WRITE —</button>
 </header>
 
 <div class="wrap">
@@ -129,9 +131,30 @@ async function loadMeta(){
     blo.value=r.bin_lo; bhi.value=r.bin_hi;
     document.getElementById("blv").textContent=r.bin_lo;
     document.getElementById("bhv").textContent=r.bin_hi; };
+  document.getElementById("recbtn").onclick=toggleRec;
 }
 
 function fmt(v,d=0){return v==null?"—":(+v).toFixed(d)}
+
+// ---- WRITE (SAVE) switch: same as curl /api/rec/on|off, mirrored on the page ----
+let recSaving=null;                             // null = no live recorder (replay/disabled)
+function paintRec(s){
+  const b=document.getElementById("recbtn");
+  if(!s || s.disabled || s.error){ b.textContent="WRITE 不可用"; b.style.background="#21262d";
+    b.style.borderColor="var(--line)"; recSaving=null; return; }
+  recSaving=!!s.saving;
+  if(recSaving){ b.textContent=`● 写入中 REC · ${s.frames||0}帧/${fmt(s.dur_s,0)}s · 点击停止`;
+    b.style.background="var(--bad)"; b.style.borderColor="var(--bad)"; b.style.color="#fff"; }
+  else { b.textContent="○ 未写入 OFF · 点此开始写";
+    b.style.background="#21262d"; b.style.borderColor="var(--dim)"; b.style.color="var(--dim)"; }
+}
+async function pollRec(){ try{ paintRec(await (await fetch("/api/rec/status")).json()); }catch(e){} }
+async function toggleRec(){
+  if(recSaving===null) return;                  // nothing to toggle (not a live source)
+  const r=await (await fetch(recSaving?"/api/rec/off":"/api/rec/on")).json();
+  if(r && r.saved) document.getElementById("stat").textContent="已保存 "+r.saved.split("/").pop();
+  pollRec();
+}
 
 function drawTop(st){
   const c=document.getElementById("top"), g=c.getContext("2d"), r=META.range;
@@ -240,6 +263,7 @@ async function tick(){
   drawTop(st); drawSide(st);
 }
 setInterval(tick,1000); tick();
+setInterval(pollRec,1000); pollRec();
 </script>
 </body>
 </html>

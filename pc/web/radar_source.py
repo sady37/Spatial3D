@@ -108,8 +108,10 @@ class LiveSource:
     kind = "live"
     CLI = "/dev/cu.usbmodem0000RA441"
     DATA = "/dev/cu.usbmodem0000RA444"
+    STALE_S = 12.0                     # no frame for this long => warn: sensor wedged
 
-    def __init__(self, maxwin_s=65.0, record_prefix=None, block_s=300.0, bins=range(60, 271)):
+    def __init__(self, maxwin_s=65.0, record_prefix=None, block_s=300.0, bins=range(60, 271),
+                 save_on=True):
         self.maxwin_s = maxwin_s
         self.dr = DR_M
         self.buf = {}                          # bin -> deque[(ts, vec16)]
@@ -125,30 +127,86 @@ class LiveSource:
         self._rec_acc = None
         self._rec_ts = []
         self._rec_bucket = None                 # int(epoch // block_s) of current file
+        self._rec_on = bool(save_on)            # runtime SAVE switch; stream runs regardless
+        self._ctl = None                        # pending on/off/status req (serviced in reader)
 
     def _bucket_stamp(self, bucket):
         """Local-time filename stamp = START of the 5-min wall-clock bucket."""
         return time.strftime("%Y%m%d_%H%M%S", time.localtime(bucket * self.block_s))
 
     def _flush_block(self):
-        """Save the current block to <prefix>_<bucketstart>.npz (cap_stream format)."""
+        """Save the current 5-min block to <prefix>_<bucketstart>.npz (unchanged
+        cadence). Returns the saved path (None if nothing to save)."""
         if not self.record_prefix or self._rec_acc is None or not self._rec_ts:
-            return
+            return None
         out = f"{self.record_prefix}_{self._bucket_stamp(self._rec_bucket)}.npz"
+        if os.path.exists(out):                 # same 5-min bucket flushed twice (e.g. WRITE
+            k = 2                               # off->on->off within one window) must NOT
+            while os.path.exists(f"{out[:-4]}_{k}.npz"):   # overwrite the earlier segment
+                k += 1
+            out = f"{out[:-4]}_{k}.npz"
         binsA, cube, counts = pack_snapshots(self._rec_acc, self.rec_bins, min_snapshots=20)
         if len(binsA) == 0:
             print(f"[rec] {out}: 0 usable bins, skipped", flush=True)
-            return
+            return None
         t0 = self._rec_bucket * self.block_s
         mean = np.stack([cube[i, :int(counts[i])].mean(0) for i in range(len(binsA))]).astype(np.complex64)
         save_cube(out, self._rec_acc, self.rec_bins, min_snapshots=20, mean=mean,
                   frame_ts=np.array(self._rec_ts, dtype=np.float64), block_start_epoch=np.float64(t0))
         dur = self._rec_ts[-1] - self._rec_ts[0]
         print(f"[rec] SAVED {out}: {len(binsA)} bins, {len(self._rec_ts)} frames, {dur:.0f}s", flush=True)
+        return out
 
-    def _record(self, ra, ts):
-        """Accumulate into the current 5-min block; flush + rotate on bucket change."""
-        bucket = int(ts // self.block_s)
+    def _service_ctl(self):
+        """Serviced in the reader thread (sole owner of rec state) so the SAVE
+        switch never races with accumulation. ON => resume 5-min rolling. OFF =>
+        immediately flush the current partial (don't wait for the :05 boundary)
+        and stop writing; the stream keeps flowing either way."""
+        req = self._ctl
+        if req is None:
+            return
+        act = req["action"]
+        if act == "on":
+            self._rec_on = True
+            req["result"] = {"saving": True}
+        elif act == "off":
+            path = self._flush_block()          # 立即落盘当前这段
+            self._rec_on = False
+            self._rec_acc = None
+            self._rec_ts = []
+            self._rec_bucket = None
+            req["result"] = {"saving": False, "saved": path}
+        else:                                   # status
+            dur = (self._rec_ts[-1] - self._rec_ts[0]) if len(self._rec_ts) > 1 else 0.0
+            req["result"] = {"saving": self._rec_on, "frames": len(self._rec_ts),
+                             "dur_s": round(dur, 1)}
+        req["ev"].set()
+        self._ctl = None
+
+    def rec_set(self, on, timeout=4.0):
+        """Flip the SAVE switch at runtime (stream keeps flowing either way)."""
+        if not self.record_prefix:
+            return {"error": "recording disabled (--no-record)"}
+        req = {"action": "on" if on else "off", "ev": threading.Event(), "result": None}
+        self._ctl = req
+        req["ev"].wait(timeout)
+        return req["result"]
+
+    def rec_status(self, timeout=4.0):
+        if not self.record_prefix:
+            return {"saving": False, "disabled": True}
+        req = {"action": "status", "ev": threading.Event(), "result": None}
+        self._ctl = req
+        req["ev"].wait(timeout)
+        return req["result"]
+
+    def _maybe_rollover(self, now):
+        """Wall-clock-driven 5-min bucket rotation (0-4 -> file, 5-9 -> file, ...).
+        Runs every reader tick even with NO frame, so a wedged stream still flushes
+        on time instead of stalling forever. No-op while the SAVE switch is off."""
+        if not self.record_prefix or not self._rec_on:
+            return
+        bucket = int(now // self.block_s)
         if self._rec_bucket is None:
             self._rec_bucket = bucket
             self._rec_acc = BinAccumulator(k=200000, n_ant=N_VIRT_ANT)
@@ -157,6 +215,10 @@ class LiveSource:
             self._rec_bucket = bucket
             self._rec_acc = BinAccumulator(k=200000, n_ant=N_VIRT_ANT)
             self._rec_ts = []
+
+    def _record(self, ra, ts):
+        """Accumulate one frame into the current block (rotation is time-driven in
+        _maybe_rollover)."""
         self._rec_acc.add(ra)
         self._rec_ts.append(ts)
 
@@ -164,18 +226,36 @@ class LiveSource:
         from spatial3d.uart_reader import RadarSession
         self._sess = RadarSession(self.CLI, self.DATA)
         self._sess.start_drain()
+        last_frame_w = time.time()     # wall time of the last frame off the wire
+        last_warn = 0.0
+        stale = False
         while self._run:
             f = self._sess.get_frame(timeout=1.0)
+            now = time.time()
+            self._service_ctl()        # runtime SAVE on/off switch (owned by this thread)
+            self._maybe_rollover(now)  # 5-min rolling; no-op when saving off / survives wedge
             if f is None:
+                # WEDGE DETECTION: stream went silent. Warn loudly + repeatedly so a
+                # dead sensor never masquerades as a healthy 'recording' run.
+                if now - last_frame_w > self.STALE_S and now - last_warn > 20.0:
+                    print(f"[live] WARN: no radar frames for {now - last_frame_w:.0f}s — "
+                          f"sensor likely WEDGED. Recordings are EMPTY; power-cycle the EVM.",
+                          flush=True)
+                    last_warn = now
+                    stale = True
                 continue
+            if stale:
+                print(f"[live] frames resumed after {now - last_frame_w:.0f}s gap.", flush=True)
+                stale = False
+            last_frame_w = now
             ra = f.range_antenna()
             if ra is None:
                 continue
             ts = getattr(f, "rx_ts", None)
             ts = _epoch([ts])[0] if ts else time.time()
-            if self.record_prefix:
+            if self.record_prefix and self._rec_on:
                 self._record(ra, ts)
-            cutoff = time.time() - self.maxwin_s
+            cutoff = now - self.maxwin_s
             with self._lock:
                 for i in range(ra.num_bins):
                     b = int(ra.start_bin + i)
@@ -193,7 +273,8 @@ class LiveSource:
         self._run = False
         if self._thr:
             self._thr.join(timeout=2.0)
-        self._flush_block()                              # save the partial current block
+        if self._rec_on:
+            self._flush_block()                          # save the partial current block
         if self._sess:
             try:
                 self._sess.close(stop_sensor=False)      # READ-ONLY: never stop the sensor
@@ -228,11 +309,12 @@ class LiveSource:
         return cube_win, np.array(keep, int), self.dr, fps, now, None
 
 
-def make_source(spec, record_prefix=None):
+def make_source(spec, record_prefix=None, save_on=True):
     """spec='live' or a cube npz path (optionally 'cube.npz@watch.csv').
-    record_prefix (live only) writes 5-min wall-clock cube files while serving."""
+    record_prefix (live only) writes 5-min wall-clock cube files while serving;
+    save_on=False starts with the SAVE switch off (stream only until /api/rec/on)."""
     if spec == "live":
-        return LiveSource(record_prefix=record_prefix)
+        return LiveSource(record_prefix=record_prefix, save_on=save_on)
     if "@" in spec:
         cube, watch = spec.split("@", 1)
     else:
