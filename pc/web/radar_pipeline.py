@@ -158,37 +158,46 @@ def _hr_confidence(hr, strength, rr):
 
 
 try:
-    from scipy.signal import find_peaks as _find_peaks
+    from scipy.signal import find_peaks as _find_peaks, butter as _butter, sosfiltfilt as _sosfiltfilt
 except Exception:
-    _find_peaks = None
+    _find_peaks = _butter = _sosfiltfilt = None
 
-# breath-pause: normal breathing is CONTINUOUS (I->E, cycle ~3-5s, no gap >~2s), so the
-# honest real-time signal is the TIME SINCE THE LAST BREATH, shown live in the RR window —
-# it sits at ~0-4s while breathing and CLIMBS during a hold. Stateless: pause = window_end -
-# last breath peak, so it grows as the window slides.
-# ⚠️ 4m LIMITATION (verified 2026-07-14): at ~4m seated, a SHALLOW breather and a BREATH-HOLD
-# produce the SAME low-amplitude RR-band signal — no prominence floor separates them (a floor
-# high enough to catch a hold false-alarms resting sit39 at 21s; a floor low enough to pass
-# shallow breaths lets hold-noise reset the pause). So BREATH_PROM is set CONSERVATIVE: at 4m
-# it won't false-alarm resting (better to MISS a far hold than cry wolf) and won't reliably
-# catch holds either. The design is correct and works at CLOSE range / contact (breaths clear
-# of noise -> pause climbs cleanly). Same SNR wall as HR. Re-tune BREATH_PROM at deploy range.
-BREATH_PROM = 0.012          # mm — min peak prominence for a real breath excursion
+# Breathing WAVEFORM + per-breath CYCLE detection (the human way: read the curve's SHAPE, not
+# an amplitude threshold). A complete breath = one full rise-fall CYCLE regardless of amplitude
+# (a shallow breath still completes a cycle -> counts; a hold is FLAT -> no cycle). Uses a
+# TIME-DOMAIN IIR bandpass (not the 45s FFT bandpass, which bleeds surrounding breathing into a
+# hold and hides it). pause_s = seconds since the last completed breath. The waveform itself is
+# streamed to the dashboard so a person can read holds/irregularity directly.
+BREATH_PROM = 0.010          # mm — floor to reject noise wiggles; cycle timescale does the rest
+_SOS = {}
 
-def _breath_pause(disp, fps):
-    """(pause_s, breath_interval_s, n_breaths) on the strongest-breathing bin."""
+def _rr_sos(fps):
+    if fps not in _SOS:
+        _SOS[fps] = _butter(2, [RR_LO, RR_HI], btype="band", fs=fps, output="sos")
+    return _SOS[fps]
+
+def _breath_wave(disp, fps, ds_hz=4.0):
+    """-> (wave_um[], breath_marks_s[], pause_s, interval_s, wave_span_s) on the abdomen bin.
+    wave = time-domain-bandpassed breathing displacement (um), downsampled to ~ds_hz for the UI;
+    breath_marks = times (s from window start) of detected breath peaks; pause_s = span_end -
+    last mark (climbs during a hold, since a flat hold produces no peak)."""
     Pb = np.array([np.mean(bandpass(d, fps, RR_LO, RR_HI) ** 2) for d in disp])
     ab = int(np.argmax(Pb))
-    x = bandpass(disp[ab], fps, RR_LO, RR_HI)
-    win_s = len(x) / fps
-    prom = max(BREATH_PROM, 0.5 * float(np.median(np.abs(x))))
-    if _find_peaks is None:
-        return None, None, 0
-    pk, _ = _find_peaks(x, distance=max(1, int(fps * 2.0)), prominence=prom)
-    tt = pk / fps
-    interval = float(np.median(np.diff(tt))) if len(tt) > 1 else None
+    raw = np.asarray(disp[ab], dtype=float)
+    w = _sosfiltfilt(_rr_sos(fps), raw) if _sosfiltfilt is not None else bandpass(raw, fps, RR_LO, RR_HI)
+    win_s = len(w) / fps
+    prom = max(BREATH_PROM, 0.2 * float(np.std(w)))   # shape+timescale carry it; small noise floor
+    if _find_peaks is not None:
+        pk, _ = _find_peaks(w, distance=max(1, int(2.0 * fps)), prominence=prom)
+        tt = np.asarray(pk) / fps
+    else:
+        tt = np.array([])
     pause_s = float(win_s - tt[-1]) if len(tt) else float(win_s)
-    return round(pause_s, 1), (round(interval, 1) if interval else None), len(tt)
+    interval = float(np.median(np.diff(tt))) if len(tt) > 1 else None
+    step = max(1, int(round(fps / ds_hz)))
+    wave = [round(float(v) * 1000.0, 1) for v in w[::step]]          # um, downsampled
+    marks = [round(float(t), 2) for t in tt]
+    return wave, marks, round(pause_s, 1), (round(interval, 1) if interval else None), round(win_s, 1)
 
 
 def _cbandpass(X, fps, lo, hi):
@@ -286,9 +295,10 @@ def analyze(cube_win, bins, dr, fps, hr_bin_lo=None, hr_bin_hi=None,
     # living_window is BREATHING-based, so a breath-HOLD reads 'absent' and would shut off the
     # pause counter exactly when it should climb. Compute pause_s + reflection here and let the
     # server hold presence via the static reflection (person still there, just not breathing).
-    pause_s, b_interval, n_breaths = _breath_pause(disp, fps)
+    wave, marks, pause_s, b_interval, wave_s = _breath_wave(disp, fps)
     body_refl = float(np.abs(cube_win.mean(1)).mean(1).max())   # peak static reflection
     out["pause_s"] = pause_s; out["breath_interval_s"] = b_interval
+    out["breath_wave"] = wave; out["breath_marks"] = marks; out["breath_wave_s"] = wave_s
     out["body_refl"] = body_refl; out["breathing_present"] = breathing_present
     out["present"] = breathing_present            # server may override to True during a hold
     # breathing state comes from pause_s DIRECTLY (not living_window, which false-reads

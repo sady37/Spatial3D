@@ -72,7 +72,9 @@
     <div class="big"><span id="rr">—</span> <span class="unit">/min</span></div>
     <div style="margin-top:8px">暂停 <span id="pause" style="font-weight:700">—</span> <span class="unit">s</span>
       <span id="breathflag" class="muted"></span></div>
-    <div class="muted" style="margin-top:4px">腹端 bin <span id="abbin">—</span></div>
+    <canvas id="breathwave" width="560" height="90" style="width:100%;height:90px;margin-top:8px;
+      background:#0d1117;border:1px solid #21262d;border-radius:6px"></canvas>
+    <div class="muted" style="margin-top:4px">呼吸曲线(最近 <span id="wavespan">—</span>s;竖线=检测到的每次呼吸)  腹端 bin <span id="abbin">—</span></div>
   </div>
 
   <!-- HR + watch -->
@@ -137,6 +139,24 @@ async function loadMeta(){
 }
 
 function fmt(v,d=0){return v==null?"—":(+v).toFixed(d)}
+
+// live breathing waveform: draw the curve + a vertical tick at each detected breath
+function drawBreath(wave, marks, spanS){
+  var c=document.getElementById("breathwave"); if(!c) return;
+  var g=c.getContext("2d"), W=c.width, H=c.height; g.clearRect(0,0,W,H);
+  document.getElementById("wavespan").textContent = spanS==null?"—":Math.round(spanS);
+  if(!wave || wave.length<2){ return; }
+  var n=wave.length, mn=Math.min.apply(null,wave), mx=Math.max.apply(null,wave), rng=(mx-mn)||1;
+  // zero line
+  g.strokeStyle="#21262d"; g.beginPath(); var yz=H-(0-mn)/rng*(H-10)-5; g.moveTo(0,yz); g.lineTo(W,yz); g.stroke();
+  // breath ticks (marks are seconds from window start; span maps to full width)
+  if(marks && spanS){ g.strokeStyle="#2ea04366";
+    marks.forEach(function(t){ var x=t/spanS*W; g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.stroke(); }); }
+  // waveform
+  g.strokeStyle="#58a6ff"; g.lineWidth=1.5; g.beginPath();
+  for(var i=0;i<n;i++){ var x=i/(n-1)*W, y=H-(wave[i]-mn)/rng*(H-10)-5; if(i===0)g.moveTo(x,y); else g.lineTo(x,y); }
+  g.stroke();
+}
 
 // ---- WRITE (SAVE) switch: same as curl /api/rec/on|off, mirrored on the page ----
 let recSaving=null;                             // null = no live recorder (replay/disabled)
@@ -244,7 +264,9 @@ async function tick(){
   var pel=document.getElementById("pause"), bf=document.getElementById("breathflag");
   pel.textContent = (st.pause_s==null? "—" : st.pause_s.toFixed(1));
   if(st.breathing==="pause"){ pel.style.color="#f85149"; bf.textContent="⚠ 呼吸中断"; bf.style.color="#f85149"; }
+  else if(st.breathing==="left"){ pel.style.color=""; bf.textContent="已离开"; bf.style.color="#8b949e"; }
   else { pel.style.color=""; bf.textContent=""; }
+  drawBreath(st.breath_wave, st.breath_marks, st.breath_wave_s);
 
   // HR + confidence gate: trusted -> blue value + green badge; else grey + reason
   const hrEl=document.getElementById("hr"), hc=document.getElementById("hrconf");
