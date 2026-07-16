@@ -201,11 +201,17 @@ def _scene():
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="application/json"):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body if isinstance(body, bytes) else body.encode())
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body if isinstance(body, bytes) else body.encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # client (browser poll) closed mid-response — harmless
+
+    def log_message(self, *a):
+        pass       # quiet the per-request access log
 
     def do_GET(self):
         u = urlparse(self.path)

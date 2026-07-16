@@ -44,9 +44,9 @@
 <div class="wrap">
   <!-- People_Tracking live scene: radar plane (radar on top) + posture height bar -->
   <div class="card" style="grid-column:span 2;grid-row:span 2">
-    <h3>实时场景 Scene — 侧视 D×Z + 姿态框(3001 点云)</h3>
+    <h3>实时场景 Scene — 俯视 X×距离 + 人体方框 · Z 高度条</h3>
     <canvas id="scene" width="720" height="380" style="width:100%"></canvas>
-    <div class="muted" id="scenestat" style="margin-top:6px">—</div>
+    <div class="muted" id="scenestat" style="margin-top:6px;height:1.4em;line-height:1.4em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</div>
   </div>
 
   <!-- presence -->
@@ -305,40 +305,61 @@ async function tick(){
 
   drawTop(st); drawSide(st);
 }
-// ---- People_Tracking live scene (radar on TOP, range increasing downward) ----
-// single side view: ground range D (horizontal) x height Z (vertical). 3001 points +
-// ONE wireframe bounding box; box shape = posture (tall=STAND, flat=LIE, mid=SIT).
-const SC_YMAX=5, SC_ZMIN=-0.5, SC_ZMAX=2.0;
+// ---- People_Tracking live scene: TOP-DOWN radar plane (radar on top, range down)
+// + per-track footprint boxes, and a separate Z-height bar (Fall/Sit/Stand + label).
+// Box shape/pose logic is UNCHANGED (tall Z=STAND, flat=LIE, mid=SIT). ----
+const SC_XMAX=3, SC_YMAX=5;                        // plane: +-3 m lateral, 0..5 m range
+const SC_ZONES=[[0,40,"Fall","#e03131"],[40,80,"Sit","#f08c00"],[80,200,"Stand","#2f9e44"]];
+function zoneOf(cm){ return cm<=40?["Fall","#e03131"]:(cm<80?["Sit","#f08c00"]:["Stand","#2f9e44"]); }
 function drawScene(sc){
   const c=document.getElementById("scene"); if(!c) return;
   const g=c.getContext("2d"), W=c.width, H=c.height, pad=34; g.clearRect(0,0,W,H);
-  const X=y=> pad + (y/SC_YMAX)*(W-2*pad);                        // ground range D -> x
-  const Y=z=> H-pad-((z-SC_ZMIN)/(SC_ZMAX-SC_ZMIN))*(H-2*pad);    // height Z -> y
-  g.font="10px sans-serif"; g.fillStyle="#8b949e";
-  g.fillText("侧视 距离 D (m) × 高度 Z (m)",pad,pad-12);
-  for(let r=1;r<=SC_YMAX;r++){ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(X(r),pad);g.lineTo(X(r),H-pad);g.stroke();
-    g.fillStyle="#8b949e"; g.fillText(r+"m",X(r)-6,H-pad+13); }
-  [0,0.5,1,1.5,2].forEach(z=>{ g.strokeStyle=z===0?"#484f58":"#181d24"; g.beginPath();g.moveTo(pad,Y(z));g.lineTo(W-pad,Y(z));g.stroke();
-    g.fillStyle="#8b949e"; g.fillText(z.toFixed(1)+"m",2,Y(z)+3); });
-  const mh=(sc&&sc.mount_cm)?sc.mount_cm/100:2;                   // radar marker
-  g.fillStyle="#1971c2"; g.beginPath();g.moveTo(X(0),Y(mh)-8);g.lineTo(X(0)-6,Y(mh)+3);g.lineTo(X(0)+6,Y(mh)+3);g.closePath();g.fill();
-  g.fillText("RADAR",X(0)+9,Y(mh)+3);
+  const pL=pad, pR=W-190, pT=pad, pB=H-pad;                       // top-down plane rect
+  const bL=W-118, bR=W-58, bT=pad, bB=H-pad;                      // Z height-bar rect
+  const PX=x=> pL + ((SC_XMAX - x)/(2*SC_XMAX))*(pR-pL);          // +x to the LEFT (radar view)
+  const PY=y=> pT + (Math.max(0,Math.min(SC_YMAX,y))/SC_YMAX)*(pB-pT);  // range increases DOWN
+  const HY=cm=> bB - (Math.max(0,Math.min(200,cm))/200)*(bB-bT);
+  g.font="10px sans-serif";
+  // plane grid: X lines (lateral) + range rings
+  for(let x=-SC_XMAX;x<=SC_XMAX;x++){ g.strokeStyle=x===0?"#484f58":"#181d24";
+    g.beginPath();g.moveTo(PX(x),pT);g.lineTo(PX(x),pB);g.stroke();
+    g.fillStyle="#8b949e"; g.fillText((x>0?"+":"")+x, PX(x)-5, pB+13); }
+  for(let y=1;y<=SC_YMAX;y++){ g.strokeStyle="#181d24";
+    g.beginPath();g.moveTo(pL,PY(y));g.lineTo(pR,PY(y));g.stroke();
+    g.fillStyle="#8b949e"; g.fillText(y+"m", pL-2, PY(y)+3); }
+  g.fillStyle="#8b949e"; g.fillText("俯视 X 左右(m) × 距离(m，向下)", pL, pT-12);
+  g.fillStyle="#1971c2"; g.beginPath();g.moveTo(PX(0),PY(0)-9);g.lineTo(PX(0)-7,PY(0)+3);g.lineTo(PX(0)+7,PY(0)+3);g.closePath();g.fill();
+  g.fillText("RADAR", PX(0)+10, PY(0)+2);
+  // Z height-bar: Fall/Sit/Stand zones + cm ticks
+  g.fillStyle="#8b949e"; g.fillText("Z 高度(cm)", bL-20, pT-12);
+  SC_ZONES.forEach(([lo,hi,lbl,col])=>{ g.fillStyle=col+"44";
+    g.fillRect(bL,HY(hi),bR-bL,HY(lo)-HY(hi));
+    g.fillStyle="#8b949e"; g.fillText(lbl, bR+4, (HY(lo)+HY(hi))/2+3); });
+  g.strokeStyle="#484f58"; g.strokeRect(bL,bT,bR-bL,bB-bT);
+  [0,40,80,120,160,200].forEach(cm=>{ g.fillStyle="#8b949e"; g.fillText(cm, bL-22, HY(cm)+3); });
   const st=document.getElementById("scenestat");
-  if(!sc||!sc.live){ g.fillStyle="#8b949e"; g.fillText("no live source (run: radar_server.py live)",W/2-100,H/2); if(st)st.textContent="—"; return; }
+  if(!sc||!sc.live){ g.fillStyle="#8b949e"; g.fillText("no live source (run: radar_server.py live)",pL+30,H/2); if(st)st.textContent="—"; return; }
   const PAL=["#4dabf7","#f08c00","#2f9e44","#e64980","#f7b731","#a55eea"];
-  // 3001 points near a track, coloured by track (stray points already dropped server-side)
-  (sc.pc||[]).forEach(p=>{ if(p[1]>=0&&p[1]<=SC_YMAX){ g.fillStyle=PAL[(p[3]||0)%PAL.length];
-    g.beginPath();g.arc(X(p[1]),Y(p[2]),2.6,0,7);g.fill(); }});
-  // one wireframe box PER TRACK; shape = posture, colour = track
+  // 3001 points (top-down: lateral x vs range), coloured by track
+  (sc.pc||[]).forEach(p=>{ if(p[1]<=SC_YMAX){ g.fillStyle=PAL[(p[3]||0)%PAL.length];
+    g.beginPath();g.arc(PX(p[0]),PY(p[1]),2.4,0,7);g.fill(); }});
+  // per-track footprint box (X x range); pose from Z-extent — box logic UNCHANGED
   const poses=[];
   (sc.boxes||[]).forEach(b=>{ const yspan=b.y1-b.y0, zspan=b.z1-b.z0, asp=zspan/Math.max(yspan,0.05);
     const pose = asp>1.5?"STAND":(asp<0.7?"LIE":"SIT"); poses.push(`T${b.tid}:${pose}`);
     const col=PAL[b.ti%PAL.length]; g.strokeStyle=col; g.lineWidth=2;
-    g.strokeRect(X(b.y0), Y(b.z1), X(b.y1)-X(b.y0), Y(b.z0)-Y(b.z1));
-    g.fillStyle=col; g.font="bold 13px sans-serif"; g.fillText(`T${b.tid} ${pose}`, X(b.y0)+2, Y(b.z1)-6); });
+    const xl=Math.min(PX(b.x0),PX(b.x1)), xw=Math.abs(PX(b.x1)-PX(b.x0));
+    g.strokeRect(xl, PY(b.y0), xw, PY(b.y1)-PY(b.y0));
+    g.fillStyle=col; g.font="bold 12px sans-serif"; g.fillText(`T${b.tid} ${pose}`, xl+2, PY(b.y0)-4); g.font="10px sans-serif"; });
+  // Z height marker on the bar (primary track world height + label)
+  const h=sc.height_cm;
+  if(h!=null){ const zk=zoneOf(h); g.strokeStyle=zk[1]; g.lineWidth=3;
+    g.beginPath();g.moveTo(bL-4,HY(h));g.lineTo(bR+4,HY(h));g.stroke();
+    g.fillStyle=zk[1]; g.font="bold 12px sans-serif"; g.fillText(`${Math.round(h)}cm ${zk[0]}`, bL-6, HY(h)-6); g.font="10px sans-serif"; }
   st.textContent=`tracks:${(sc.boxes||[]).length}  ${poses.join("  ")||"(no track)"}  `+
-    `(3001点:${(sc.pc||[]).length} tilt${sc.tilt_deg}° age${sc.age_s}s)`;
+    `Z:${h!=null?Math.round(h)+"cm":"—"}  (3001点:${(sc.pc||[]).length} mount${sc.mount_cm}cm age${sc.age_s}s)`;
 }
+// scene canvas keeps its fixed 720x380 size (morning format; no dynamic stretch).
 async function tickScene(){ try{ drawScene(await (await fetch("/api/scene")).json()); }catch(e){} }
 
 setInterval(tick,1000); tick();
