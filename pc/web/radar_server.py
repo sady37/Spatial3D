@@ -52,6 +52,7 @@ _shutdown = None     # set in main() to the graceful stop fn (for /api/quit)
 # detection is done elsewhere (energy-density pipeline), not in this server.
 TILT = 35.0          # radar DOWN-tilt from horizontal, deg
 MOUNT = 2.0          # sensor height above floor, m
+FLOOR_Z = 0.4        # m; floor band top (matches radar_pipeline FLOOR_Z) — fall = energy below this
 _cache = {"t": 0.0, "key": None, "state": None}
 _lock = threading.Lock()
 
@@ -201,21 +202,23 @@ def _scene():
             if float(d2[ti]) > 0.8 ** 2:                  # cluster not near any track -> skip
                 continue
             x0, x1 = q(px[m]); y0, y1 = q(wy[m]); z0, z1 = q(wz[m])
+            below = int((wz[m] < FLOOR_Z).sum()); tot = int(m.sum())    # cloud floor-band count
             b = bytid.get(ti)
             if b is None:
                 bytid[ti] = {"tid": int(tg[ti]["tid"]), "ti": ti, "x0": x0, "x1": x1,
-                             "y0": y0, "y1": y1, "z0": z0, "z1": z1, "n": int(m.sum())}
+                             "y0": y0, "y1": y1, "z0": z0, "z1": z1, "n": tot, "_below": below}
             else:                                         # MERGE same-track fragments: a body
                 b["x0"] = min(b["x0"], x0); b["x1"] = max(b["x1"], x1)   # split by an EPS gap
                 b["y0"] = min(b["y0"], y0); b["y1"] = max(b["y1"], y1)   # (torso vs legs) is
                 b["z0"] = min(b["z0"], z0); b["z1"] = max(b["z1"], z1)   # rejoined -> pose sees
-                b["n"] += int(m.sum())                                   # the WHOLE person
+                b["n"] += tot; b["_below"] += below                     # the WHOLE person
             idx = _np.where(m)[0]
             for i in idx[::max(1, len(idx) // 150)]:
                 pc_pts.append([round(float(px[i]), 2), round(float(wy[i]), 2),
                                round(float(wz[i]), 2), ti])
-        for b in bytid.values():                          # pose per TRACK (merged whole body)
+        for b in bytid.values():                          # per TRACK (merged whole body)
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
+            b["floor_frac"] = round(b.pop("_below") / max(b["n"], 1), 2)   # 3001 cloud floor-band fraction
             boxes.append(b)
     # ---- fall = FUSED confidence over 3 evidence sources (weighted, saturating) -------
     #   suspect  TLV-320 burst (fall-cfg firmware ARM)            weight 0.2
@@ -232,12 +235,18 @@ def _scene():
     prim = next((b for b in boxes if b["ti"] == 0), None) or \
         (max(boxes, key=lambda b: b["n"]) if boxes else None)
     primary_pose = prim["pose"] if prim else None
+    prim_ffrac = float(prim.get("floor_frac", 0.0)) if prim else 0.0
     ev_suspect = bool(tg) and cube_ts > 0 and (now - cube_ts) < 3.0
     ev_geom = primary_pose == "LIE"
-    try:                                   # energy verdict from the (cached) vitals pipeline
-        ev_energy = _state(None, None).get("pose") == "fall"
+    try:                                   # validated energy verdict — needs the 320 cube
+        ev_energy_cube = _state(None, None).get("pose") == "fall"
     except Exception:
-        ev_energy = False
+        ev_energy_cube = False
+    # 3001-cloud floor-fraction = NO-320 proxy for the floor-energy model: the minor cloud
+    # is on-chip clutter-removed micro-motion, so its fraction below FLOOR_Z tracks the
+    # moving-energy floor-frac (measured 20260716: flat lie ~100% vs sit/stand ~5%).
+    ev_energy_cloud = prim_ffrac >= 0.7
+    ev_energy = ev_energy_cube or ev_energy_cloud
     p_fall = min(0.95, W_SUSPECT * ev_suspect + W_GEOM * ev_geom + W_ENERGY * ev_energy)
     fall_state = "fall" if p_fall >= 0.8 else ("suspected" if p_fall >= 0.4 else "none")
     return {"live": True, "points": pts, "targets": tg,
@@ -246,7 +255,9 @@ def _scene():
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
             "fall_p": round(p_fall, 2), "primary_pose": primary_pose,
-            "fall_ev": {"suspect": bool(ev_suspect), "geom": bool(ev_geom), "energy": bool(ev_energy)},
+            "fall_ev": {"suspect": bool(ev_suspect), "geom": bool(ev_geom), "energy": bool(ev_energy),
+                        "energy_src": ("cube" if ev_energy_cube else ("cloud" if ev_energy_cloud else "")),
+                        "floor_frac": prim_ffrac},
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 

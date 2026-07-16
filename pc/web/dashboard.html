@@ -80,7 +80,7 @@
     <div class="row"><span class="k">运动点高度 Z90 (m)</span><span id="posez">—</span></div>
     <div class="row"><span class="k">地板带能量占比 (≤0.4m)</span><span id="posefrac">—</span></div>
     <div class="row"><span class="k">跌倒概率 P (融合)</span><span id="fallp">—</span></div>
-    <div class="muted">融合三源:suspect(320) <b>0.2</b> + 静态几何(LIE,辅助) <b style="color:#f08c00">0.4</b> + 能量密度(floor-frac,已验证) <b style="color:#58a6ff">0.6</b>,P=min(0.95,Σ)。P≥0.8 → <b style="color:#f85149">Fall</b>(红);P≥0.4 → <b style="color:#f08c00">SuspectedFall</b>(橙)。几何单独最多 0.4,确认红必须有能量(需 320)。</div>
+    <div class="muted">融合三源:suspect(320) <b>0.2</b> + 静态几何(LIE,辅助) <b style="color:#f08c00">0.4</b> + 能量密度(floor-frac) <b style="color:#58a6ff">0.6</b>,P=min(0.95,Σ)。P≥0.8 → <b style="color:#f85149">Fall</b>(红);P≥0.4 → <b style="color:#f08c00">SuspectedFall</b>(橙)。能量腿:有 320 用 cube(MUSIC,已验证);无 320 用 <b>3001 点云地板占比</b>(代理,平躺~100% vs 坐~5%)。几何单独最多 0.4,红必须有能量。</div>
   </div>
 
   <!-- RR -->
@@ -387,7 +387,8 @@ function drawScene(sc){
   const ev=sc.fall_ev||{};
   const evs=[ev.suspect?"320":"",ev.geom?"几何":"",ev.energy?"能量":""].filter(Boolean).join("+")||"—";
   const fpp=document.getElementById("fallp");
-  if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}  [${evs}]` : "—");
+  const ff=(ev.floor_frac!=null)?` 地板占比${Math.round(ev.floor_frac*100)}%${ev.energy_src?"("+ev.energy_src+")":""}`:"";
+  if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}  [${evs}]${ff}` : "—");
   const fmark = (fsz==="none"||!fsz)?"":`  ⚠${fsz==="fall"?"FALL":"Suspected"} P=${sc.fall_p} [${evs}]`;
   st.textContent=`tracks:${(sc.boxes||[]).length}  ${poses.join("  ")||"(no track)"}  `+
     `Z:${h!=null?Math.round(h)+"cm":"—"}${fmark}  (3001点:${(sc.pc||[]).length} mount${sc.mount_cm}cm age${sc.age_s}s)`;
