@@ -53,7 +53,23 @@ _shutdown = None     # set in main() to the graceful stop fn (for /api/quit)
 TILT = 35.0          # radar DOWN-tilt from horizontal, deg
 MOUNT = 2.0          # sensor height above floor, m
 _cache = {"t": 0.0, "key": None, "state": None}
+_fall_st = {"lie_since": 0.0}          # server-side persistence for the fall confirm timer
 _lock = threading.Lock()
+
+
+def _pose_of(x0, x1, y0, y1, z0, z1):
+    """Pose from the two projections' extents of a per-track MERGED box:
+    L = horizontal footprint (XY, longest side), Zv = vertical extent (XZ/YZ).
+    A fallen body lies FLAT -> L long + Zv small (平铺). Ratio is scale-free (robust
+    to the ~1 m track-Z drift, since it compares extents not absolute height)."""
+    L = max(x1 - x0, y1 - y0)
+    Zv = z1 - z0
+    if L >= 0.9 and Zv < 0.6:
+        return "LIE"                   # flat + spread out = 平铺倒地
+    if Zv >= 1.0:
+        return "STAND"                 # clearly tall column
+    asp = Zv / max(L, 0.05)
+    return "STAND" if asp > 1.5 else ("LIE" if asp < 0.7 else "SIT")
 
 
 def _state(bin_lo, bin_hi):
@@ -176,6 +192,7 @@ def _scene():
         q = lambda a: (round(float(_np.percentile(a, 5)), 2),
                        round(float(_np.percentile(a, 95)), 2))
         tx = _np.array([t["x"] for t in tg]); ty = _np.array([t["y"] for t in tg])
+        bytid = {}                                        # ti -> ONE merged box per track
         for lab in _np.unique(labels):
             m = labels == lab
             if int(m.sum()) < 4:                          # drop tiny clusters (noise)
@@ -185,17 +202,54 @@ def _scene():
             if float(d2[ti]) > 0.8 ** 2:                  # cluster not near any track -> skip
                 continue
             x0, x1 = q(px[m]); y0, y1 = q(wy[m]); z0, z1 = q(wz[m])
-            boxes.append({"tid": int(tg[ti]["tid"]), "ti": ti, "x0": x0, "x1": x1,
-                          "y0": y0, "y1": y1, "z0": z0, "z1": z1, "n": int(m.sum())})
+            b = bytid.get(ti)
+            if b is None:
+                bytid[ti] = {"tid": int(tg[ti]["tid"]), "ti": ti, "x0": x0, "x1": x1,
+                             "y0": y0, "y1": y1, "z0": z0, "z1": z1, "n": int(m.sum())}
+            else:                                         # MERGE same-track fragments: a body
+                b["x0"] = min(b["x0"], x0); b["x1"] = max(b["x1"], x1)   # split by an EPS gap
+                b["y0"] = min(b["y0"], y0); b["y1"] = max(b["y1"], y1)   # (torso vs legs) is
+                b["z0"] = min(b["z0"], z0); b["z1"] = max(b["z1"], z1)   # rejoined -> pose sees
+                b["n"] += int(m.sum())                                   # the WHOLE person
             idx = _np.where(m)[0]
             for i in idx[::max(1, len(idx) // 150)]:
                 pc_pts.append([round(float(px[i]), 2), round(float(wy[i]), 2),
                                round(float(wz[i]), 2), ti])
+        for b in bytid.values():                          # pose per TRACK (merged whole body)
+            b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
+            boxes.append(b)
+    # ---- track -> fall-trigger -> fall DECISION (连动) --------------------------------
+    # The DECISION is geometric: a fallen body lies FLAT (pose LIE) in the merged per-track
+    # box. TLV 320 burst (fall cfg = firmware ARM) is an EARLY trigger. So:
+    #   suspected(orange) = pose just went LIE, or a 320 burst is active
+    #   fall(red)         = pose LIE sustained past the confirm window (not a brief stoop)
+    #   none(grey)        = person upright again / no cue
+    HOLD_S, CONFIRM_S = 3.0, 2.5
+    now = time.time()
+    cube_ts = float(sc.get("cube_ts", 0.0) or 0.0)
+    prim = next((b for b in boxes if b["ti"] == 0), None) or \
+        (max(boxes, key=lambda b: b["n"]) if boxes else None)
+    primary_pose = prim["pose"] if prim else None
+    lying = primary_pose == "LIE"
+    if lying:
+        if _fall_st["lie_since"] == 0.0:
+            _fall_st["lie_since"] = now
+    else:
+        _fall_st["lie_since"] = 0.0
+    lie_dur = (now - _fall_st["lie_since"]) if _fall_st["lie_since"] else 0.0
+    trig320 = bool(tg) and cube_ts > 0 and (now - cube_ts) < HOLD_S
+    if lying and lie_dur >= CONFIRM_S:
+        fall_state = "fall"
+    elif lying or trig320:
+        fall_state = "suspected"
+    else:
+        fall_state = "none"
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
-            "boxes": boxes, "pc": pc_pts,
+            "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
+            "primary_pose": primary_pose, "lie_dur_s": round(lie_dur, 1),
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 

@@ -118,6 +118,8 @@ class LiveSource:
         self._scene = {"points": None, "targets": [], "t": 0.0}  # People_Tracking live scene
         self._z_hist = deque(maxlen=7)         # primary-track Z, ~0.7s median-smoothed
         self._pc_hist = deque()                # (ts, xyz, snr) 3001 points, ~0.5s accum
+        self._cube_hold_ts = 0.0               # last ts a TLV 320 fired = fall-trigger (fall cfg ARM)
+        self._fall_since = 0.0                 # ts the CURRENT continuous 320 episode began (for confirm timer)
         self._lock = threading.Lock()
         self._run = False
         self._thr = None
@@ -175,6 +177,7 @@ class LiveSource:
         ts, n_points = [], []
         e_frame, e_tid, e_bin, e_vel, e_range, e_vec = [], [], [], [], [], []
         t_frame, t_tid, t_x, t_y, t_z = [], [], [], [], []
+        p_fr, p_arrs = [], []                   # per-frame 3001 minor point cloud (for offline box/LIE)
         n_ant = 0
         for fi, fr in enumerate(self._sc_frames):
             ts.append(fr["ts"]); n_points.append(fr["n_points"])
@@ -185,6 +188,12 @@ class LiveSource:
             for t in fr["tgts"]:
                 t_frame.append(fi); t_tid.append(t.tid)
                 t_x.append(t.x); t_y.append(t.y); t_z.append(t.z)
+            pc = fr.get("pc")
+            if pc is not None and len(pc):
+                p_arrs.append(np.asarray(pc, np.float32))
+                p_fr.append(np.full(len(pc), fi, np.int32))
+        pc_xyz_all = (np.concatenate(p_arrs) if p_arrs else np.empty((0, 3), np.float32))
+        p_frame = (np.concatenate(p_fr) if p_fr else np.empty(0, np.int32))
         np.savez_compressed(
             out,
             ts=np.asarray(ts, np.float64), n_points=np.asarray(n_points, np.int32),
@@ -197,9 +206,10 @@ class LiveSource:
             t_frame=np.asarray(t_frame, np.int32), t_tid=np.asarray(t_tid, np.int32),
             t_x=np.asarray(t_x, np.float32), t_y=np.asarray(t_y, np.float32),
             t_z=np.asarray(t_z, np.float32),
+            p_frame=p_frame, pc_xyz=pc_xyz_all,
             block_start_epoch=np.float64(self._rec_bucket * self.block_s))
         print(f"[rec] SAVED {out}: {len(ts)} frames, {len(e_frame)} 320-entries, "
-              f"{len(t_frame)} track-pts", flush=True)
+              f"{len(t_frame)} track-pts, {len(pc_xyz_all)} cloud-pts", flush=True)
         return out
 
     def _service_ctl(self):
@@ -307,6 +317,12 @@ class LiveSource:
                 pts = f.detected_points(); tgts = f.targets()
                 tbc = f.track_bin_cube()
                 ncube = len(tbc.entries) if tbc is not None else 0
+                if ncube > 0:
+                    # fall-trigger: 320 fired. A NEW episode begins if 320 was quiet (>1.5s)
+                    # before now; otherwise it's the same ongoing episode (confirm timer runs).
+                    if not self._cube_hold_ts or (sc_ts - self._cube_hold_ts) > 1.5:
+                        self._fall_since = sc_ts
+                    self._cube_hold_ts = sc_ts
                 if tgts:
                     self._z_hist.append(float(tgts[0].z))
                 z_smooth = float(np.median(self._z_hist)) if self._z_hist else None
@@ -324,7 +340,8 @@ class LiveSource:
                 self._scene = {"points": pts, "targets": tgts, "t": sc_ts, "n_cube": ncube,
                                "z_smooth": z_smooth,
                                "y0": float(tgts[0].y) if tgts else None,
-                               "pc_xyz": pc_xyz, "pc_snr": pc_snr}
+                               "pc_xyz": pc_xyz, "pc_snr": pc_snr,
+                               "cube_ts": self._cube_hold_ts, "fall_since": self._fall_since}
                 # Feed the breathing/HR pipeline: this firmware emits the slow-time cube
                 # as TLV 320 (per STILL-track per-bin 16-ant zero-Doppler vectors), NOT
                 # range_antenna. Route those into the SAME per-bin buffer window() reads,
@@ -342,7 +359,8 @@ class LiveSource:
                 if self.record_prefix and self._rec_on and self._rec_bucket is not None:
                     self._sc_frames.append({
                         "ts": sc_ts, "n_points": len(pts), "tgts": tgts,
-                        "tbc": tbc.entries if tbc is not None else []})
+                        "tbc": tbc.entries if tbc is not None else [],
+                        "pc": (pc.xyz if (pc is not None and len(pc.xyz)) else None)})
             except Exception:
                 pass
             ra = f.range_antenna()
