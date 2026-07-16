@@ -1,0 +1,13 @@
+Case: two seated persons (baseline / negative — NO fall). CONFIRMED by user.
+File: live_scene_20260716_112500.npz  (bucket 11:25)
+3001 frames @10fps (~300s), 253514 cloud-pts, 0 TLV-320.
+
+Scenario: both people SEATED the whole time. No fall. Sibling of the 1120 baseline
+(1120 noted chairR "no RR"; 1125 just "2 sit").
+
+NOTE — ghost tracks: even with 2 stationary seated people the tracker spawns jumpy
+ghost tracks (e.g. T3 reaches X=+8.6, Y=6.9, OUTSIDE the room; per-track "path" is
+inflated to 50-76 m purely by ID churn, not real motion). Relevant for false-positive
+robustness: a ghost track + its stray cloud must NOT trigger LIE/fall.
+
+Mount/tilt: TBD (user re-measuring). The actual FALL recording is a different bucket.

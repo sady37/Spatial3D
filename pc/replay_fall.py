@@ -25,6 +25,8 @@ EPS = 0.4                          # cloud connectivity cluster radius (m)
 MIN_PTS = 4                        # drop clusters smaller than this
 NEAR_TRK = 0.8                     # cluster must be within this of a track (m)
 HOLD_S, CONFIRM_S = 3.0, 2.5       # fall state machine (see _scene)
+GRACE_S = 1.2                      # brief non-LIE gap (< this) does NOT reset the confirm timer
+ACCUM_F = 4                        # accumulate this many prior frames' cloud (~0.5s @10fps) per box
 NN_DISCRETE = 5.0                  # discrete-point removal: nn > 5x mean -> drop
 
 
@@ -110,6 +112,13 @@ def main():
     if not args:
         sys.exit(__doc__)
     path = args[0]
+    global TILT, MOUNT
+    for f in flags:                               # --tilt=63 / --mount=2.0 override for calibration
+        if f.startswith("--tilt="):
+            TILT = float(f.split("=", 1)[1])
+        elif f.startswith("--mount="):
+            MOUNT = float(f.split("=", 1)[1])
+    print(f"# geometry: mount={MOUNT}m tilt={TILT}deg")
     d, have = load(path)
     ts = d["ts"].astype(float)
     t0 = ts[0] if len(ts) else 0.0
@@ -127,7 +136,7 @@ def main():
     pf = d["p_frame"] if has_cloud else np.empty(0, int)
     pxyz = d["pc_xyz"] if has_cloud else np.empty((0, 3), np.float32)
 
-    cube_hold_ts, lie_since = 0.0, 0.0
+    cube_hold_ts, lie_since, last_lie = 0.0, 0.0, 0.0
     state = "none"; prev_state = None; prev_poses = None
     first = {"suspected": None, "fall": None}
     dwell = {"none": 0, "suspected": 0, "fall": 0}
@@ -143,7 +152,7 @@ def main():
         # --- boxes / poses FIRST (merged per track): pose drives the decision ---
         boxes = []
         if has_cloud and tracks:
-            sub = pxyz[pf == fi]
+            sub = pxyz[(pf >= fi - ACCUM_F) & (pf <= fi)]   # accumulate ~0.5s cloud (fill sparse frames)
             if len(sub):
                 boxes, _, _ = cluster_boxes(sub[:, 0], sub[:, 1], sub[:, 2], tracks)
         poses = [f"T{b['tid']}:{b['pose']}(顶Z{b['z1']:.2f} 展{b['dspan']:.2f})" for b in boxes]
@@ -159,7 +168,8 @@ def main():
         if lying:
             if lie_since == 0.0:
                 lie_since = t
-        else:
+            last_lie = t
+        elif last_lie > 0 and (t - last_lie) > GRACE_S:   # only reset after a SUSTAINED non-LIE gap
             lie_since = 0.0
         lie_dur = (t - lie_since) if lie_since else 0.0
         trig320 = bool(tracks) and cube_hold_ts > 0 and (t - cube_hold_ts) < HOLD_S

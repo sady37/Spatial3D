@@ -1,0 +1,15 @@
+Case: GENUINE FALL (confirmed by user). File live_scene_20260716_112000.npz (bucket 11:20).
+3000 frames @10fps (~300s), 195883 cloud-pts, 0 TLV-320. First fall recording WITH cloud.
+
+Scenario (confirmed): P1 seated the whole time (near radar, X~+0.2..1.3, Y~0.3..1.6).
+P2 walks in, FALLS, crawls, gets up, sits on ChairR (X=+0.1, Y=3.3). The fall/crawl
+episode is roughly 5-14 s into the recording (per replay at tilt~20).
+
+Replay finding: with the assumed tilt=35 fall was NEVER confirmed; floor-flattening on
+data prefers tilt~20 (user-measured gauge 63 -> down-tilt 27; TBD, re-measuring). Even
+at tilt=20 the fallen T4 is detected LIE across 5.7-14 s but INTERMITTENTLY (per-frame
+sparse cloud), so the 2.5 s confirm timer keeps resetting -> fall=0. Fixes needed:
+accumulate ~0.5 s cloud before boxing + debounce the confirm timer (GRACE_S) so brief
+non-LIE gaps don't reset it. Staged in replay_fall.py, pending confirmed angle.
+
+Negative counterpart for false-positive testing: two_seated_20260716_1125 (both sit).

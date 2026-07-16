@@ -53,7 +53,6 @@ _shutdown = None     # set in main() to the graceful stop fn (for /api/quit)
 TILT = 35.0          # radar DOWN-tilt from horizontal, deg
 MOUNT = 2.0          # sensor height above floor, m
 _cache = {"t": 0.0, "key": None, "state": None}
-_fall_st = {"lie_since": 0.0}          # server-side persistence for the fall confirm timer
 _lock = threading.Lock()
 
 
@@ -218,38 +217,36 @@ def _scene():
         for b in bytid.values():                          # pose per TRACK (merged whole body)
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
             boxes.append(b)
-    # ---- track -> fall-trigger -> fall DECISION (连动) --------------------------------
-    # The DECISION is geometric: a fallen body lies FLAT (pose LIE) in the merged per-track
-    # box. TLV 320 burst (fall cfg = firmware ARM) is an EARLY trigger. So:
-    #   suspected(orange) = pose just went LIE, or a 320 burst is active
-    #   fall(red)         = pose LIE sustained past the confirm window (not a brief stoop)
-    #   none(grey)        = person upright again / no cue
-    HOLD_S, CONFIRM_S = 3.0, 2.5
+    # ---- fall = FUSED confidence over 3 evidence sources (weighted, saturating) -------
+    #   suspect  TLV-320 burst (fall-cfg firmware ARM)            weight 0.2
+    #   geometry primary box pose LIE (static, AUXILIARY only)    weight 0.4
+    #   energy   validated floor-frac model (radar_pipeline,      weight 0.6
+    #            lie 91% vs sit/stand 41-52% in Z<=0.4m band)
+    # P = min(0.95, sum of firing weights).  P>=0.8 => Fall(red);  P>=0.4 => SuspectedFall.
+    # Geometry alone (0.4) can NEVER reach 0.8 -> a crawl/sit false-LIE only ever shows a
+    # soft orange hint; a red Fall REQUIRES the energy model (+320). Energy alone (0.6) is
+    # also just 'suspected' until corroborated. (Fusion weights per user design 20260716.)
+    W_SUSPECT, W_GEOM, W_ENERGY = 0.2, 0.4, 0.6
     now = time.time()
     cube_ts = float(sc.get("cube_ts", 0.0) or 0.0)
     prim = next((b for b in boxes if b["ti"] == 0), None) or \
         (max(boxes, key=lambda b: b["n"]) if boxes else None)
     primary_pose = prim["pose"] if prim else None
-    lying = primary_pose == "LIE"
-    if lying:
-        if _fall_st["lie_since"] == 0.0:
-            _fall_st["lie_since"] = now
-    else:
-        _fall_st["lie_since"] = 0.0
-    lie_dur = (now - _fall_st["lie_since"]) if _fall_st["lie_since"] else 0.0
-    trig320 = bool(tg) and cube_ts > 0 and (now - cube_ts) < HOLD_S
-    if lying and lie_dur >= CONFIRM_S:
-        fall_state = "fall"
-    elif lying or trig320:
-        fall_state = "suspected"
-    else:
-        fall_state = "none"
+    ev_suspect = bool(tg) and cube_ts > 0 and (now - cube_ts) < 3.0
+    ev_geom = primary_pose == "LIE"
+    try:                                   # energy verdict from the (cached) vitals pipeline
+        ev_energy = _state(None, None).get("pose") == "fall"
+    except Exception:
+        ev_energy = False
+    p_fall = min(0.95, W_SUSPECT * ev_suspect + W_GEOM * ev_geom + W_ENERGY * ev_energy)
+    fall_state = "fall" if p_fall >= 0.8 else ("suspected" if p_fall >= 0.4 else "none")
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
-            "primary_pose": primary_pose, "lie_dur_s": round(lie_dur, 1),
+            "fall_p": round(p_fall, 2), "primary_pose": primary_pose,
+            "fall_ev": {"suspect": bool(ev_suspect), "geom": bool(ev_geom), "energy": bool(ev_energy)},
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 
