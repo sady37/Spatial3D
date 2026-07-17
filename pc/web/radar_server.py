@@ -21,6 +21,7 @@ import radar_pipeline as pipe
 from radar_source import make_source
 from falldet.window import FloorMap, WindowDetector
 from falldet.clean import Cleaner
+from falldet.floor_track import FloorTracker
 
 WIN_S = 20.0            # analysis window (user 2026-07-14, per sleepad validation 20-30s) —
                         # shorter window = faster real-time response to holds / person leaving
@@ -92,7 +93,11 @@ FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can
 DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting the sustain timer
 
 
-_cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0}   # latest cube 2nd-check
+_cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None}  # latest cube 2nd-check
+# FloorTracker: gives a GTRACK-dropped fallen body a continuous track_id from its floor
+# point cloud (inherits the lost tid; furniture rejected via no-history + no-RR). See
+# falldet/floor_track.py.
+_floor_tracker = FloorTracker()
 
 
 def _rr_from_cube(entries, fps=10.0):
@@ -132,7 +137,7 @@ def _fetch_cube_bg(range_bin, floor_frac):
             ents = _src.request_cube(range_bin, n_frames=60, half_win=3, timeout=9.0)  # ~6s = ~2 breaths
             rr, strength = _rr_from_cube(ents)
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
-                                floor_frac=round(float(floor_frac), 2))
+                                floor_frac=round(float(floor_frac), 2), bin=int(range_bin))
     except Exception:
         pass
     finally:
@@ -309,13 +314,26 @@ def _scene():
                        round(float(_np.percentile(a, 95)), 2))
         tx = _np.array([t["x"] for t in tg]); ty = _np.array([t["y"] for t in tg])
         bytid = {}                                        # ti -> ONE merged box per track
+        orphan_low = []                                   # low clusters near NO GTRACK track
         for lab in _np.unique(labels):
             m = labels == lab
             if int(m.sum()) < 4:                          # drop tiny clusters (noise)
                 continue
             cx = float(px[m].mean()); cy = float(py[m].mean())   # radar-frame centroid
-            d2 = (tx - cx) ** 2 + (ty - cy) ** 2; ti = int(d2.argmin())
-            if float(d2[ti]) > 0.8 ** 2:                  # cluster not near any track -> skip
+            d2 = (tx - cx) ** 2 + (ty - cy) ** 2
+            ti = int(d2.argmin()) if len(tx) else -1
+            if ti < 0 or float(d2[ti]) > 0.8 ** 2:        # cluster not near any GTRACK track
+                # Keep it if it's a LOW blob (candidate fallen body GTRACK dropped) — the
+                # FloorTracker below may give it a (inherited) id instead of discarding it.
+                if float(_np.median(wz[m])) < FLOOR_Z:
+                    x0o, x1o = q(px[m]); y0o, y1o = q(wy[m]); z0o, z1o = q(wz[m])
+                    io = _np.where(m)[0]
+                    orphan_low.append({
+                        "cx": cx, "cy": cy, "n": int(m.sum()),
+                        "x0": x0o, "x1": x1o, "y0": y0o, "y1": y1o, "z0": z0o, "z1": z1o,
+                        "below": int((wz[m] < FLOOR_Z).sum()),
+                        "pts": [[round(float(px[i]), 2), round(float(wy[i]), 2),
+                                 round(float(wz[i]), 2)] for i in io[::max(1, len(io) // 60)]]})
                 continue
             x0, x1 = q(px[m]); y0, y1 = q(wy[m]); z0, z1 = q(wz[m])
             below = int((wz[m] < FLOOR_Z).sum()); tot = int(m.sum())    # cloud floor-band count
@@ -336,6 +354,35 @@ def _scene():
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
             b["floor_frac"] = round(b.pop("_below") / max(b["n"], 1), 2)   # 3001 cloud floor-band fraction
             boxes.append(b)
+
+        # ---- FloorTracker: a fallen body GTRACK dropped keeps a CONTINUOUS id ----------
+        # The low orphan blobs above are the fallen person's cloud that GTRACK abandoned
+        # (it allocates from motion; a still body reads as furniture). Give each a track_id:
+        # inherited from the just-lost GTRACK tid ("track lost + floor blob here" = fell), or
+        # a fresh negative id. It counts as a PERSON only with a real inherited tid OR cube RR
+        # (breathing); a never-tracked, non-breathing low blob is furniture -> not added.
+        def _rr_at(cx, cy):
+            if _cube_result["rr"] in (None, 0) or _cube_result.get("bin") is None:
+                return False
+            return abs(math.hypot(cx, cy) / RANGE_STEP - _cube_result["bin"]) <= 4
+        gtracks = {int(t["tid"]): (float(t["x"]), float(t["y"])) for t in tg}
+        by_xy = {(round(o["cx"], 3), round(o["cy"], 3)): o for o in orphan_low}
+        boxed = {b["tid"] for b in boxes}
+        for ftk in _floor_tracker.update(time.time(), gtracks,
+                                         [(o["cx"], o["cy"], o["n"]) for o in orphan_low],
+                                         rr_at=_rr_at):
+            if ftk.age != 0 or not ftk.person or ftk.id in boxed:
+                continue                                   # matched this frame, a person, not dup
+            o = by_xy.get((round(ftk.x, 3), round(ftk.y, 3)))
+            if o is None:
+                continue
+            fb = {"tid": int(ftk.id), "ti": int(ftk.id), "x0": o["x0"], "x1": o["x1"],
+                  "y0": o["y0"], "y1": o["y1"], "z0": o["z0"], "z1": o["z1"], "n": o["n"],
+                  "floor_frac": round(o["below"] / max(o["n"], 1), 2), "floor_src": ftk.source}
+            fb["pose"] = _pose_of(fb["x0"], fb["x1"], fb["y0"], fb["y1"], fb["z0"], fb["z1"])
+            boxes.append(fb)
+            for p in o["pts"]:                             # ti = floor id (<0) groups its cloud
+                pc_pts.append([p[0], p[1], p[2], int(ftk.id)])
     # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------
     # Server-side reference for the on-chip Phase-3 window trigger; also a fallback until
     # the firmware window ships. MLP leg = firmware Phase 2 (absent here). Red Fall needs
