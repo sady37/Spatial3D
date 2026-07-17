@@ -120,6 +120,7 @@ class LiveSource:
         self._pc_hist = deque()                # (ts, xyz, snr) 3001 points, ~0.5s accum
         self._cube_hold_ts = 0.0               # last ts a TLV 320 fired = fall-trigger (fall cfg ARM)
         self._fall_since = 0.0                 # ts the CURRENT continuous 320 episode began (for confirm timer)
+        self._cube_query = None                # server-triggered cube fetch state (see request_cube)
         self._lock = threading.Lock()
         self._run = False
         self._thr = None
@@ -323,6 +324,16 @@ class LiveSource:
                     if not self._cube_hold_ts or (sc_ts - self._cube_hold_ts) > 1.5:
                         self._fall_since = sc_ts
                     self._cube_hold_ts = sc_ts
+                # server-triggered cube fetch: collect N frames of 320 at the queried range
+                q = self._cube_query
+                if q is not None:
+                    if tbc is not None:
+                        for e in tbc.entries:
+                            if abs(int(e.range_bin) - q["bin"]) <= q["hw"]:
+                                q["entries"].append(e)
+                    q["left"] -= 1
+                    if q["left"] <= 0:
+                        q["done"].set()
                 if tgts:
                     self._z_hist.append(float(tgts[0].z))
                 z_smooth = float(np.median(self._z_hist)) if self._z_hist else None
@@ -406,6 +417,37 @@ class LiveSource:
     def scene(self):
         """Latest People_Tracking points + tracks (for the /api/scene panel)."""
         return self._scene
+
+    def request_cube(self, range_bin, n_frames=30, half_win=3, timeout=6.0):
+        """SERVER-TRIGGERED cube fetch (the fall second-check). On a window/MLP fall
+        trigger — or when a track is LOST at a low position — the cleaner calls this with
+        the fall's RANGE (from the point cloud, NOT a track pointer, so track-loss is a
+        non-problem). It asks the firmware to dump the TLV-320 cube at range_bin +-
+        half_win for n_frames, collects those entries off the live stream, and returns
+        them for the RR / floor-band-energy check that confirms a living body is down.
+
+        Firmware CLI contract (TO IMPLEMENT on the VM — generalises trackBinCubeCfg from
+        'per still track' to 'a specified range window', track-independent):
+            cubeQuery <range_bin> <half_win> <n_frames>
+        -> firmware bursts 320 for n_frames at that range window, then stops.
+        Until cubeQuery exists on-chip this still collects whatever 320 streams near
+        range_bin (e.g. from trackcube/fall cfg), so the server plumbing is testable now.
+        Returns a list of TrackBinEntry (empty if no session / nothing arrived)."""
+        import threading as _th
+        if not self._sess:
+            return []
+        q = {"bin": int(range_bin), "hw": int(half_win), "left": int(n_frames),
+             "entries": [], "done": _th.Event()}
+        with self._lock:
+            self._cube_query = q
+        try:
+            self._sess.send_cli(f"cubeQuery {int(range_bin)} {int(half_win)} {int(n_frames)}")
+        except Exception as e:
+            print(f"[cube-query] send_cli failed (firmware may lack cubeQuery): {e}", flush=True)
+        q["done"].wait(timeout)
+        with self._lock:
+            self._cube_query = None
+        return q["entries"]
 
     def window(self, win_s):
         now = time.time()

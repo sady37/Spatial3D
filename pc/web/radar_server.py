@@ -287,6 +287,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(_scene()))
             except Exception as e:
                 return self._send(200, json.dumps({"live": False, "error": str(e)}))
+        if u.path == "/api/cube":                    # server-triggered cube fetch (fall 2nd-check)
+            q = parse_qs(u.query)
+            rb = int(q.get("bin", [36])[0]); n = int(q.get("n", [30])[0]); hw = int(q.get("hw", [3])[0])
+            if not hasattr(_src, "request_cube"):
+                return self._send(200, json.dumps({"error": "source has no request_cube (not live)"}))
+            ents = _src.request_cube(rb, n_frames=n, half_win=hw)
+            bins = sorted({int(e.range_bin) for e in ents})
+            return self._send(200, json.dumps({"bin": rb, "half_win": hw, "n_frames": n,
+                                                "entries": len(ents), "range_bins": bins,
+                                                "n_ant": (len(ents[0].vec) if ents else 0)}))
         if u.path == "/api/state":
             q = parse_qs(u.query)
             bl = int(q["bin_lo"][0]) if "bin_lo" in q else None
