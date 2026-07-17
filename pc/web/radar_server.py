@@ -90,18 +90,24 @@ def _fetch_cube_bg(range_bin):
 
 
 def _fall_range_bin(sc):
-    """Range bin to cubeQuery = where the BREATHING actually is. VERIFIED on 233000:
-    breathing-band (0.15-0.5 Hz) energy peaks at 320 bins 31-39 — i.e. the range where 320
-    itself fires (the track / fall-cfg range), NOT the 3001 minor-cloud slant (~bin 44,
-    which reads ~1 m FARTHER than the body — a cloud range bias/multipath). So the reliable
-    anchor is where 320 last fired, held ~12 s (a track-death fall queries the person's
-    range from just before the track dropped — they fall in place). NOT cloud, NOT track
-    bbox. Returns None if 320 has never fired / is stale."""
-    import time as _t
-    bins = sc.get("cube_bins")
-    if not bins or (_t.time() - float(sc.get("cube_bins_ts", 0.0) or 0.0)) > 12.0:
+    """Range bin to cubeQuery = the fallen body's WORLD GROUND range wy (= py*cos(tilt) +
+    pz*sin(tilt)). VERIFIED on 233000: the 320 breathing bins (29-44, median 35) match the
+    low cloud's GROUND range (bin 34), NOT its SLANT range (bin 44, ~1 m too far). So 320
+    fires at the ground-projected range, and we compute it straight from the cloud —
+    track-INDEPENDENT and ALWAYS computable (this is what fixes the recent-320-bin bootstrap
+    deadlock: a fall with no prior 320 — e.g. 235000 — now still gets a valid query range,
+    so cubeQuery fires and bootstraps 320). Returns None only if there is no cloud."""
+    import numpy as _np, math as _m
+    pcx = sc.get("pc_xyz")
+    if pcx is None or not len(pcx):
         return None
-    return int(sorted(bins)[len(bins) // 2])          # median of the last-fired 320 bins
+    th = _m.radians(TILT or 0.0)
+    py, pz = pcx[:, 1], pcx[:, 2]
+    wy = py * _m.cos(th) + pz * _m.sin(th)                # world GROUND range (matches 320)
+    wz = MOUNT + pz * _m.cos(th) - py * _m.sin(th)        # world height -> pick the fallen body
+    low = wz < (_floor.default + 0.5)
+    sel = low if int(low.sum()) >= 4 else _np.ones(len(pcx), bool)
+    return int(round(float(_np.median(wy[sel])) / RANGE_STEP))
 
 
 def _pose_of(x0, x1, y0, y1, z0, z1):
