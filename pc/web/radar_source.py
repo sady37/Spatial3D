@@ -180,6 +180,7 @@ class LiveSource:
         ts, n_points = [], []
         e_frame, e_tid, e_bin, e_vel, e_range, e_vec = [], [], [], [], [], []
         t_frame, t_tid, t_x, t_y, t_z = [], [], [], [], []
+        t_pose, t_fprob = [], []                # per-track pose (TLV 321), aligned to t_*
         p_fr, p_arrs = [], []                   # per-frame 3001 minor point cloud (for offline box/LIE)
         n_ant = 0
         for fi, fr in enumerate(self._sc_frames):
@@ -188,9 +189,13 @@ class LiveSource:
                 e_frame.append(fi); e_tid.append(e.tid); e_bin.append(e.range_bin)
                 e_vel.append(e.vel_mmps); e_range.append(e.range_m); e_vec.append(e.vec)
                 n_ant = len(e.vec)
+            fr_poses = fr.get("poses") or {}
             for t in fr["tgts"]:
                 t_frame.append(fi); t_tid.append(t.tid)
                 t_x.append(t.x); t_y.append(t.y); t_z.append(t.z)
+                pv = fr_poses.get(t.tid)        # (pose, falling_prob) or None
+                t_pose.append(pv[0] if pv else 0xFF)
+                t_fprob.append(pv[1] if pv else 0.0)
             pc = fr.get("pc")
             if pc is not None and len(pc):
                 p_arrs.append(np.asarray(pc, np.float32))
@@ -209,6 +214,7 @@ class LiveSource:
             t_frame=np.asarray(t_frame, np.int32), t_tid=np.asarray(t_tid, np.int32),
             t_x=np.asarray(t_x, np.float32), t_y=np.asarray(t_y, np.float32),
             t_z=np.asarray(t_z, np.float32),
+            t_pose=np.asarray(t_pose, np.uint8), t_fprob=np.asarray(t_fprob, np.float32),
             p_frame=p_frame, pc_xyz=pc_xyz_all,
             block_start_epoch=np.float64(self._rec_bucket * self.block_s))
         print(f"[rec] SAVED {out}: {len(ts)} frames, {len(e_frame)} 320-entries, "
@@ -318,6 +324,7 @@ class LiveSource:
             try:
                 sc_ts = getattr(f, "rx_ts", None) or now
                 pts = f.detected_points(); tgts = f.targets()
+                poses = f.poses()               # {tid: Pose} from TLV 321 (empty if off)
                 tbc = f.track_bin_cube()
                 ncube = len(tbc.entries) if tbc is not None else 0
                 if ncube > 0:
@@ -355,7 +362,8 @@ class LiveSource:
                     pc_snr = np.concatenate([p[2] for p in self._pc_hist])
                 else:
                     pc_xyz = np.empty((0, 3), np.float32); pc_snr = np.empty(0, np.float32)
-                self._scene = {"points": pts, "targets": tgts, "t": sc_ts, "n_cube": ncube,
+                self._scene = {"points": pts, "targets": tgts, "poses": poses,
+                               "t": sc_ts, "n_cube": ncube,
                                "z_smooth": z_smooth,
                                "y0": float(tgts[0].y) if tgts else None,
                                "pc_xyz": pc_xyz, "pc_snr": pc_snr,
@@ -378,6 +386,7 @@ class LiveSource:
                 if self.record_prefix and self._rec_on and self._rec_bucket is not None:
                     self._sc_frames.append({
                         "ts": sc_ts, "n_points": len(pts), "tgts": tgts,
+                        "poses": {tid: (p.pose, p.falling_prob) for tid, p in poses.items()},
                         "tbc": tbc.entries if tbc is not None else [],
                         "pc": (pc.xyz if (pc is not None and len(pc.xyz)) else None)})
             except Exception:

@@ -27,3 +27,5 @@ pc/record/
 
 # TI reference demos (third-party, not part of our source)
 ti_ref/
+pc/.venv-pose/
+pc/pose/host_test/_proc_seq.txt

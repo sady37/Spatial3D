@@ -147,6 +147,11 @@
         <file path="${PROJECT_MSS_PATH}/source/tracker_utils/tracker_utils.c" targetDirectory="tracker_utils" openOnCreation="false" excludeFromBuild="false" action="copy"/>
         <file path="${PROJECT_MSS_PATH}/source/tracker_utils/tracker_utils.h" targetDirectory="tracker_utils" openOnCreation="false" excludeFromBuild="false" action="copy"/>
 
+        <!-- Spatial3D: per-track pose MLP (forward pass + folded weights) -->
+        <file path="${PROJECT_MSS_PATH}/source/pose/pose_mlp.c" targetDirectory="pose" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/pose/pose_mlp.h" targetDirectory="pose" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/pose/pose_model.c" targetDirectory="pose" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
         <!-- Test -->
         <file path="${PROJECT_MSS_PATH}/source/test/ADC_testbuf.c" targetDirectory="test" openOnCreation="false" excludeFromBuild="false" action="copy"/>
         

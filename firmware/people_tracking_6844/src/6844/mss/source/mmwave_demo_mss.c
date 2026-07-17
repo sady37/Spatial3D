@@ -570,6 +570,18 @@ void MmwDemo_transmitProcessedOutputTask()
         }
 
         /****************************************/
+        /* Spatial3D: per-track pose (TLV 321)  */
+        /****************************************/
+        if (gMmwMssMCB.poseEnable && gMmwMssMCB.poseNumResults > 0)
+        {
+            tl[tlvIdx].type   = MMWDEMO_OUTPUT_EXT_MSG_POSE;
+            tl[tlvIdx].length = 2 * sizeof(uint16_t) +
+                (uint32_t)gMmwMssMCB.poseNumResults * sizeof(PoseResult);
+            packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+            tlvIdx++;
+        }
+
+        /****************************************/
         /* Stats                                */
         /****************************************/
         if (gMmwMssMCB.guiMonSel.statsInfo)
@@ -683,6 +695,22 @@ void MmwDemo_transmitProcessedOutputTask()
                 MmwDemo_uartWrite(uartHandle, (uint8_t *)ent->vec,
                                   (uint32_t)gMmwMssMCB.tbcNumVirtAnt * sizeof(cmplx16ImRe_t));
             }
+            tlvIdx++;
+        }
+
+        /*********************************************/
+        /* Spatial3D: Send per-track pose (TLV 321)  */
+        /*********************************************/
+        if (gMmwMssMCB.poseEnable && gMmwMssMCB.poseNumResults > 0)
+        {
+            uint16_t poseHdr[2];
+            MmwDemo_uartWrite(uartHandle, (uint8_t *)&tl[tlvIdx],
+                              sizeof(MmwDemo_output_message_tl));
+            poseHdr[0] = gMmwMssMCB.poseNumResults;
+            poseHdr[1] = 0;   /* reserved (keeps the entry array 4-byte aligned) */
+            MmwDemo_uartWrite(uartHandle, (uint8_t *)poseHdr, sizeof(poseHdr));
+            MmwDemo_uartWrite(uartHandle, (uint8_t *)gMmwMssMCB.poseResults,
+                              (uint32_t)gMmwMssMCB.poseNumResults * sizeof(PoseResult));
             tlvIdx++;
         }
 

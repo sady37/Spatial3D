@@ -224,8 +224,16 @@ def _scene():
 
     pts = ([[round(float(p[0]), 3), round(float(p[1]), 3), round(float(p[2]), 3)]
             for p in pts_raw] if pts_raw is not None and len(pts_raw) else [])
+    poses = sc.get("poses") or {}            # {tid: Pose} from firmware TLV 321
     tg = [{"tid": int(t.tid), "x": round(t.x, 3), "y": round(t.y, 3),
            "z": round(t.z, 3), "speed": round(t.speed, 2)} for t in tgts]
+    for d in tg:                             # attach per-track pose (aux fall leg)
+        p = poses.get(d["tid"])
+        if p is not None and p.valid:
+            d["pose"] = p.label
+            d["falling_prob"] = round(p.falling_prob, 3)
+        else:
+            d["pose"] = None
     if tg:
         zsm = sc.get("z_smooth")
         zval = zsm if zsm is not None else tg[0]["z"]

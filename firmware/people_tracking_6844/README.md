@@ -39,6 +39,89 @@
    `projectspec` 补 `common_test.c` 的 `<file>` 项;`common_test.c` 去掉重复的 app_ioWrite/ioRead、
    只留 unityCharPut + critSec stubs。这些原本只在 VM 上、没回 Mac —— 已收进本 version。
 
+## 当前 version 状态 — Phase 2（per-track pose MLP）
+**已实现 + host 验证,尚未 VM 编译/硬件 flash**（源码已在本 version）。在 6844 People_Tracking
+上加一条**每 track 姿态分类**辅助腿:4 类 MLP(Stood/Sat/Lying/Falling)在 R5F MSS 上原生跑,
+结果按 tid 挂到新 TLV 321。定位:**白得 pose + 摔倒动作触发**的辅助腿,主 fall 判据仍在 server
+(window + cube-RR)。见 memory `fall-detection-design` / `fall-modular-pipeline`。
+
+### 为什么是重训 + 自写 forward,而不是移植 TI 的 pose_model.a
+TI `Pose_And_Fall` 的 `pose_model.a` 是 **Cortex-M4 / v7E-M Thumb-only** 目标(解析其 ARM build
+attributes 确认:`Tag_CPU_arch=13 (v7E-M)`, `Tag_CPU_arch_profile='M'`),**链不进 6844 的 R5F /
+ARMv7-R 镜像**。TI 也没随附 `.pth`/`.onnx`,只有 `.a` 里的 TVM rodata + classes.zip 数据集。
+所以:用 classes.zip 重训 → 自己导权重 → 自己写 forward,`.a` 和 TVM runtime 全不碰。
+
+### 训练/导出(在 Mac,`pc/pose/`)
+- `pc/pose/dataset.py` — TI 特征提取的清洗版。**三处清洗**(每处对应 classes.zip 里实测的缺陷):
+  (1) 丢掉「posz 轴死掉」的录制(整文件 |posz|<10cm;按类干净切分 → standing/sitting/lying 0%,
+  falling 30.5%,walking 51.2% → 是**标签捷径**,6844 上 posz 恒活会漏);(2) 丢掉 vel/acc 到 2.4e35
+  的毒行(TI 的 FILTER 只管 posz,不管 vel/acc → 3 行进 BatchNorm 会 var=inf);(3) 帧窗只在**同一
+  文件内连续帧**上开。**特征从 22 降到 20**:去掉 velx/accx —— 它们只有 `replay_*` schema 记录,
+  `results_*` 缺列被 TI 填 0,导致「精确 0.0」在 non-falling 占 98%、falling 仅 77%(AUC 0.76 的
+  schema 泄漏),而 std(non-Fall)=2.7e-5 让 BatchNorm 放大 ~95×。**砍掉 walking**(清洗后只剩 ~2
+  session,必过拟合)。
+- `pc/pose/model.py` — TI 架构(bn1 输入归一化 → 160→64→32→16→4),但 forward 返回 logits(TI 原版
+  softmax+CrossEntropy 双 softmax,梯度被压);BN 在导出时**折叠进 Linear**(`fold_bn`)。
+- `pc/pose/train.py` — 训练 + 双口径报准确率:**random-row(TI 的方法,虚高)vs grouped-by-file
+  (诚实)**。实测 **97.8–98.2% grouped**(vs 99.9% random-row);Falling 召回 97.6%、Lying 100%
+  (清洗后 Lying 从 TI 的 63% 修复,因为高度轴不再被 schema 污染)。⚠️ grouped-by-**file** 仍共享
+  TI 那 5 个人(train/test 同人),所以是乐观上界,但远比 99.9% 诚实。
+- 导出:`python -m pose.train --data <classes解压目录> --out .../pose/pose_model.c`。
+  BN-fold 与 torch 逐点对齐 <3e-7(train.py 内断言)。
+- **CAVEAT**:权重来自 TI 6432(8 天线、TI mount)。已清洗,但仍是 6432 几何 → 6844 上必须用
+  `poseCfg` 的 zOffset 标定,让站立读到 posz ≈ +0.33m。
+- **重训环境**:Intel Mac 上 torch 停在 2.2.2(需 numpy<2),与主 venv(numpy 2.1)冲突 → 用独立
+  venv `pc/.venv-pose`(gitignored)。主 venv(`pc/.venv`)跑 server/tlv 测试。
+
+### 固件侧改动(4 处 + 新目录 `mss/source/pose/`)
+1. **pose/pose_mlp.{c,h} + pose/pose_model.c**(生成)— 折叠后 forward(纯 乘加+relu+softmax)+
+   **每 track 20×8 环形缓冲**(`POSE_MAX_TRACKS=8`,~13KB .bss)。每 track:把点云按半径 0.75m 门到
+   该 track,取最高 5 点建 20 特征帧,压入环形缓冲;满 8 帧才推理。TI 原版是单 track(`tList[0]`),
+   这里泛化到多 track。权重放 `.rodata.pose_model`(50.7KB)。
+2. **linker.cmd** — 新规则 `.rodata.pose_model: {} palign(8) > TCMB_RAM`,放在通用 `.rodata`
+   GROUP **之前**(first-match),把 51KB 权重**钉在 TCMB**。绝不能溢到 TCMA(cubeQuery 后只剩
+   ~5.8KB,溢 51KB 直接 brick,见 `fallsm-boot-bug`)。
+3. **dpc_mss.c** — `DPU_TrackerProc_process` 之后,由 `tList`(trackerProc_Target)建 per-track
+   kinematics + 由 `dpcAoAObjOutCartExt` 建 Cartesian 点(snr ×0.1 把 0.1dB-steps 换成 classes.zip
+   的 dB 尺度),调 `PoseMlp_process`,结果存 MCB。
+4. **mmwave_demo_mss.{c,h}** — TLV 321 enum + MCB 字段(`poseEnable`/`poseNumResults`/
+   `poseResults[]`)+ header/write 两趟 emit;`MMWDEMO_OUTPUT_ALL_MSG_MAX` 11→14。
+5. **mmw_cli.c** — `poseCfg <enable> [zOffset_cm]`(`MmwDemo_CLIPoseCfg`):重置环形缓冲 +
+   设 zOffset(cm→m)+ 开关。发在 sensorStart 前。
+
+### TLV 321 契约（little-endian,给 server `pc/spatial3d/tlv.py`）
+```
+uint16 numResults;    // 本帧有 pose 的 track 数(≤ POSE_MAX_TRACKS=8)
+uint16 reserved;      // 0,保持后面数组 4 字节对齐
+然后 numResults × PoseResult(每个 8 字节):
+    uint32 tid;          // track id(对应 TLV 308 的 tid)
+    uint8  pose;         // 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown(窗未满)
+    uint8  fallingProb;  // P(Falling)×255,0..255
+    uint8  valid;        // 1=本帧真推理,0=窗未满/点不足
+    uint8  pad;          // 0
+```
+每 entry 8 字节。`valid=0` 时 pose=0xFF。server:`Frame.poses()` → `{tid: Pose}`;`/api/scene` 每
+track 带 `pose`(标签串)+ `falling_prob`。录制 npz 新增 `t_pose`/`t_fprob` 列(对齐 `t_*` 轨迹列)。
+
+### 验收(硬件)
+flash 后:`poseCfg 1 30`(30cm 是占位 zOffset,需按 mount 标定)→ 重启 `radar_server.py live` →
+`/api/scene` 每 track 出现 `pose` 字段;静坐读 Sat、站立 Stood、躺地 Lying/Falling。
+host 侧已验证(build 前就证明逻辑对):C `poseInfer` vs Python folded_forward 逐点 1e-6;整条
+`PoseMlp_process`(门控+环形+flatten+推理+falling量化)vs Python 参考 end-to-end MATCH
+(`pc/pose/` + scratchpad host harness)。
+
+### VM 构建注意（Phase 2 特有）
+- 新增 `mss/source/pose/{pose_mlp.c,pose_mlp.h,pose_model.c}` 已加进 mss projectspec 的 `<file>`
+  项(`targetDirectory="pose"`)。**projectImport 会把 .c 拷进 ccs_ws** → 记得把这三个新文件 +
+  改过的 `dpc_mss.c`/`mmwave_demo_mss.c`/`mmw_cli.c` scp 进 ws build 副本(见 `track-bin-cube-patch`
+  的 build-workspace note:改 toolbox src 不自动进 build)。`mmwave_demo_mss.h`/`pose_mlp.h` 走 `-I`
+  从 toolbox src,头改动能进 build。
+- **VM 编译要核对的一件事**:`trackerProc_Target` 的字段名。本 version 用 `tid/posX/posY/posZ/
+  velY/velZ/accY/accZ`(vital_signs guide 的 targetStruct3D + TI 6432 pose demo 注释均如此)。Mac 上
+  没有 SDK 头无法预检;若 VM 报字段名错,是一行改名的事(如 `tid`→`trackerID`)。
+- 内存:pose_model 51KB 进 TCMB(256KB,富余)。核对 map 里 TCMA free 仍 ~5.8KB(pose 的 .bss
+  环形缓冲 ~13KB 默认进 TCMA/TCMB spill;若 TCMA 吃紧,把 `gPoseSlots` 也加 `.bss.dsp_tcmb` 段)。
+
 ## 构建 recipe（VM，CCS headless）
 见 memory `track-bin-cube-patch`(BUILD RECIPE 段)。要点:CCS toolbox 的 makefile 是坏模板,别用;
 在 ccs_ws mss `Release/` 里 `gmake -k -j4 all` 构建 mss rig;system-post-build 的 metaImage 步骤坏

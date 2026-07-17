@@ -3137,6 +3137,35 @@ int32_t MmwDemo_CLICubeQuery (int32_t argc, char* argv[])
     return 0;
 }
 
+/**
+ * poseCfg <enable> [zOffset_cm]
+ *   enable    : 1 run the per-track pose MLP each frame and emit TLV 321, 0 off
+ *   zOffset_cm: height remap (cm) added to each track's posZ before inference, so
+ *               a standing person reads TI's reference posz (~ +0.33 m). Optional,
+ *               default 0. Field-calibrated per mount; see pose/pose_mlp.h.
+ * Resets the per-track ring buffers, so send before sensorStart (or to re-arm).
+ */
+int32_t MmwDemo_CLIPoseCfg (int32_t argc, char* argv[])
+{
+    int32_t enable;
+    float   zOffCm = 0.0f;
+    if (argc < 2)
+    {
+        CLI_write ("Error: poseCfg <enable> [zOffset_cm]\n");
+        return -1;
+    }
+    enable = atoi (argv[1]);
+    if (argc >= 3)
+    {
+        zOffCm = (float) atof (argv[2]);
+    }
+    PoseMlp_init ();
+    PoseMlp_setZOffset (zOffCm * 0.01f);       /* cm -> m */
+    gMmwMssMCB.poseEnable     = (enable != 0) ? 1 : 0;
+    gMmwMssMCB.poseNumResults = 0;
+    return 0;
+}
+
 void CLI_init (uint8_t taskPriority)
 {
     int32_t          status;
@@ -3213,6 +3242,11 @@ void CLI_init (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmd            = "cubeQuery";
     cliCfg.tableEntry[cnt].helpString     = "<range_bin> <half_win> <n_frames>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLICubeQuery;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "poseCfg";
+    cliCfg.tableEntry[cnt].helpString     = "<enable> [zOffset_cm]";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIPoseCfg;
     cnt++;
 
     // cliCfg.tableEntry[cnt].cmd             = "sensorPosition";

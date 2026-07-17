@@ -50,6 +50,7 @@
 #include <common_mss_dss/msg_ipc/msg_ipc.h>
 #include <source/mmw_cli.h>
 #include <source/lvds_streaming/mmw_lvds_stream.h>
+#include <source/pose/pose_mlp.h>          /* Spatial3D: per-track pose MLP */
 #include <datapath/dpu/rangeproc/v1/rangeprochwa.h>
 #include <datapath/dpu/cfarproc/v1/cfarprochwa.h>
 #include <datapath/dpu/dopplerproc/v1/dopplerprochwa.h>
@@ -1517,9 +1518,18 @@ typedef struct MmwDemo_MSS_MCB_t
     volatile uint16_t     tbcQueryHalfWin;     /*!< +- range bins around the center bin  */
     volatile int32_t      tbcQueryFramesLeft;  /*!< frames still to emit for this query  */
 
+    /* Spatial3D: per-track pose classification (auxiliary fall leg). Filled in
+     * dpc_mss.c right after DPU_TrackerProc_process (track kinematics + gated
+     * Cartesian points), drained into TLV 321 by the transmit task. The MLP is
+     * a "free pose + fall-motion trigger" leg; the primary fall decision stays
+     * server-side (window + cube-RR). See pose/pose_mlp.h. */
+    uint8_t               poseEnable;          /*!< poseCfg: 1 run + emit TLV 321, 0 off */
+    uint16_t              poseNumResults;      /*!< pose results valid this frame        */
+    PoseResult            poseResults[POSE_MAX_TRACKS];
+
 } MmwDemo_MSS_MCB;
 
-#define MMWDEMO_OUTPUT_ALL_MSG_MAX 11 //ToDo: rework this
+#define MMWDEMO_OUTPUT_ALL_MSG_MAX 14 //Spatial3D: +TLV 320 (cube) +321 (pose)
 
 /*!
  * @brief
@@ -1545,6 +1555,9 @@ typedef enum mmwLab_output_message_type_e
 
     /*! @brief   Spatial3D: per-track per-bin zero-Doppler 16-antenna cube vectors */
     MMWDEMO_OUTPUT_EXT_MSG_TRACK_BIN_CUBE = 320,
+
+    /*! @brief   Spatial3D: per-track pose classification (Stood/Sat/Lying/Falling) */
+    MMWDEMO_OUTPUT_EXT_MSG_POSE = 321,
 
     /*! @brief   Point Cloud - Array of detected points (range/angle/doppler) */
     MMWDEMO_OUTPUT_MSG_POINT_CLOUD = 3001,
@@ -1582,7 +1595,7 @@ typedef enum mmwLab_output_message_type_e
     MMWDEMO_OUTPUT_MSG_MAX = 13
 } mmwLab_output_message_type;
 
-#define MMWDEMO_OUTPUT_ALL_MSG_MAX 11 //ToDo: rework this
+#define MMWDEMO_OUTPUT_ALL_MSG_MAX 14 //Spatial3D: +TLV 320 (cube) +321 (pose)
 
 /*!
  * @brief

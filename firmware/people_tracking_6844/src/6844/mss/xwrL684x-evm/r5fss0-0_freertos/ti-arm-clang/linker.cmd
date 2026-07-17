@@ -63,6 +63,13 @@ SECTIONS{
         .text:abort: palign(8) /* this helps in loading symbols when using XIP mode */
     } > TCMA_RAM
 
+    /* Spatial3D: pin the ~51 KB pose MLP weights to TCMB. Placed BEFORE the
+     * general .rodata group so first-match claims it here; the general group's
+     * ">> TCMA_RAM | TCMB_RAM" spill must NOT get it, because TCMA has only
+     * ~5.8 KB free after the cubeQuery patch and spilling 51 KB there bricks
+     * boot (see fallsm-boot-bug). TCMB is 256 KB and already hosts FIX2. */
+    .rodata.pose_model: {} palign(8) > TCMB_RAM
+
     GROUP {
         .text:   {} align(8)   /* This is where code resides */
         .rodata: {} align(8)   /* This is where const's go */
@@ -102,6 +109,10 @@ SECTIONS{
     /* Spatial3D FIX2: park the classifier task stack (gDspPointCloudTaskStack,
      * .bss.dsp_tcmb) in TCMB so TCMA keeps headroom - see fallsm-boot-bug. */
     .bss.dsp_tcmb {} align(32) > TCMB_RAM
+
+    /* Spatial3D Phase 2: pose MLP runtime .bss (ring buffers + scratch, ~6.3 KB)
+     * in TCMB for the same reason - TCMA has only ~5.8 KB free. */
+    .bss.pose {} align(8) > TCMB_RAM
 
     /* any data buffer needed to be put in L3 can be assigned this section name */
     .bss.l3 {} > DSS_L3

@@ -74,6 +74,14 @@ _TBC_ENTRY = struct.Struct("<IHhf")  # tid, range_bin, vel_mmps(int16), range_m(
 # People_Tracking demo TLV ids (People_Tracking mmwave_demo_mss.h enum).
 TLV_TARGET_LIST = 308        # trackerProc_Target array (GTRACK_3D, 112 B each)
 TLV_TARGET_INDEX = 309
+TLV_POSE = 321               # Spatial3D per-track pose MLP (Stood/Sat/Lying/Falling)
+# TLV 321 layout (little-endian): uint16 numResults; uint16 reserved; then
+# numResults * PoseResult { uint32 tid; uint8 pose; uint8 fallingProb; uint8 valid;
+# uint8 pad } = 8 B each. pose: 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown.
+_POSE_HDR = struct.Struct("<HH")            # numResults, reserved
+_POSE_ENTRY = struct.Struct("<IBBBB")       # tid, pose, fallingProb, valid, pad
+_POSE_ENTRY_SIZE = 8
+POSE_LABELS = {0: "Stood", 1: "Sat", 2: "Lying", 3: "Falling", 0xFF: "Unknown"}
 TLV_STATS = 6
 TLV_POINT_CLOUD = 3001       # minor-motion spherical compressed point cloud
 # trackerProc_Target GTRACK_3D: tid, pos[3], vel[3], acc[3], ec[16], g, conf = 112 B.
@@ -144,6 +152,19 @@ class TrackBinCube:
 
 
 @dataclass
+class Pose:
+    """One track's pose classification from TLV 321 (firmware MLP, aux fall leg)."""
+    tid: int
+    pose: int              # 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown
+    falling_prob: float    # P(Falling), 0..1 (firmware sends 0..255)
+    valid: bool            # False until the track's 8-frame window filled
+
+    @property
+    def label(self) -> str:
+        return POSE_LABELS.get(self.pose, "Unknown")
+
+
+@dataclass
 class Target:
     """One tracked target from TLV 308 (trackerProc_Target, GTRACK_3D)."""
     tid: int
@@ -194,6 +215,13 @@ class Frame:
             if t.type == TLV_TARGET_LIST:
                 return parse_target_list(t.payload)
         return []
+
+    def poses(self) -> dict[int, "Pose"]:
+        """Per-track pose from TLV 321, keyed by tid (empty if absent)."""
+        for t in self.tlvs:
+            if t.type == TLV_POSE:
+                return parse_pose_list(t.payload)
+        return {}
 
     def point_cloud(self) -> "PointCloud | None":
         """Minor-motion point cloud (TLV 3001), Cartesian + SNR. None if absent."""
@@ -306,6 +334,22 @@ def parse_target_list(payload: bytes) -> list[Target]:
         off = i * _TARGET_SIZE
         tid, px, py, pz, vx, vy, vz, _ax, _ay, _az = _TARGET.unpack_from(payload, off)
         out.append(Target(int(tid), px, py, pz, vx, vy, vz))
+    return out
+
+
+def parse_pose_list(payload: bytes) -> dict[int, Pose]:
+    """Parse TLV 321: uint16 numResults, uint16 reserved, then numResults * 8 B."""
+    if len(payload) < _POSE_HDR.size:
+        return {}
+    n, _reserved = _POSE_HDR.unpack_from(payload, 0)
+    out: dict[int, Pose] = {}
+    off = _POSE_HDR.size
+    for _ in range(n):
+        if off + _POSE_ENTRY_SIZE > len(payload):
+            break
+        tid, pose, fp, valid, _pad = _POSE_ENTRY.unpack_from(payload, off)
+        out[int(tid)] = Pose(int(tid), int(pose), fp / 255.0, bool(valid))
+        off += _POSE_ENTRY_SIZE
     return out
 
 
