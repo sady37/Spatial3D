@@ -304,8 +304,8 @@ const SC_XMAX=3, SC_YMAX=5;                        // plane: +-3 m lateral, 0..5
 // Z(cm) bands, world height above floor. Fall energy sits BELOW the floor (world Z<0):
 // validated on the 3 recent fall cases the point cloud is ~91% below -40 cm, mean -81 cm.
 // Fall = below -40 cm | Sit = 0..80 cm | Stand = 80..200 cm | -40..0 = transition (no band).
-const SC_ZONES=[[-120,-40,"Fall","#e03131"],[0,80,"Sit","#f08c00"],[80,200,"Stand","#2f9e44"]];
-function zoneOf(cm){ return cm<=-40?["Fall","#e03131"]:(cm<80?["Sit","#f08c00"]:["Stand","#2f9e44"]); }
+const SC_ZONES=[[-100,0,"Fall","#e03131"],[0,80,"Sit","#f08c00"],[80,200,"Stand","#2f9e44"]];
+function zoneOf(cm){ return cm<=0?["Fall","#e03131"]:(cm<=80?["Sit","#f08c00"]:["Stand","#2f9e44"]); }
 function drawScene(sc){
   const c=document.getElementById("scene"); if(!c) return;
   const cw=Math.round(c.clientWidth), ch=Math.round(c.clientHeight);   // responsive: fill flex height, align w/ right column
@@ -321,12 +321,20 @@ function drawScene(sc){
   const TX=x=> tL + ((SC_XMAX - x)/(2*SC_XMAX))*(tR-tL);         // top-down: +x to LEFT
   const TY=y=> pT + (Math.max(0,Math.min(SC_YMAX,y))/SC_YMAX)*(pB-pT);    // range DOWN
   const SX=d=> sL + (Math.max(0,Math.min(SC_YMAX,d))/SC_YMAX)*(sR-sL);    // side: D across
-  const ZR0=-1.2, ZR1=2.0;   // world height axis: +2.0m top .. -1.2m bottom (fall energy is sub-floor)
+  // Z is the densest-energy CENTROID, not the extreme; fall-case cloud tails reach ~-1.66m
+  // world (mount 2.0/tilt 35), so give the axis headroom below the centroid.
+  const ZR0=-1.0, ZR1=2.0;   // world height axis: +2.0m top .. -1.0m bottom (5m fall reaches ~-1.0/-1.2m)
   const SZ=z=> pB - (Math.max(ZR0,Math.min(ZR1,z))-ZR0)/(ZR1-ZR0)*(pB-pT);  // Z up
-  const ZB0=-120, ZB1=200;   // Z-bar range (cm): 200 down to -120
+  const ZB0=-100, ZB1=200;   // Z-bar range (cm): 200 down to -100
   const HY=cm=> bB - (Math.max(ZB0,Math.min(ZB1,cm))-ZB0)/(ZB1-ZB0)*(bB-bT);
   g.font="12px sans-serif";
   const PAL=["#4dabf7","#f08c00","#2f9e44","#e64980","#f7b731","#a55eea"];
+  // LOCAL FLOOR (true zero) from elevation resolution: beam blur ~ 0.5·rad(res)·slantR grows with
+  // range, so the fall line dips with distance. A point is real-Fall energy only if it sinks BELOW
+  // its own local floor (-EK·slantR). Display Z axis is unchanged — this drives the XZ/XY judgment.
+  const ERES=(sc&&sc.elev_acc_deg||6), EK=0.5*ERES*Math.PI/180, MT=(sc&&sc.mount_cm||200)/100;
+  const lfLine=d=> -EK*Math.sqrt(d*d+MT*MT);                    // fall line (x=0) at ground range d
+  const lfPt=(x,d,z)=> -EK*Math.sqrt(x*x+d*d+(MT-z)*(MT-z));    // per-point local floor (true slant)
   // === TOP-DOWN (X × D) ===
   g.fillStyle="#8b949e"; g.fillText("俯视 X 左右(m) × 距离(m,向下)", tL, pT-10);
   for(let x=-SC_XMAX;x<=SC_XMAX;x++){ g.strokeStyle=x===0?"#484f58":"#181d24";
@@ -340,32 +348,41 @@ function drawScene(sc){
   g.fillStyle="#1971c2"; g.fillText("RADAR", TX(0)+10, TY(0)+2);
   // === SIDE (D × Z) — fall morphology ===
   g.fillStyle="#8b949e"; g.fillText("侧视 距离(m) × Z 高度(m)", sL, pT-10);
-  // fall zone = sub-floor energy, Z < -0.4 m
-  g.fillStyle="rgba(248,81,73,.07)"; g.fillRect(sL,SZ(-0.4),sR-sL,SZ(ZR0)-SZ(-0.4));
+  // fall zone = below the LOCAL floor line H=-EK·slant(d): a downward-sloping true-zero, energy
+  // under it is unambiguously sub-floor (real Fall). floor0 kept as a flat grey reference.
+  const slp=[]; for(let d=0;d<=SC_YMAX+0.01;d+=0.25) slp.push([SX(d),SZ(lfLine(d))]);
+  g.fillStyle="rgba(248,81,73,.09)"; g.beginPath(); g.moveTo(slp[0][0],slp[0][1]);
+  for(const q of slp) g.lineTo(q[0],q[1]);
+  g.lineTo(slp[slp.length-1][0],pB); g.lineTo(slp[0][0],pB); g.closePath(); g.fill();
   g.strokeStyle="#30363d"; g.strokeRect(sL,pT,sR-sL,pB-pT);
   for(let d=1;d<=4;d++){ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(SX(d),pT);g.lineTo(SX(d),pB);g.stroke();
     g.fillStyle="#8b949e"; g.fillText(d+"m", SX(d)-6, pB+13); }
-  [-1.0,-0.4,0.5,1,1.5].forEach(z=>{ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(sL,SZ(z));g.lineTo(sR,SZ(z));g.stroke();
+  [-1.0,-0.5,0.8,1.5].forEach(z=>{ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(sL,SZ(z));g.lineTo(sR,SZ(z));g.stroke();
     g.fillStyle="#8b949e"; g.fillText(z, sL-22, SZ(z)+3); });
-  g.strokeStyle="#484f58"; g.beginPath();g.moveTo(sL,SZ(0));g.lineTo(sR,SZ(0));g.stroke();
-  g.fillStyle="#8b949e"; g.fillText("floor0", sR-36, SZ(0)-3);
-  g.strokeStyle="#f85149"; g.setLineDash([4,3]); g.beginPath();g.moveTo(sL,SZ(-0.4));g.lineTo(sR,SZ(-0.4));g.stroke(); g.setLineDash([]);
-  g.fillStyle="#f85149"; g.fillText("倒地<-0.4m", sL+4, SZ(-0.8));
+  g.strokeStyle="#586069"; g.setLineDash([2,3]); g.beginPath();g.moveTo(sL,SZ(0));g.lineTo(sR,SZ(0));g.stroke(); g.setLineDash([]);
+  g.fillStyle="#8b949e"; g.fillText("floor0", sR-32, SZ(0)-3);
+  g.strokeStyle="#f85149"; g.setLineDash([5,3]); g.lineWidth=1.5; g.beginPath(); g.moveTo(slp[0][0],slp[0][1]);
+  for(const q of slp) g.lineTo(q[0],q[1]); g.stroke(); g.setLineDash([]); g.lineWidth=1;
+  g.fillStyle="#f85149"; g.fillText("真零点 -½·"+Math.round(ERES)+"°·R", sL+4, SZ(lfLine(0))-4);
   // === Z HEIGHT BAR ===
   g.fillStyle="#8b949e"; g.fillText("Z(cm)", bL-14, pT-10);
   SC_ZONES.forEach(([lo,hi,lbl,col])=>{ g.fillStyle=col+"44";
     g.fillRect(bL,HY(hi),bR-bL,HY(lo)-HY(hi));
     g.fillStyle="#8b949e"; g.fillText(lbl, bR+4, (HY(lo)+HY(hi))/2+3); });
   g.strokeStyle="#484f58"; g.strokeRect(bL,bT,bR-bL,bB-bT);
-  [200,160,120,80,40,0,-40,-80,-120].forEach(cm=>{ g.fillStyle="#8b949e"; g.fillText(cm, bL-24, HY(cm)+3); });
+  [200,160,120,80,40,0,-40,-80,-100].forEach(cm=>{ g.fillStyle="#8b949e"; g.fillText(cm, bL-24, HY(cm)+3); });
   g.strokeStyle="#484f58"; g.beginPath();g.moveTo(bL,HY(0));g.lineTo(bR,HY(0));g.stroke();   // floor0 ref
   const st=document.getElementById("scenestat");
   if(!sc||!sc.live){ g.fillStyle="#8b949e"; g.fillText("no live source (run: radar_server.py live)",tL+20,H/2); if(st)st.textContent="—"; return; }
   const fsz=sc.fall_state;
-  // 3001 points in BOTH plan views, coloured by track
-  (sc.pc||[]).forEach(p=>{ if(p[1]<=SC_YMAX){ g.fillStyle=PAL[(p[3]||0)%PAL.length];
-    g.beginPath();g.arc(TX(p[0]),TY(p[1]),2.2,0,7);g.fill();
-    g.beginPath();g.arc(SX(p[1]),SZ(p[2]),2.2,0,7);g.fill(); }});
+  // 3001 points in BOTH plan views. RED = below local floor (real sub-floor Fall energy); else
+  // coloured by track. Judgment uses the range-aware local zero, NOT the flat display axis.
+  let nFall=0;
+  (sc.pc||[]).forEach(p=>{ if(p[1]<=SC_YMAX){
+    const sub = p[2] < lfPt(p[0],p[1],p[2]); if(sub) nFall++;
+    g.fillStyle = sub ? "#f85149" : PAL[(p[3]||0)%PAL.length]; const rr=sub?2.9:2.2;
+    g.beginPath();g.arc(TX(p[0]),TY(p[1]),rr,0,7);g.fill();
+    g.beginPath();g.arc(SX(p[1]),SZ(p[2]),rr,0,7);g.fill(); }});
   // per-track boxes: footprint(top-down) + D×Z box(side); pose = zspan/max(x,y) [LIE fix]
   const poses=[]; let sZmax=-9,sDmin=9,sDmax=-9,sN=0;
   (sc.boxes||[]).forEach(b=>{ const pose = b.pose || "?"; poses.push(`T${b.tid}:${pose}`);
@@ -375,10 +392,10 @@ function drawScene(sc){
     g.fillStyle=col; g.font="bold 13px sans-serif"; g.fillText(`T${b.tid} ${pose}`, xl+2, TY(b.y0)-4); g.font="12px sans-serif";
     g.strokeStyle=col; g.strokeRect(SX(b.y0), SZ(b.z1), SX(b.y1)-SX(b.y0), SZ(b.z0)-SZ(b.z1));
     sZmax=Math.max(sZmax,b.z1); sDmin=Math.min(sDmin,b.y0); sDmax=Math.max(sDmax,b.y1); sN++; });
-  // side morphology readout: fall = low top(顶Z) + long ground spread(展D)
+  // side morphology readout: fall = low top(顶Z) + long ground spread(展D) + energy below 真零点
   if(sN>0){ const flat=(sZmax<0.7)&&((sDmax-sDmin)>0.7);
     g.fillStyle=(fsz==="fall")?"#f85149":((fsz==="suspected")?"#f08c00":"#8b949e"); g.font="bold 12px sans-serif";
-    g.fillText(`顶Z ${sZmax.toFixed(2)}m·展D ${(sDmax-sDmin).toFixed(2)}m${flat?"·摊平":""}`, sL+4, pB-6); g.font="12px sans-serif"; }
+    g.fillText(`顶Z ${sZmax.toFixed(2)}m·展D ${(sDmax-sDmin).toFixed(2)}m${flat?"·摊平":""}${nFall?"·零点下"+nFall+"点":""}`, sL+4, pB-6); g.font="12px sans-serif"; }
   if(fsz==="fall"||fsz==="suspected"){ g.strokeStyle=(fsz==="fall")?"#f85149":"#f08c00"; g.lineWidth=2;
     g.strokeRect(sL+1,pT+1,sR-sL-2,pB-pT-2); }
   // Z bar marker (primary track world height + label)

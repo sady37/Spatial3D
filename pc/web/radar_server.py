@@ -53,9 +53,18 @@ _shutdown = None     # set in main() to the graceful stop fn (for /api/quit)
 # (--tilt/--mount override for a different rig). NO fall/posture logic lives here —
 # the scene reports H (world height of the track) and the raw track coords; fall
 # detection is done elsewhere (energy-density pipeline), not in this server.
-TILT = 35.0          # radar DOWN-tilt from horizontal, deg
+TILT = 25.0          # radar DOWN-tilt from horizontal, deg (measured install 20260716)
 MOUNT = 2.0          # sensor height above floor, m
 FLOOR_Z = 0.4        # m; floor band top (matches radar_pipeline FLOOR_Z) — fall = energy below this
+# Elevation angular ACCURACY (single-target localization), NOT the 29° two-target resolution.
+# One person's height blur is governed by accuracy (~3-6° on-axis), not the ability to separate
+# two targets. Beam blur grows with range: a point at slant range R has vertical uncertainty
+# ~R·sin(acc). The SCENE local floor (true zero) at range R drops by HALF a cell: -0.5·rad(acc)·R,
+# so a point/marker is "below floor" (=> real Fall) only if it sinks past that. Validated on the
+# fall clip: at 6° the fall/crawl segment puts 5.3% of energy below the local floor vs 1.4% while
+# walking (3.8x separation); the doc's 29° RESOLUTION kills it (0.2% vs 0.5%, no separation).
+# Lower (3°) = more sensitive, higher = stricter. Exposed to dashboard for the sloped zero line.
+ELEV_ACC_DEG = 6.0
 _cache = {"t": 0.0, "key": None, "state": None}
 _lock = threading.Lock()
 
@@ -292,6 +301,7 @@ def _scene():
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
                         "cube": (cube_ev is not None), "floor_frac": prim_ffrac,
                         "floor_cells": len(_floor.hg)},
+            "elev_acc_deg": ELEV_ACC_DEG,
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 
