@@ -385,6 +385,16 @@ def _scene():
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
     fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
+    # DIAG: whenever a fall trigger is active, print the full gate breakdown so a
+    # missed red-Fall can be pinned to the exact failing gate. Remove once tuned.
+    if down or dec["trigger"] or cube_ev is not None:
+        cr = _cube_result
+        print(f"[fall] {fall_state:9s} down={int(down)}(w={int(w_down)}/{w_src},real={int(real_person)}) "
+              f"hs={w_hs if w_hs is None else round(w_hs,2)} prim=tid{prim['tid'] if prim else '-'} "
+              f"pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
+              f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},age={now-cr['t']:.1f}s) "
+              f"run={_cleaner.run} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}",
+              flush=True)
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
