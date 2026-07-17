@@ -83,6 +83,13 @@ _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until th
 FALL_HOLD_S = 30.0           # keep showing red Fall this long after the last confirmation
                              # (a caregiver must SEE it; it must not clear when the person
                              # stirs/gets up). Cleared by /api/fall/reset.
+_down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
+_down_last = [0.0]           # last wall time `down` was true (to bridge brief flicker gaps)
+FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can't get up) ->
+                             # red Fall EVEN without cube RR. Catches a kid / weak-breathing
+                             # body the cube-RR second-check can't lock onto. The cube still
+                             # gets its ~6 s first; this is the fallback for real sustained down.
+DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting the sustain timer
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0}   # latest cube 2nd-check
@@ -399,10 +406,27 @@ def _scene():
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
     fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
+
+    # SUSTAINED-DOWN escalation: track how long the person has continuously been down
+    # (bridging brief DOWN_GAP_S flicker gaps). If down that long AND a real person, call it
+    # a red Fall even if the cube never found breathing -- catches a kid / weak-breathing
+    # body. The cube-RR path (above) still confirms faster for a clear adult.
+    if down:
+        if _down_since[0] == 0.0:
+            _down_since[0] = now
+        _down_last[0] = now
+    elif _down_since[0] and (now - _down_last[0]) > DOWN_GAP_S:
+        _down_since[0] = 0.0                       # down truly gone -> reset the sustain timer
+    down_dur = (now - _down_since[0]) if _down_since[0] else 0.0
+    sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S and real_person)
+    if sustained_fall and not dec["fall"]:
+        fall_state = "fall"
+        dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
+
     # LATCH a confirmed red Fall so it stays visible on the dashboard for FALL_HOLD_S even
     # after the person stirs/gets up (a ~6 s red that clears the instant they move is easy
     # to miss). Cleared by GET /api/fall/reset.
-    if dec["fall"]:
+    if dec["fall"] or sustained_fall:
         _fall_latch_until[0] = now + FALL_HOLD_S
     if now < _fall_latch_until[0]:
         fall_state = "fall"
