@@ -411,8 +411,8 @@ function drawScene(sc){
   const ev=sc.fall_ev||{};
   const evs=(ev.reason&&ev.reason.length)?ev.reason.join("+"):(ev.window?"window":"—");
   const fpp=document.getElementById("fallp");
-  const ff=(ev.h_s!=null?` 顶Z ${ev.h_s}m`:"")+(ev.cube?" ·cube":"")+(ev.cleaned?" ·"+ev.cleaned:"")
-           +(ev.floor_cells?` (地面格${ev.floor_cells})`:"");
+  const ff=(ev.h_s!=null?` 顶Z${ev.h_s}m`:"")+(ev.rr!=null?` RR${ev.rr}`:"")
+           +(ev.cube?"·cube":"")+(ev.real===false?"·鬼影":"")+(ev.cleaned?"·"+ev.cleaned:"");
   if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}  [${evs}]${ff}` : "—");
   const fmark = (fsz==="none"||!fsz)?"":`  ⚠${fsz==="fall"?"FALL":"Suspected"} P=${sc.fall_p} [${evs}]`;
   st.textContent=`tracks:${(sc.boxes||[]).length}  ${poses.join("  ")||"(no track)"}  `+

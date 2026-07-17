@@ -75,14 +75,51 @@ _floor_pts = []                                              # recent world poin
 _window = WindowDetector(_floor, margin=0.45, sustain=3, clear=3)  # sustain in SCENE-calls (~3/s)
 _cleaner = Cleaner(mlp_trig=0.5, persist=2, floor_frac_min=0.7)
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
+_last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
+QUERY_REFRESH_S = 4.0        # min seconds between cubeQuery bursts while down
 
 
-def _fetch_cube_bg(range_bin):
-    """Background: ask the firmware to burst 320 at range_bin so the vitals buffer fills
-    (RR / floor-energy for the cube second-check). Non-blocking for /api/scene."""
+_cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0}   # latest cube 2nd-check
+
+
+def _rr_from_cube(entries, fps=10.0):
+    """Breathing-band RR straight from a fetched 320 burst (the cube second-check —
+    self-contained, no vitals presence gate). Per range bin, the ant-0 slow-time -> FFT ->
+    fraction of power in 0.15-0.5 Hz; the strongest bin wins. A LIVING body on the floor
+    has clear breathing here; a DROPPED OBJECT does not -> RR None -> not a red Fall.
+    Returns (rr_bpm | None, strength 0..1)."""
+    import numpy as _np
+    from collections import defaultdict
+    if not entries:
+        return None, 0.0
+    byb = defaultdict(list)
+    for e in entries:
+        byb[int(e.range_bin)].append(complex(e.vec[0]))
+    best = (0.0, None)
+    for series in byb.values():
+        if len(series) < 12:
+            continue
+        x = _np.asarray(series, complex); x = x - x.mean()
+        F = _np.abs(_np.fft.fft(x)) ** 2; f = _np.fft.fftfreq(len(x), 1.0 / fps)
+        keep = _np.abs(f) > 0.05; band = keep & (_np.abs(f) >= 0.15) & (_np.abs(f) <= 0.5)
+        tot = F[keep].sum() + 1e-9
+        ratio = F[band].sum() / tot
+        if ratio > best[0]:
+            pk = abs(f[band][_np.argmax(F[band])]) if band.any() else 0.0
+            best = (ratio, pk * 60.0)
+    strength, rr = best
+    return (round(rr, 1) if strength > 0.25 else None), round(strength, 2)
+
+
+def _fetch_cube_bg(range_bin, floor_frac):
+    """Background: burst 320 at range_bin, then compute RR from it (the cube second-check).
+    Non-blocking for /api/scene."""
     try:
         if hasattr(_src, "request_cube"):
-            _src.request_cube(range_bin, n_frames=30, half_win=3)
+            ents = _src.request_cube(range_bin, n_frames=30, half_win=3)
+            rr, strength = _rr_from_cube(ents)
+            _cube_result.update(rr=rr, strength=strength, t=time.time(),
+                                floor_frac=round(float(floor_frac), 2))
     except Exception:
         pass
     finally:
@@ -294,25 +331,31 @@ def _scene():
     prim_pts = [(p[0], p[1], p[2]) for p in pc_pts if prim and p[3] == prim["ti"]]
     wout = _window.update(prim_pts)
 
-    # server-triggered cube fetch on a down-trigger. Range from the CLOUD (track-independent,
-    # slant range of the low/fallen points) — NOT the track bbox, which is garbage at the
-    # fall. Fires even without a valid track (background -> /api/scene never blocks).
-    if wout["down"] and not _cube_busy[0]:
+    # REAL-PERSON gate: reject ghost tracks (jumpy, out-of-room, few points) so a low
+    # ghost / stray floor clutter never triggers a fall or spams cubeQuery.
+    real_person = bool(prim and prim.get("n", 0) >= 12
+                       and abs((prim["x0"] + prim["x1"]) / 2.0) < 3.5
+                       and prim["y1"] < 5.5)
+    down = bool(wout["down"] and real_person)          # gated trigger
+    now = time.time()
+
+    # server-triggered cube fetch: only on a REAL down, rate-limited (1 per episode + a
+    # ~4 s refresh) — not every scene call. Range from the cloud GROUND wy (_fall_range_bin).
+    if down and not _cube_busy[0] and (now - _last_query_t[0]) > QUERY_REFRESH_S:
         rb = _fall_range_bin(sc)
         if rb is not None:
             _cube_busy[0] = True
-            threading.Thread(target=_fetch_cube_bg, args=(rb,), daemon=True).start()
+            _last_query_t[0] = now
+            threading.Thread(target=_fetch_cube_bg, args=(rb, prim_ffrac), daemon=True).start()
 
-    # cube second-check evidence: RR + floor-band energy from the vitals pipeline (fed by 320)
+    # cube second-check evidence = RR + floor energy computed FROM the fetched 320 burst
+    # (self-contained; a living body on the floor breathes -> RR -> red Fall; a dropped
+    # object does not -> no red). Fresh for ~8 s after a fetch.
     cube_ev = None
-    try:
-        st = _state(None, None)
-        if not st.get("warming"):
-            cube_ev = {"rr": st.get("rr"), "floor_frac": st.get("pose_floor_frac") or prim_ffrac}
-    except Exception:
-        pass
+    if now - _cube_result["t"] < 8.0:
+        cube_ev = {"rr": _cube_result["rr"], "floor_frac": _cube_result["floor_frac"]}
 
-    dec = _cleaner.decide(wout, None, cube=cube_ev, geom=None)   # MLP leg = firmware Phase 2
+    dec = _cleaner.decide({"down": down, "h_s": wout["h_s"]}, None, cube=cube_ev, geom=None)
     fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
@@ -320,11 +363,12 @@ def _scene():
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
             "fall_p": dec["confidence"], "primary_pose": primary_pose,
-            "fall_ev": {"window": bool(wout["down"]),
+            "fall_ev": {"window": bool(wout["down"]), "real": real_person,
                         "h_s": (round(wout["h_s"], 2) if wout["h_s"] is not None else None),
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
-                        "cube": (cube_ev is not None), "floor_frac": prim_ffrac,
-                        "floor_cells": len(_floor.hg)},
+                        "cube": (cube_ev is not None),
+                        "rr": (cube_ev.get("rr") if cube_ev else None),
+                        "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg)},
             "elev_acc_deg": ELEV_ACC_DEG,
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
