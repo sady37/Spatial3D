@@ -77,6 +77,8 @@ _cleaner = Cleaner(mlp_trig=0.5, persist=2, floor_frac_min=0.7)
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
 QUERY_REFRESH_S = 4.0        # min seconds between cubeQuery bursts while down
+_real_since = [0.0]          # last time the real-person gate was instantaneously true
+REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0}   # latest cube 2nd-check
@@ -353,13 +355,21 @@ def _scene():
         w_down, w_hs = bool(wout["down"]), wout["h_s"]
         w_src = "srv"
 
-    # REAL-PERSON gate: reject ghost tracks (jumpy, out-of-room, few points) so a low
-    # ghost / stray floor clutter never triggers a fall or spams cubeQuery.
-    real_person = bool(prim and prim.get("n", 0) >= 12
-                       and abs((prim["x0"] + prim["x1"]) / 2.0) < 3.5
-                       and prim["y1"] < 5.5)
-    down = bool(w_down and real_person)                # gated trigger
     now = time.time()
+    # REAL-PERSON gate: reject ghost tracks (jumpy, out-of-room, few points) so a low
+    # ghost / stray floor clutter never triggers a fall or spams cubeQuery. DEBOUNCED:
+    # the 3001-cloud point count near a STILL/lying track oscillates a lot (measured
+    # 0..36 frame-to-frame), so an instantaneous n>=12 gate flickers and keeps resetting
+    # the fall trigger + `run` counter -> the red Fall only ever caught a 1-frame sliver
+    # the dashboard missed. The firmware winDown is ALREADY sustained (sustain=5), so we
+    # only need real-person to ARM; hold it for REAL_GRACE_S through the n dips.
+    real_inst = bool(prim and prim.get("n", 0) >= 12
+                     and abs((prim["x0"] + prim["x1"]) / 2.0) < 3.5
+                     and prim["y1"] < 5.5)
+    if real_inst:
+        _real_since[0] = now
+    real_person = (now - _real_since[0]) < REAL_GRACE_S     # debounced
+    down = bool(w_down and real_person)                # gated trigger
 
     # server-triggered cube fetch: only on a REAL down, rate-limited (1 per episode + a
     # ~4 s refresh) — not every scene call. Range from the cloud GROUND wy (_fall_range_bin).
@@ -385,16 +395,23 @@ def _scene():
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
     fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
-    # DIAG: whenever a fall trigger is active, print the full gate breakdown so a
-    # missed red-Fall can be pinned to the exact failing gate. Remove once tuned.
+    # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
+    # red-Fall can be pinned to the exact failing gate. Goes to stdout AND
+    # record/fall_debug.log (so it can be read back without copy-paste). Remove once tuned.
     if down or dec["trigger"] or cube_ev is not None:
         cr = _cube_result
-        print(f"[fall] {fall_state:9s} down={int(down)}(w={int(w_down)}/{w_src},real={int(real_person)}) "
-              f"hs={w_hs if w_hs is None else round(w_hs,2)} prim=tid{prim['tid'] if prim else '-'} "
-              f"pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
-              f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},age={now-cr['t']:.1f}s) "
-              f"run={_cleaner.run} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}",
-              flush=True)
+        _line = (f"[fall] {fall_state:9s} down={int(down)}(w={int(w_down)}/{w_src},"
+                 f"real_inst={int(real_inst)},real={int(real_person)}) "
+                 f"hs={w_hs if w_hs is None else round(w_hs,2)} prim=tid{prim['tid'] if prim else '-'} "
+                 f"n={prim.get('n') if prim else '-'} pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
+                 f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},age={now-cr['t']:.1f}s) "
+                 f"run={_cleaner.run} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}")
+        print(_line, flush=True)
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "record", "fall_debug.log"), "a") as _fh:
+                _fh.write(_line + "\n")
+        except Exception:
+            pass
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
