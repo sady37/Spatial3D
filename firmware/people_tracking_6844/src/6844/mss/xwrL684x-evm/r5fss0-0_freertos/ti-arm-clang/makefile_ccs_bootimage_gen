@@ -1,0 +1,95 @@
+#
+# Auto generated makefile
+#
+
+# Below variables need to be defined outside this file or via command line
+# - MCU_PLUS_SDK_PATH
+# - PROFILE
+# - CG_TOOL_ROOT
+# - OUTNAME
+# - CCS_INSTALL_DIR
+# - CCS_IDE_MODE
+
+CCS_PATH=$(CCS_INSTALL_DIR)
+include $(MCU_PLUS_SDK_PATH)/imports.mak
+
+HEX=$(CG_TOOL_ROOT)/bin/tiarmhex
+
+OUTFILE=$(PROFILE)/$(OUTNAME).out
+
+BOOTIMAGE_PATH=$(abspath ${PROFILE})
+CONFIG_PATH:=$(BOOTIMAGE_PATH)/config
+TEMP_PATH:=$(BOOTIMAGE_PATH)/temp
+
+HEX_FILE1:=$(TEMP_PATH)/mmwave_demo_xwrL684x_reset_vectors.hex
+HEX_FILE2:=$(TEMP_PATH)/mmwave_demo_xwrL684x_tcma_ram.hex
+HEX_FILE3:=$(TEMP_PATH)/mmwave_demo_xwrL684x_tcmb_rbl_reserv.hex
+HEX_FILE4:=$(TEMP_PATH)/mmwave_demo_xwrL684x_tcmb_ram.hex
+HEX_FILE5:=$(TEMP_PATH)/mmwave_demo_xwrL684x_dss_l3.hex
+CORE_IMAGE:= people_tracking_6844_mss_img.$(PROFILE).rig
+CORE_IMAGE_TEMP:= $(TEMP_PATH)/people_tracking_6844_mss_img.$(PROFILE).rig
+
+LNK_FILES_hex = \
+	memory_hex.cmd \
+
+LFLAGS_hex = \
+	-romwidth 32 \
+	-memwidth 8 \
+	-i \
+
+TARGETS := $(CORE_IMAGE) $(BOOTIMAGE_BIN_NAME)
+
+all: $(TARGETS)
+
+
+#
+# Generation of boot image which can be loaded by ROM Boot Loader (RBL)
+#
+ifeq ($(OS),Windows_NT)
+EXE_EXT=.exe
+endif
+CORE_IMG_GEN=$(MCU_PLUS_SDK_PATH)/tools/MetaImageGen/buildImage_creator$(EXE_EXT)
+CORE=APPSS
+GENERATED_HEX_FILES= $(wildcard $(HEX_FILE1)) $(wildcard $(HEX_FILE2)) $(wildcard $(HEX_FILE3)) $(wildcard $(HEX_FILE4)) $(wildcard $(HEX_FILE5))
+CORE_IMG_INPUT_FILES= $(subst .hex ,.hex --input_file ,$(strip $(GENERATED_HEX_FILES)))
+
+$(CORE_IMAGE): hex
+	$(foreach file,$(GENERATED_HEX_FILES),echo  Writing $(file) && ) echo  .
+	@echo  Core image: xwrL684x:r5fss0-0:freertos:ti-arm-clang $(BOOTIMAGE_PATH)/$@ ...
+	$(CORE_IMG_GEN) -c $(CORE) --input_file $(CORE_IMG_INPUT_FILES) --output_file $(BOOTIMAGE_PATH)/$(CORE_IMAGE)
+	$(RMDIR) $(TEMP_PATH)
+	@echo  Core image: xwrL684x:r5fss0-0:freertos:ti-arm-clang $(BOOTIMAGE_PATH)/$@ Done !!!
+	@echo  .
+
+META_IMG_GEN_PATH=$(MCU_PLUS_SDK_PATH)/tools/MetaImageGen
+ifeq ($(OS),Windows_NT)
+META_IMG_GEN=metaImage_tool_wrapper$(EXE_EXT)
+else
+META_IMG_GEN=./metaImage_tool_wrapper$(EXE_EXT)
+endif
+META_IMG_CONFIG=$(CONFIG_PATH)/metaimage_cfg.$(PROFILE).json
+
+json_content:=$(shell $(CAT) $(BOOTIMAGE_PATH)/../metaimage_cfg.$(PROFILE).json)
+new_json_content:=$(subst ../../examples/mmw_demo/mmwave_demo_xwrL684x/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang,$(BOOTIMAGE_PATH),$(json_content))
+
+
+$(BOOTIMAGE_BIN_NAME): $(CORE_IMAGE)
+ifeq ($(CCS_IDE_MODE),cloud)
+#	No post build steps
+else
+	@echo  Boot image: xwrL684x:r5fss0-0:freertos:ti-arm-clang $(BOOTIMAGE_PATH)/$@ ...
+	$(MKDIR) $(TEMP_PATH)
+	$(MKDIR) $(CONFIG_PATH)
+	@echo $(new_json_content) > $(META_IMG_CONFIG)
+	cd $(META_IMG_GEN_PATH) && $(META_IMG_GEN) --complete_metaimage $(META_IMG_CONFIG)
+	$(RMDIR) $(TEMP_PATH)
+	$(RM) $(BOOTIMAGE_PATH)/*_coreimage_*.bin
+	@echo  Boot image: xwrL684x:r5fss0-0:freertos:ti-arm-clang $(BOOTIMAGE_PATH)/$@ Done !!!
+	@echo  .
+endif
+
+hex:
+	@echo  Generating Hex Files ...
+	$(MKDIR) $(TEMP_PATH)
+	$(COPY) $(LNK_FILES_hex) $(BOOTIMAGE_PATH)/
+	cd $(BOOTIMAGE_PATH) && $(HEX) $(LFLAGS_hex) $(OUTNAME).out $(LNK_FILES_hex)

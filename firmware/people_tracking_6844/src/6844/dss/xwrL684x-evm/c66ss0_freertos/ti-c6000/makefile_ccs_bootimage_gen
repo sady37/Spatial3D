@@ -1,0 +1,71 @@
+#
+# Auto generated makefile
+#
+
+# Below variables need to be defined outside this file or via command line
+# - MCU_PLUS_SDK_PATH
+# - PROFILE
+# - CG_TOOL_ROOT
+# - OUTNAME
+# - CCS_INSTALL_DIR
+# - CCS_IDE_MODE
+
+CCS_PATH=$(CCS_INSTALL_DIR)
+include $(MCU_PLUS_SDK_PATH)/imports.mak
+
+HEX=$(CG_TOOL_ROOT)/bin/hex6x
+
+OUTFILE=$(PROFILE)/$(OUTNAME).out
+
+BOOTIMAGE_PATH=$(abspath ${PROFILE})
+TEMP_PATH:=$(BOOTIMAGE_PATH)/temp
+
+HEX_FILE1:=$(TEMP_PATH)/ipc_notify_echo_dss_l2.hex
+HEX_FILE2:=$(TEMP_PATH)/ipc_notify_echo_mailbox_hsm.hex
+HEX_FILE3:=$(TEMP_PATH)/ipc_notify_echo_mailbox_r5f.hex
+HEX_FILE4:=$(TEMP_PATH)/ipc_notify_echo_dss_l3.hex
+HEX_FILE5:=$(TEMP_PATH)/ipc_notify_echo_user_shm_mem.hex
+HEX_FILE6:=$(TEMP_PATH)/ipc_notify_echo_log_shm_mem.hex
+HEX_FILE7:=$(TEMP_PATH)/ipc_notify_echo_rtos_nortos_ipc_shm_mem.hex
+CORE_IMAGE:= people_tracking_6844_dss_img.$(PROFILE).rig
+
+LNK_FILES_hex = \
+	memory_hex.cmd \
+
+LFLAGS_hex = \
+	-romwidth 32 \
+	-memwidth 8 \
+	-i \
+
+TARGETS := $(CORE_IMAGE)
+
+all: $(TARGETS)
+
+
+#
+# Generation of boot image which can be loaded by ROM Boot Loader (RBL)
+#
+ifeq ($(OS),Windows_NT)
+EXE_EXT=.exe
+endif
+
+CORE_IMG_GEN=$(MCU_PLUS_SDK_PATH)/tools/MetaImageGen/buildImage_creator$(EXE_EXT)
+CORE=DSP
+GENERATED_HEX_FILES= $(wildcard $(HEX_FILE1)) $(wildcard $(HEX_FILE2)) $(wildcard $(HEX_FILE3)) $(wildcard $(HEX_FILE4)) $(wildcard $(HEX_FILE5)) $(wildcard $(HEX_FILE6)) $(wildcard $(HEX_FILE7))
+CORE_IMG_INPUT_FILES= $(subst .hex ,.hex --input_file ,$(strip $(GENERATED_HEX_FILES)))
+
+$(CORE_IMAGE): hex
+	$(foreach file,$(GENERATED_HEX_FILES),echo  Writing $(file) && ) echo  .
+	@echo  Core image: xwrL684x:c66ss0:freertos:ti-c6000 $(BOOTIMAGE_PATH)/$@ ...
+	$(CORE_IMG_GEN) -c $(CORE) --input_file $(CORE_IMG_INPUT_FILES) --output_file $(BOOTIMAGE_PATH)/$(CORE_IMAGE)
+	$(RMDIR) $(TEMP_PATH)
+	@echo  Core image: xwrL684x:c66ss0:freertos:ti-c6000 $(BOOTIMAGE_PATH)/$@ Done !!!
+	@echo  .
+
+
+
+hex:
+	@echo  Generating Hex Files ...
+	$(MKDIR) $(TEMP_PATH)
+	$(COPY) $(LNK_FILES_hex) $(BOOTIMAGE_PATH)/
+	cd $(BOOTIMAGE_PATH) && $(HEX) $(LFLAGS_hex) $(OUTNAME).out $(LNK_FILES_hex)

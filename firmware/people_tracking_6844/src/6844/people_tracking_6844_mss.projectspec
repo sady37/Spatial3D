@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<projectSpec>
+    <applicability>
+        <when>
+            <context
+                deviceFamily="ARM"
+                deviceId="Cortex R.AWRL68xx"
+            />
+        </when>
+    </applicability>
+
+    <project
+        title="People Tracking Demo 6844"
+        name = "people_tracking_6844_mss"
+        products="sysconfig:1.23.0;MMWAVE-L-SDK-6:06.00.05.01"
+        configurations="
+            Release,
+            Debug,
+        "
+        connection="TIXDS110_Connection.xml"
+        toolChain="TICLANG"
+        cgtVersion="4.0.2.LTS"
+        device="Cortex R.AWRL68xx"
+        deviceCore="Cortex_R5_0"
+        ignoreDefaultDeviceSettings="true"
+        ignoreDefaultCCSSettings="true"
+        endianness="little"
+        outputFormat="ELF"
+        outputType="executable"
+
+        compilerBuildOptions="
+            -I${CG_TOOL_ROOT}/include/c
+            -I${PROJECT_PATH}
+            -I${PROJECT_MSS_PATH}
+            -I${PROJECT_COMMON_PATH}
+            -I${PROJECT_BAC_DPU_PATH}
+            -I${MCU_PLUS_SDK_PATH}/source
+            -I${MCU_PLUS_SDK_PATH}/source/kernel/freertos/FreeRTOS-Kernel/include
+            -I${MCU_PLUS_SDK_PATH}/source/kernel/freertos/portable/TI_ARM_CLANG/ARM_CR5F
+            -I${MCU_PLUS_SDK_PATH}/source/kernel/freertos/config/xwrL684x/r5f
+            -I${MMW_DFP_PATH}
+            -mcpu=cortex-r5
+            -mfloat-abi=hard
+            -mfpu=vfpv3-d16
+            -mno-unaligned-access
+            -mthumb
+            -Wall
+            -Werror
+            -g
+            -Wno-gnu-variable-sized-type-not-at-end
+            -Wno-unused-function
+            -DSOC_XWRL684X
+            -D_LITTLE_ENDIAN
+            -DGTRACK_3D
+        "
+        linkerBuildOptions="
+            -i${MCU_PLUS_SDK_PATH}
+            -i${MCU_PLUS_SDK_PATH}/source/kernel/freertos/lib
+            -i${MCU_PLUS_SDK_PATH}/source/drivers/lib
+            -i${MCU_PLUS_SDK_PATH}/source/datapath/lib
+            -i${MCU_PLUS_SDK_PATH}/source/board/lib
+            -i${MCU_PLUS_SDK_PATH}/source/control/lib
+            -i${MCU_PLUS_SDK_PATH}/source/utils/lib
+            -i${MCU_PLUS_SDK_PATH}/source/alg/gtrack/lib
+            -i${MMW_DFP_PATH}/mmwavelink/lib/xWRL68XX
+            -i${MMW_DFP_PATH}/fecsslib/lib/xWRL68XX
+            -i${CG_TOOL_ROOT}/lib
+            -m=people_tracking_6844_mss.${ConfigName}.map
+            --diag_suppress=10063
+            --ram_model
+            --reread_libs
+        "
+
+        postBuildStep="$(MAKE) -C ${CCS_PROJECT_DIR} -f makefile_ccs_bootimage_gen OUTNAME=${BuildArtifactFileBaseName} PROFILE=${ConfigName} MCU_PLUS_SDK_PATH=${MCU_PLUS_SDK_PATH} CG_TOOL_ROOT=${CG_TOOL_ROOT} CCS_INSTALL_DIR=${CCS_INSTALL_DIR} CCS_IDE_MODE=${CCS_IDE_MODE}"
+
+        enableSysConfigTool="true"
+        sysConfigBuildOptions="
+            --context r5fss0-0 --part Default --package BGA
+        "
+
+        description="People Tracking Demo FREERTOS project">
+
+        <configuration name="Debug"
+            compilerBuildOptions="
+                -D_DEBUG_=1
+            "
+            linkerBuildOptions="
+                -lfreertos.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -ldatapath_tracker3d.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -ldrivers.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -lboard.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -lcontrol.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -lutils.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -lalg_gtrack3d.xwrL684x.r5f.ti-arm-clang.debug.lib
+                -lmmwavelink_r5.lib
+                -lfecss_ram_r5.lib
+                -llibc.a
+            "
+        ></configuration>
+        <configuration name="Release"
+            compilerBuildOptions="
+                -Os
+            "
+            linkerBuildOptions="
+                -lfreertos.xwrL684x.r5f.ti-arm-clang.release.lib
+                -ldatapath_tracker3d.xwrL684x.r5f.ti-arm-clang.release.lib
+                -ldrivers.xwrL684x.r5f.ti-arm-clang.release.lib
+                -lboard.xwrL684x.r5f.ti-arm-clang.release.lib
+                -lcontrol.xwrL684x.r5f.ti-arm-clang.release.lib
+                -lutils.xwrL684x.r5f.ti-arm-clang.release.lib
+                -lalg_gtrack3d.xwrL684x.r5f.ti-arm-clang.release.lib
+                -lmmwavelink_r5.lib
+                -lfecss_ram_r5.lib
+                -llibc.a
+            "
+        ></configuration>
+        <pathVariable name="MCU_PLUS_SDK_PATH" path="${COM_TI_MMWAVE_L_SDK_6_INSTALL_DIR}" scope="project" />
+		<pathVariable name="MMW_DFP_PATH" path="${COM_TI_MMWAVE_L_SDK_6_INSTALL_DIR}/firmware/mmwave_dfp" scope="project" />
+        <pathVariable name="PROJECT_PATH" path="./" scope="project"/>
+        <pathVariable name="PROJECT_MSS_PATH" path="${PROJECT_PATH}/mss" scope="project"/>
+        <pathVariable name="PROJECT_COMMON_PATH" path="${PROJECT_PATH}/common_mss_dss" scope="project"/>
+        <pathVariable name="PROJECT_BAC_DPU_PATH" path="../../../../../Automotive_InCabin_Security_and_Safety/AWRL6844_InCabin_Demos/src/mss/source/dpu" scope="project"/>
+        
+        <!-- Project -->
+        <file path="${PROJECT_MSS_PATH}/source/mmw_cli.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/mmwave_demo_mss.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/common_test.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_COMMON_PATH}/msg_ipc/msg_ipc.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <file path="${PROJECT_MSS_PATH}/source/power_management/power_management.c" openOnCreation="false" excludeFromBuild="false" action="copy">
+        </file>
+
+        <!-- Calibration -->
+        <file path="${PROJECT_MSS_PATH}/source/calibrations/factory_cal.c" targetDirectory="calibrations" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/calibrations/mmw_flash_cal.c" targetDirectory="calibrations" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/calibrations/range_phase_bias_measurement.c" targetDirectory="calibrations" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- LVDS -->
+        <file path="${PROJECT_MSS_PATH}/source/lvds_streaming/mmw_lvds_stream.c" targetDirectory="lvds_streaming" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- mmWave Control -->
+        <file path="${PROJECT_MSS_PATH}/source/mmwave_control/interrupts.c" targetDirectory="mmwave_control" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/mmwave_control/mmwave_control_config.c" targetDirectory="mmwave_control" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- Utility -->
+        <file path="${PROJECT_MSS_PATH}/source/utils/mmw_demo_utils.c" targetDirectory="utils" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/tracker_utils/tracker_utils.c" targetDirectory="tracker_utils" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/tracker_utils/tracker_utils.h" targetDirectory="tracker_utils" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- Test -->
+        <file path="${PROJECT_MSS_PATH}/source/test/ADC_testbuf.c" targetDirectory="test" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        
+        <!-- DPC & DPU -->
+        <file path="${PROJECT_MSS_PATH}/source/dpc/dpc_mss.c" targetDirectory="dpc" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_MSS_PATH}/source/dpu/rangeproc/rangeprochwa.c" targetDirectory="dpu/rangeproc" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <!-- HWA -->
+        <file path="${PROJECT_MSS_PATH}/source/hwa_adapt/hwa_adapt.c" targetDirectory="hwa_adapt" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- Build & Link -->
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/example.syscfg" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/main.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/linker.cmd" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/syscfg_c.rov.xs" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/makefile_ccs_bootimage_gen" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/memory_hex.cmd" openOnCreation="false" excludeFromBuild="true" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/config/metaimage_cfg.debug.json" openOnCreation="false" excludeFromBuild="true" action="copy"/>
+        <file path="${PROJECT_PATH}/mss/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/config/metaimage_cfg.release.json" openOnCreation="false" excludeFromBuild="true" action="copy"/>
+        
+    </project>
+</projectSpec>

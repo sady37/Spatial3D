@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<projectSpec>
+    <applicability>
+        <when>
+            <context
+                deviceFamily="C6000"
+                deviceId="TMS320C66XX.AWRL68xx"
+            />
+        </when>
+    </applicability>
+
+    <project
+        title="People Tracking Demo 6844"
+        name = "people_tracking_6844_dss"
+        products="sysconfig:1.23.0;MMWAVE-L-SDK-6:06.00.05.01;ti.mathlib.c66x;ti.mas.dsplib.c66x"
+        configurations="
+            Release,
+            Debug,
+        "
+        connection="TIXDS110_Connection.xml"
+        toolChain="TI"
+        cgtVersion="8.3.13"
+        device="TMS320C66XX.AWRL68xx"
+        deviceCore="C66xx_DSP"
+        ignoreDefaultDeviceSettings="true"
+        ignoreDefaultCCSSettings="true"
+        endianness="little"
+        outputFormat="ELF"
+        outputType="executable"
+
+        compilerBuildOptions="
+            -I${CG_TOOL_ROOT}/include
+            -I${PROJECT_PATH}
+            -I${PROJECT_BAC_DSS_PATH}
+            -I${PROJECT_COMMON_PATH}
+            -I${MCU_PLUS_SDK_PATH}/source
+            -I${MCU_PLUS_SDK_PATH}/source/kernel/freertos/FreeRTOS-Kernel/include
+            -I${MCU_PLUS_SDK_PATH}/source/kernel/freertos/portable/TI_CGT/DSP_C66
+            -I${MCU_PLUS_SDK_PATH}/source/kernel/freertos/config/xwrL684x/c66
+            -I${COM_TI_MAS_DSPLIB_C66X_INSTALL_DIR}/packages
+            -I${MMW_DFP_PATH}
+            -mv6600
+            --c99
+            -q
+            -mo
+            -pden
+            --emit_warnings_as_errors
+            --diag_suppress=1,179,188,303
+            --mem_model:const=data
+            --mem_model:data=far_aggregates
+            --remove_hooks_when_inlining
+            -on2
+            --disable_push_pop
+            --fp_mode=relaxed
+            --assume_control_regs_read
+            -DSOC_XWRL684X
+            -D_LITTLE_ENDIAN
+            -D_TMS320C6X
+			-D_TMS320C6600
+        "
+        linkerBuildOptions="
+            -i${MCU_PLUS_SDK_PATH}/source/kernel/freertos/lib
+            -i${MCU_PLUS_SDK_PATH}/source/drivers/lib
+            -i${MCU_PLUS_SDK_PATH}/source/board/lib
+            -I${COM_TI_MAS_DSPLIB_C66X_INSTALL_DIR}/packages/ti/dsplib/lib
+            -i${CG_TOOL_ROOT}/lib
+            -m=people_tracking_6844_dss.${ConfigName}.map
+            --warn_sections
+            --diag_suppress=1,179,188,303
+            --emit_warnings_as_errors
+            --ram_model
+            -x
+        "
+
+        postBuildStep="$(MAKE) -C ${CCS_PROJECT_DIR} -f makefile_ccs_bootimage_gen OUTNAME=${BuildArtifactFileBaseName} PROFILE=${ConfigName} MCU_PLUS_SDK_PATH=${MCU_PLUS_SDK_PATH} CG_TOOL_ROOT=${CG_TOOL_ROOT} CCS_INSTALL_DIR=${CCS_INSTALL_DIR} CCS_IDE_MODE=${CCS_IDE_MODE}"
+
+        enableSysConfigTool="true"
+        sysConfigBuildOptions="
+            --context c66ss0 --part Default --package BGA
+        "
+
+        description="People Tracking Demo FREERTOS project">
+
+        <configuration name="Debug"
+            compilerBuildOptions="
+                -D_DEBUG_=1
+            "
+            linkerBuildOptions="
+                -lfreertos.xwrL684x.c66.ti-c6000.debug.lib
+                -ldrivers.xwrL684x.c66.ti-c6000.debug.lib
+                -lboard.xwrL684x.c66.ti-c6000.debug.lib
+                -ldsplib.ae66
+                -llibc.a
+            "
+        ></configuration>
+        <configuration name="Release"
+            compilerBuildOptions="
+                -o3
+                -mf2
+            "
+            linkerBuildOptions="
+                -lfreertos.xwrL684x.c66.ti-c6000.release.lib
+                -ldrivers.xwrL684x.c66.ti-c6000.release.lib
+                -lboard.xwrL684x.c66.ti-c6000.release.lib
+                -ldsplib.ae66
+                -llibc.a
+            "
+        ></configuration>
+        <pathVariable name="MCU_PLUS_SDK_PATH" path="${COM_TI_MMWAVE_L_SDK_6_INSTALL_DIR}" scope="project" />
+        <pathVariable name="MMW_DFP_PATH" path="${COM_TI_MMWAVE_L_SDK_6_INSTALL_DIR}/firmware/mmwave_dfp" scope="project" />
+        <pathVariable name="PROJECT_PATH" path="./" scope="project"/>
+        <pathVariable name="PROJECT_BAC_DSS_PATH" path="../../../../../Automotive_InCabin_Security_and_Safety/AWRL6844_InCabin_Demos/src/dss" scope="project"/>
+        <pathVariable name="PROJECT_COMMON_PATH" path="${PROJECT_PATH}/common_mss_dss" scope="project"/>
+
+        <!-- Project -->
+        <file path="${PROJECT_PATH}/dss/mmwave_demo_dss.c" openOnCreation="false" excludeFromBuild="false" action="copy" />
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpc/objectdetection_dss.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/utilities/radarOsal_malloc.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_COMMON_PATH}/msg_ipc/msg_ipc.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- Capon DPC -->
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/src/radarProcess.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/src/copyTranspose.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+		
+        <!-- Capon DPUs -->
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_angleEst.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_DopplerEst.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_heatmapEst.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_staticRemoval.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_utils.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_rnEstInv.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/DoA/CaponBF2D/src/RADARDEMO_aoaEst2DCaponBF_staticHeatMapEst.c" targetDirectory="common/dpu/capon3d_overhead/modules/caponBF2D/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- Post Processing -->
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/postProcessing/matrixFunc/src/MATRIX_cholesky.c" targetDirectory="common/dpu/capon3d_overhead/modules/postProcessing/matrixFunc/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/postProcessing/matrixFunc/src/MATRIX_cholesky_dat.c" targetDirectory="common/dpu/capon3d_overhead/modules/postProcessing/matrixFunc/src" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+		
+        <!-- CFAR -->
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/detection/CFAR/src/RADARDEMO_detectionCFAR.c" targetDirectory="common/dpu/capon3d_overhead/modules/detection/CFAR/src/" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_BAC_DSS_PATH}/source/dpu/capon3d_overhead/modules/detection/CFAR/src/RADARDEMO_detectionCFAR_priv.c" targetDirectory="common/dpu/capon3d_overhead/modules/detection/CFAR/src/" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+
+        <!-- Miscellaneous -->
+        <file path="${PROJECT_PATH}/dss/xwrL684x-evm/c66ss0_freertos/main.c" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/dss/xwrL684x-evm/c66ss0_freertos/ti-c6000/linker.cmd" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/dss/xwrL684x-evm/c66ss0_freertos/example.syscfg" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/dss/xwrL684x-evm/c66ss0_freertos/ti-c6000/syscfg_c.rov.xs" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/dss/xwrL684x-evm/c66ss0_freertos/ti-c6000/makefile_ccs_bootimage_gen" openOnCreation="false" excludeFromBuild="false" action="copy"/>
+        <file path="${PROJECT_PATH}/dss/xwrL684x-evm/c66ss0_freertos/ti-c6000/memory_hex.cmd" openOnCreation="false" excludeFromBuild="true" action="copy"/>
+
+    </project>
+</projectSpec>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<projectSpec>
+    <import spec="people_tracking_6844_mss.projectspec"/>
+    <import spec="people_tracking_6844_dss.projectspec"/>
+    <project
+        name="people_tracking_6844_system"
+        products="MMWAVE-L-SDK-6:06.00.05.01"
+        configurations="
+            Release,
+            Debug,
+        "
+        connection="TIXDS110_Connection.xml"
+        device="Cortex R.AWRL68xx"
+        outputType="system"
+        toolChain="TICLANG"
+        >
+        <configuration name="Debug"
+        ></configuration>
+        <configuration name="Release"
+        ></configuration>
+        <pathVariable name="MCU_PLUS_SDK_PATH" path="${COM_TI_MMWAVE_L_SDK_6_INSTALL_DIR}" scope="project" />
+
+        <file path="system/system.xml" action="copy" openOnCreation="true"/>
+        <file path="system/makefile_system_ccs_bootimage_gen" action="copy" openOnCreation="false"/>
+        <file path="system/config/metaimage_cfg.debug.json" openOnCreation="false" excludeFromBuild="true" action="copy"/>
+        <file path="system/config/metaimage_cfg.release.json" openOnCreation="false" excludeFromBuild="true" action="copy"/>
+    </project>
+</projectSpec>

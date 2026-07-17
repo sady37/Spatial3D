@@ -1,0 +1,54 @@
+{
+    "securityType": "gp",
+    "customImage": "",
+    "customImageStartAddress": "",
+    "flashIndex": "1",
+    "metaHeaderInfo": {
+        "metaImageType": "multi",
+        "pbistEnablecontrol": "0",
+        "sharedRamAllocationControl": "0",
+        "loggerClear": "0xDD"
+    },
+    "interimMetaHeaderFile": "../../examples/mmw_demo/mmwave_demo_xwrL684x/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/temp/metaheader.bin",
+    "buildImages": [
+        {
+            "buildImagePath": "../../examples/mmw_demo/mmwave_demo_xwrL684x/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/temp/people_tracking_6844_mss_img.Release.rig",
+            "encryptEnable": "no"
+        },
+        {
+            "buildImagePath": "../../firmware/mmwave_dfp/rfsfirmware/xWRL68xx/mmwave_rfs_patch.rig",
+            "encryptEnable": "no"
+        }
+    ],
+    "imageEncryptionParam": {
+        "iv": "aabbccddeeaabbccaabbccddeeaabbcc",
+        "iter": "0",
+        "saltFile": "config_keys/salt.txt",
+        "keyFile": "config_keys/mek.txt"
+    },
+    "CertificateParams": {
+        "imageIntegrityOID": {
+            "shaType": "00"
+        },
+        "softwareRevisionOID": {
+            "softwareRevision": "0"
+        },
+        "keyDerivationOID": {
+            "enable": "no",
+            "saltFile": "config_keys/kdsalt.txt",
+            "infoFile": "config_keys/kdinfo.txt"
+        },
+        "debugOID": {
+            "enable": "no",
+            "uidFile": "config_keys/uid.txt",
+            "debugType": "0"
+        },
+        "interimCertDataFile": "config/x509_config.cfg",
+        "certSigningKeyFileECDSA": "config_keys/mpk_ecdsa.pem",
+        "certSigningKeyFileRSA": "config_keys/mpk.pem",
+        "signingAlgo": "RSA",
+        "signedCertificateFile": "../../examples/mmw_demo/mmwave_demo_xwrL684x/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/temp/signed_cert.bin"
+    },
+    "metaImageFile": "../../examples/mmw_demo/mmwave_demo_xwrL684x/xwrL684x-evm/r5fss0-0_freertos/ti-arm-clang/people_tracking_6844_mss.release.appimage",
+    "coreImages": []
+}
