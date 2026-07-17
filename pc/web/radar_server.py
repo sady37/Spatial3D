@@ -79,6 +79,10 @@ _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall 
 QUERY_REFRESH_S = 4.0        # min seconds between cubeQuery bursts while down
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
+_fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
+FALL_HOLD_S = 30.0           # keep showing red Fall this long after the last confirmation
+                             # (a caregiver must SEE it; it must not clear when the person
+                             # stirs/gets up). Cleared by /api/fall/reset.
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0}   # latest cube 2nd-check
@@ -395,6 +399,13 @@ def _scene():
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
     fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
+    # LATCH a confirmed red Fall so it stays visible on the dashboard for FALL_HOLD_S even
+    # after the person stirs/gets up (a ~6 s red that clears the instant they move is easy
+    # to miss). Cleared by GET /api/fall/reset.
+    if dec["fall"]:
+        _fall_latch_until[0] = now + FALL_HOLD_S
+    if now < _fall_latch_until[0]:
+        fall_state = "fall"
     # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
     # red-Fall can be pinned to the exact failing gate. Goes to stdout AND
     # record/fall_debug.log (so it can be read back without copy-paste). Remove once tuned.
@@ -449,6 +460,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, f.read(), "text/html; charset=utf-8")
         if u.path == "/api/meta":
             return self._send(200, json.dumps(_meta))
+        if u.path == "/api/fall/reset":              # clear a latched red Fall
+            _fall_latch_until[0] = 0.0
+            return self._send(200, json.dumps({"fall_reset": True}))
         if u.path == "/api/scene":
             try:
                 return self._send(200, json.dumps(_scene()))
