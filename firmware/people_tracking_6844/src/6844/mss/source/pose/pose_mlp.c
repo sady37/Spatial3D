@@ -61,11 +61,25 @@ typedef struct PoseSlot_t
     uint8_t  count;      /* frames buffered since claim, saturates at NUM_FRAMES */
     uint8_t  age;        /* frames since last update */
     uint8_t  pad;
+    /* window (sustained-down) leg state */
+    uint8_t  winLowRun;  /* consecutive low frames (saturates at sustain) */
+    uint8_t  winHiRun;   /* consecutive high frames (for clear) */
+    uint8_t  winDown;    /* latched down-state */
+    uint8_t  pad2;
     float    feat[POSE_NUM_FRAMES][POSE_NUM_FEATURES];
 } PoseSlot;
 
 POSE_TCMB static PoseSlot gPoseSlots[POSE_MAX_TRACKS];
 static float    gPoseZOffset = 0.0f;
+
+/* window leg floor geometry + timing (PoseMlp_setWindowCfg). Defaults mirror
+ * pc/falldet/window.py. cos/sin precomputed from tilt. */
+static float   gWinMountM  = 1.0f;
+static float   gWinCosTilt = 1.0f;
+static float   gWinSinTilt = 0.0f;
+static float   gWinMarginM = 0.45f;
+static uint8_t gWinSustain = 5;
+static uint8_t gWinClear   = 5;
 
 /* Scratch, reused per inference. Kept static to stay off the (small) stack. */
 POSE_TCMB static float gPoseIn[POSE_INPUT_SIZE];
@@ -82,6 +96,17 @@ void PoseMlp_init(void)
 void PoseMlp_setZOffset(float zOffset)
 {
     gPoseZOffset = zOffset;
+}
+
+void PoseMlp_setWindowCfg(float mountM, float tiltRad, float marginM,
+                          uint8_t sustain, uint8_t clear)
+{
+    gWinMountM  = mountM;
+    gWinCosTilt = cosf(tiltRad);
+    gWinSinTilt = sinf(tiltRad);
+    gWinMarginM = marginM;
+    gWinSustain = (sustain > 0) ? sustain : 1;
+    gWinClear   = (clear   > 0) ? clear   : 1;
 }
 
 /* dst = relu?(W*src + b). W is [outN][inN] row-major. */
@@ -258,6 +283,63 @@ static void poseFlatten(const PoseSlot *s)
     }
 }
 
+/* Window (sustained-down) leg for one track. Reuses the same gate + accessor as
+ * the MLP. Computes the 2nd-highest world-height above the floor over the gated
+ * points (robust to a single ghost spike), then runs the K-frame sustain on the
+ * slot. Track-independent of kinematics (uses point heights, not posZ), so it
+ * survives the track freeze/ghost that breaks the MLP during a fall. Needs >=2
+ * gated points. Writes h_s (cm) and validity via hsCmOut and validOut.
+ * Ports pc/falldet/window.py WindowDetector.update(). */
+static void poseWindowUpdate(PoseSlot *s, const PoseTrackKin *k,
+                             const void *ptsCtx, uint32_t numPoints,
+                             PosePointGet getPt, int16_t *hsCmOut, uint8_t *validOut)
+{
+    float h1 = -1e30f, h2 = -1e30f;   /* highest, 2nd-highest world height */
+    int   n = 0;
+    uint32_t p;
+
+    for (p = 0; p < numPoints; p++)
+    {
+        float px, py, pz, snr;
+        getPt(ptsCtx, p, &px, &py, &pz, &snr);
+        float dx = px - k->posX;
+        float dy = py - k->posY;
+        if (dx * dx + dy * dy > POSE_GATE_RADIUS_SQ)
+        {
+            continue;
+        }
+        /* world height above floor: same transform the server uses */
+        float h = gWinMountM + pz * gWinCosTilt - py * gWinSinTilt;
+        if (h > h1)      { h2 = h1; h1 = h; }
+        else if (h > h2) { h2 = h; }
+        n++;
+    }
+
+    if (n < 2)
+    {
+        *validOut = 0;
+        *hsCmOut  = 0;
+        /* No measurement this frame: hold the latched state, don't advance runs. */
+        return;
+    }
+
+    *validOut = 1;
+    *hsCmOut  = (int16_t)(h2 * 100.0f);   /* metres -> cm */
+
+    if (h2 <= gWinMarginM)
+    {
+        if (s->winLowRun < 255) s->winLowRun++;
+        s->winHiRun = 0;
+        if (s->winLowRun >= gWinSustain) s->winDown = 1;
+    }
+    else
+    {
+        if (s->winHiRun < 255) s->winHiRun++;
+        s->winLowRun = 0;
+        if (s->winHiRun >= gWinClear) s->winDown = 0;
+    }
+}
+
 uint32_t PoseMlp_process(const PoseTrackKin *kin, uint32_t numTargets,
                          const void *ptsCtx, uint32_t numPoints,
                          PosePointGet getPoint, PoseResult *out)
@@ -283,16 +365,27 @@ uint32_t PoseMlp_process(const PoseTrackKin *kin, uint32_t numTargets,
         r->pose = POSE_UNKNOWN;
         r->fallingProb = 0;
         r->valid = 0;
+        r->winDown = 0;
+        r->winHsCm = 0;
+        r->winLowRun = 0;
+        r->winValid = 0;
 
         if (s == NULL)
         {
             continue;   /* table full */
         }
 
+        /* --- window leg: runs every frame, needs only >=2 gated points and no
+         * ring/kinematics, so it survives the track freeze during a fall. --- */
+        poseWindowUpdate(s, &kin[t], ptsCtx, numPoints, getPoint,
+                         &r->winHsCm, &r->winValid);
+        r->winDown   = s->winDown;
+        r->winLowRun = s->winLowRun;
+
+        /* --- MLP leg: needs >=5 gated points and a full 8-frame ring. --- */
         if (!poseBuildFrame(&kin[t], ptsCtx, numPoints, getPoint, frame))
         {
-            /* Not enough points this frame: keep the buffer, no push.
-             * Still age so a long point-starved track eventually frees. */
+            /* Not enough points this frame: keep the buffer, no push. */
             continue;
         }
         posePush(s, frame);

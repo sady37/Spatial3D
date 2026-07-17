@@ -76,11 +76,14 @@ TLV_TARGET_LIST = 308        # trackerProc_Target array (GTRACK_3D, 112 B each)
 TLV_TARGET_INDEX = 309
 TLV_POSE = 321               # Spatial3D per-track pose MLP (Stood/Sat/Lying/Falling)
 # TLV 321 layout (little-endian): uint16 numResults; uint16 reserved; then
-# numResults * PoseResult { uint32 tid; uint8 pose; uint8 fallingProb; uint8 valid;
-# uint8 pad } = 8 B each. pose: 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown.
-_POSE_HDR = struct.Struct("<HH")            # numResults, reserved
-_POSE_ENTRY = struct.Struct("<IBBBB")       # tid, pose, fallingProb, valid, pad
-_POSE_ENTRY_SIZE = 8
+# numResults * PoseResult (12 B each). Carries BOTH on-chip fall legs per track
+# (server OR-fuses via falldet/clean.py):
+#   uint32 tid; uint8 pose; uint8 fallingProb; uint8 valid;      # MLP leg
+#   uint8 winDown; int16 winHsCm; uint8 winLowRun; uint8 winValid # window leg
+# pose: 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown.
+_POSE_HDR = struct.Struct("<HH")             # numResults, reserved
+_POSE_ENTRY = struct.Struct("<IBBBBhBB")     # tid,pose,fp,valid,down,hsCm,lowRun,winValid
+_POSE_ENTRY_SIZE = 12
 POSE_LABELS = {0: "Stood", 1: "Sat", 2: "Lying", 3: "Falling", 0xFF: "Unknown"}
 TLV_STATS = 6
 TLV_POINT_CLOUD = 3001       # minor-motion spherical compressed point cloud
@@ -153,11 +156,20 @@ class TrackBinCube:
 
 @dataclass
 class Pose:
-    """One track's pose classification from TLV 321 (firmware MLP, aux fall leg)."""
+    """One track's fall/pose signals from TLV 321 (both on-chip legs).
+
+    MLP leg (pose/falling_prob) = falling motion + free pose; window leg
+    (down/h_s_cm) = sustained down-state, robust to the track freeze that breaks
+    the MLP. The server OR-fuses them and cleans with the cube second-check
+    (pc/falldet/clean.py)."""
     tid: int
     pose: int              # 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown
     falling_prob: float    # P(Falling), 0..1 (firmware sends 0..255)
-    valid: bool            # False until the track's 8-frame window filled
+    valid: bool            # MLP leg valid (False until the 8-frame window filled)
+    down: bool             # window leg: sustained down-state latched
+    h_s_cm: int            # window leg: 2nd-highest point height above floor, cm
+    low_run: int           # window leg: consecutive low frames
+    win_valid: bool        # window leg had >=2 points this frame
 
     @property
     def label(self) -> str:
@@ -347,8 +359,9 @@ def parse_pose_list(payload: bytes) -> dict[int, Pose]:
     for _ in range(n):
         if off + _POSE_ENTRY_SIZE > len(payload):
             break
-        tid, pose, fp, valid, _pad = _POSE_ENTRY.unpack_from(payload, off)
-        out[int(tid)] = Pose(int(tid), int(pose), fp / 255.0, bool(valid))
+        tid, pose, fp, valid, down, hs, low, wv = _POSE_ENTRY.unpack_from(payload, off)
+        out[int(tid)] = Pose(int(tid), int(pose), fp / 255.0, bool(valid),
+                             bool(down), int(hs), int(low), bool(wv))
         off += _POSE_ENTRY_SIZE
     return out
 

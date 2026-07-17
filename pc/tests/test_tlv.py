@@ -94,18 +94,23 @@ def test_track_bin_cube_roundtrip():
 
 
 def test_pose_tlv_roundtrip():
-    # TLV 321: uint16 numResults, uint16 reserved, then 8 B per entry.
-    entries = [(0, 2, 128, 1), (5, 3, 255, 1), (9, 0xFF, 0, 0)]
+    # TLV 321: uint16 numResults, uint16 reserved, then 12 B per entry.
+    # (tid, pose, fp, valid, winDown, winHsCm, winLowRun, winValid)
+    entries = [(0, 2, 128, 1, 1, -45, 7, 1),      # Lying + window down
+               (5, 3, 255, 1, 0, 90, 0, 1),       # Falling motion, not yet down
+               (9, 0xFF, 0, 0, 0, 0, 0, 0)]        # nothing valid
     body = struct.pack("<HH", len(entries), 0)
-    for tid, pose, fp, valid in entries:
-        body += struct.pack("<IBBBB", tid, pose, fp, valid, 0)
+    for e in entries:
+        body += struct.pack("<IBBBBhBB", *e)
 
     poses = parse_pose_list(body)
     assert set(poses) == {0, 5, 9}
     assert poses[0].label == "Lying" and poses[0].valid
     np.testing.assert_allclose(poses[0].falling_prob, 128 / 255, atol=1e-6)
+    assert poses[0].down and poses[0].h_s_cm == -45 and poses[0].low_run == 7
     assert poses[5].label == "Falling" and poses[5].falling_prob == 1.0
-    assert poses[9].label == "Unknown" and not poses[9].valid
+    assert not poses[5].down and poses[5].h_s_cm == 90
+    assert poses[9].label == "Unknown" and not poses[9].valid and not poses[9].win_valid
 
     # via Frame.poses(); absent TLV -> empty dict
     frame = Frame(header=None, tlvs=[Tlv(type=TLV_POSE, payload=body)])

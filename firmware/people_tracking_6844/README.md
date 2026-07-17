@@ -39,11 +39,16 @@
    `projectspec` 补 `common_test.c` 的 `<file>` 项;`common_test.c` 去掉重复的 app_ioWrite/ioRead、
    只留 unityCharPut + critSec stubs。这些原本只在 VM 上、没回 Mac —— 已收进本 version。
 
-## 当前 version 状态 — Phase 2（per-track pose MLP）
+## 当前 version 状态 — Phase 2+3（per-track 双腿:pose MLP + window)
 **已实现 + host 验证,尚未 VM 编译/硬件 flash**（源码已在本 version）。在 6844 People_Tracking
-上加一条**每 track 姿态分类**辅助腿:4 类 MLP(Stood/Sat/Lying/Falling)在 R5F MSS 上原生跑,
-结果按 tid 挂到新 TLV 321。定位:**白得 pose + 摔倒动作触发**的辅助腿,主 fall 判据仍在 server
-(window + cube-RR)。见 memory `fall-detection-design` / `fall-modular-pipeline`。
+上加**每 track 两条互补的摔倒腿**,都按 tid 挂到新 TLV 321(server 用 `falldet/clean.py` OR 融合 +
+cube 复核):
+- **MLP 腿**(Phase 2):4 类 MLP(Stood/Sat/Lying/Falling)在 R5F MSS 上原生跑 —— **白得 pose +
+  摔倒动作触发**。track 冻结时(摔倒瞬间)posZ/vel/acc 特征失效。
+- **window 腿**(Phase 3):`pc/falldet/window.py` WindowDetector 上芯 —— 点云**次高点**离地高度
+  ≤margin 持续 K 帧 = 持续躺地(**不依赖 track 运动学,扛得住 track 冻结**),正好补 MLP 的短板。
+两腿合一是因为都吃同一份门控点集、都写 per-track TLV 321(Phase 2/3 一起做省一次改)。主 fall 判据
+仍在 server(cube-RR 复核)。见 memory `fall-detection-design` / `fall-modular-pipeline`。
 
 ### 为什么是重训 + 自写 forward,而不是移植 TI 的 pose_model.a
 TI `Pose_And_Fall` 的 `pose_model.a` 是 **Cortex-M4 / v7E-M Thumb-only** 目标(解析其 ARM build
@@ -74,12 +79,17 @@ ARMv7-R 镜像**。TI 也没随附 `.pth`/`.onnx`,只有 `.a` 里的 TVM rodata 
   venv `pc/.venv-pose`(gitignored)。主 venv(`pc/.venv`)跑 server/tlv 测试。
 
 ### 固件侧改动(4 处 + 新目录 `mss/source/pose/`)
-1. **pose/pose_mlp.{c,h} + pose/pose_model.c**(生成)— 折叠后 forward(纯 乘加+relu+softmax)+
-   **每 track 20×8 环形缓冲**(`POSE_MAX_TRACKS=8`,~6.5KB .bss)。每 track:把点云按半径 0.75m 门到
-   该 track,取最高 5 点建 20 特征帧,压入环形缓冲;满 8 帧才推理。TI 原版是单 track(`tList[0]`),
-   这里泛化到多 track。权重放 `.rodata.pose_model`(50.7KB)。**零拷贝**:点云用 `PosePointGet`
-   访问器**就地读** `dpcAoAObjOutCartExt`,不建 PosePoint 拷贝数组(否则最坏 2000 点×16B=32KB scratch)。
-   core 不 #include SDK 类型 → host 可编/可测。
+1. **pose/pose_mlp.{c,h} + pose/pose_model.c**(生成)— 两条腿共用同一份 per-track 门控点集(半径
+   0.75m)+ 同一 `PoseSlot`:
+   - **MLP 腿**:折叠后 forward(纯 乘加+relu+softmax)+ 每 track 20×8 环形缓冲;取最高 5 点建 20
+     特征帧,满 8 帧才推理(需 ≥5 门内点)。TI 原版单 track(`tList[0]`),这里泛化到多 track。
+   - **window 腿**(`poseWindowUpdate`):门内点算世界高度 `h=mount+z·cos(tilt)−y·sin(tilt)`(点是
+     radar 系,`world2sensor` 在本 demo 无调用),取**次高** h_s,≤margin 持续 K 帧 → `winDown` 闩锁。
+     只需 ≥2 点、不碰环形/运动学 → 每帧都跑,扛住 track 冻结。点少(<2)时**保持**闩锁不清(比
+     window.py 多一条抗点云 dropout 的改进)。
+   权重放 `.rodata.pose_model`(50.7KB);`.bss.pose` ~6.5KB。**零拷贝**:点云用 `PosePointGet` 访问器
+   **就地读** `dpcAoAObjOutCartExt`,不建 PosePoint 拷贝(否则最坏 2000×16B=32KB scratch)。core 不
+   #include SDK 类型 → host 可编/可测。
 2. **linker.cmd** — 新规则 `.rodata.pose_model: {} palign(8) > TCMB_RAM`,放在通用 `.rodata`
    GROUP **之前**(first-match),把 51KB 权重**钉在 TCMB**。绝不能溢到 TCMA(cubeQuery 后只剩
    ~5.8KB,溢 51KB 直接 brick,见 `fallsm-boot-bug`)。`.bss.pose`(~6.5KB 环形+scratch+poseKin)同钉 TCMB。
@@ -88,29 +98,39 @@ ARMv7-R 镜像**。TI 也没随附 `.pth`/`.onnx`,只有 `.a` 里的 TVM rodata 
    (就地读 + snr ×0.1 把 0.1dB-steps 换成 classes.zip 的 dB 尺度),调 `PoseMlp_process`,结果存 MCB。
 4. **mmwave_demo_mss.{c,h}** — TLV 321 enum + MCB 字段(`poseEnable`/`poseNumResults`/
    `poseResults[]`)+ header/write 两趟 emit;`MMWDEMO_OUTPUT_ALL_MSG_MAX` 11→14。
-5. **mmw_cli.c** — `poseCfg <enable> [zOffset_cm]`(`MmwDemo_CLIPoseCfg`):重置环形缓冲 +
-   设 zOffset(cm→m)+ 开关。发在 sensorStart 前。
+5. **mmw_cli.c** — `poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain]`
+   (`MmwDemo_CLIPoseCfg`):重置 per-track 状态 + 设 MLP 的 zOffset + window 的 mount/tilt/margin/
+   sustain + 开关。mount/tilt 要按 rig 设(如 200cm/25° 见 `dashboard-z-calibration`)。发在 sensorStart 前。
 
 ### TLV 321 契约（little-endian,给 server `pc/spatial3d/tlv.py`）
 ```
-uint16 numResults;    // 本帧有 pose 的 track 数(≤ POSE_MAX_TRACKS=8)
-uint16 reserved;      // 0,保持后面数组 4 字节对齐
-然后 numResults × PoseResult(每个 8 字节):
+uint16 numResults;    // 本帧有结果的 track 数(≤ POSE_MAX_TRACKS=8)
+uint16 reserved;      // 0,保持后面数组对齐
+然后 numResults × PoseResult(每个 12 字节,两条腿):
     uint32 tid;          // track id(对应 TLV 308 的 tid)
+    // --- MLP 腿 ---
     uint8  pose;         // 0=Stood 1=Sat 2=Lying 3=Falling, 0xFF=unknown(窗未满)
     uint8  fallingProb;  // P(Falling)×255,0..255
-    uint8  valid;        // 1=本帧真推理,0=窗未满/点不足
-    uint8  pad;          // 0
+    uint8  valid;        // 1=MLP 本帧真推理,0=窗未满/点<5
+    // --- window 腿 ---
+    uint8  winDown;      // 1=持续躺地闩锁
+    int16  winHsCm;      // 次高点离地高度,cm(可负=在地面线以下)
+    uint8  winLowRun;    // 连续 low 帧数(饱和 255)
+    uint8  winValid;     // 1=本帧 window 有 ≥2 门内点
 ```
-每 entry 8 字节。`valid=0` 时 pose=0xFF。server:`Frame.poses()` → `{tid: Pose}`;`/api/scene` 每
-track 带 `pose`(标签串)+ `falling_prob`。录制 npz 新增 `t_pose`/`t_fprob` 列(对齐 `t_*` 轨迹列)。
+每 entry 12 字节。struct 布局:`<IBBBBhBB`(int16 在 offset 8,自然对齐,无 pad,sizeof=12)。
+server:`Frame.poses()` → `{tid: Pose(pose, falling_prob, valid, down, h_s_cm, low_run, win_valid)}`;
+`/api/scene` 每 track 带 `pose`+`falling_prob`+`down`+`h_s_cm`;server `radar_server._scene` 优先用
+固件 window 腿(真 10fps sustain,fallback 到服务端 `WindowDetector`)+ 把 MLP 腿喂 `clean.py`。
+录制 npz 新增 `t_pose`/`t_fprob`/`t_down`/`t_hs` 列(对齐 `t_*` 轨迹列)。
 
 ### 验收(硬件)
-flash 后:`poseCfg 1 30`(30cm 是占位 zOffset,需按 mount 标定)→ 重启 `radar_server.py live` →
-`/api/scene` 每 track 出现 `pose` 字段;静坐读 Sat、站立 Stood、躺地 Lying/Falling。
-host 侧已验证(build 前就证明逻辑对):C `poseInfer` vs Python folded_forward 逐点 1e-6;整条
-`PoseMlp_process`(门控+环形+flatten+推理+falling量化)vs Python 参考 end-to-end MATCH
-(`pc/pose/` + scratchpad host harness)。
+flash 后:`poseCfg 1 30 200 25 45 5`(zOffset 30cm、mount 200cm、tilt 25°、margin 45cm、sustain 5;
+按 rig 标定)→ 重启 `radar_server.py live` → `/api/scene` 每 track 出现 `pose`+`down`+`h_s_cm`;
+静坐读 Sat、站立 Stood、躺地 Lying + `down=true`(次高点持续在地面线附近)。
+host 侧已验证(build 前就证明逻辑对,`pc/pose/host_test/run.sh`):**MLP 腿** C `poseInfer` vs
+Python folded_forward 逐点 1e-6、整条 `PoseMlp_process` end-to-end MATCH;**window 腿** vs
+`pc/falldet/window.py` WindowDetector 在站立→躺地场景 MATCH(down 在第 5 帧准点闩锁,h_s 逐 cm 对齐)。
 
 ### VM 构建注意（Phase 2 特有）
 - 新增 `mss/source/pose/{pose_mlp.c,pose_mlp.h,pose_model.c}` 已加进 mss projectspec 的 `<file>`

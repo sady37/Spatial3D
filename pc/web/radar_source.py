@@ -181,6 +181,7 @@ class LiveSource:
         e_frame, e_tid, e_bin, e_vel, e_range, e_vec = [], [], [], [], [], []
         t_frame, t_tid, t_x, t_y, t_z = [], [], [], [], []
         t_pose, t_fprob = [], []                # per-track pose (TLV 321), aligned to t_*
+        t_down, t_hs = [], []                   # per-track window leg (down, h_s cm)
         p_fr, p_arrs = [], []                   # per-frame 3001 minor point cloud (for offline box/LIE)
         n_ant = 0
         for fi, fr in enumerate(self._sc_frames):
@@ -193,9 +194,11 @@ class LiveSource:
             for t in fr["tgts"]:
                 t_frame.append(fi); t_tid.append(t.tid)
                 t_x.append(t.x); t_y.append(t.y); t_z.append(t.z)
-                pv = fr_poses.get(t.tid)        # (pose, falling_prob) or None
+                pv = fr_poses.get(t.tid)        # (pose, falling_prob, down, h_s_cm) or None
                 t_pose.append(pv[0] if pv else 0xFF)
                 t_fprob.append(pv[1] if pv else 0.0)
+                t_down.append(pv[2] if pv else 0)
+                t_hs.append(pv[3] if pv else 0)
             pc = fr.get("pc")
             if pc is not None and len(pc):
                 p_arrs.append(np.asarray(pc, np.float32))
@@ -215,6 +218,7 @@ class LiveSource:
             t_x=np.asarray(t_x, np.float32), t_y=np.asarray(t_y, np.float32),
             t_z=np.asarray(t_z, np.float32),
             t_pose=np.asarray(t_pose, np.uint8), t_fprob=np.asarray(t_fprob, np.float32),
+            t_down=np.asarray(t_down, np.uint8), t_hs=np.asarray(t_hs, np.int16),
             p_frame=p_frame, pc_xyz=pc_xyz_all,
             block_start_epoch=np.float64(self._rec_bucket * self.block_s))
         print(f"[rec] SAVED {out}: {len(ts)} frames, {len(e_frame)} 320-entries, "
@@ -386,7 +390,8 @@ class LiveSource:
                 if self.record_prefix and self._rec_on and self._rec_bucket is not None:
                     self._sc_frames.append({
                         "ts": sc_ts, "n_points": len(pts), "tgts": tgts,
-                        "poses": {tid: (p.pose, p.falling_prob) for tid, p in poses.items()},
+                        "poses": {tid: (p.pose, p.falling_prob, int(p.down), p.h_s_cm)
+                                  for tid, p in poses.items()},
                         "tbc": tbc.entries if tbc is not None else [],
                         "pc": (pc.xyz if (pc is not None and len(pc.xyz)) else None)})
             except Exception:

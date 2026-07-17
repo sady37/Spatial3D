@@ -3138,29 +3138,41 @@ int32_t MmwDemo_CLICubeQuery (int32_t argc, char* argv[])
 }
 
 /**
- * poseCfg <enable> [zOffset_cm]
- *   enable    : 1 run the per-track pose MLP each frame and emit TLV 321, 0 off
- *   zOffset_cm: height remap (cm) added to each track's posZ before inference, so
- *               a standing person reads TI's reference posz (~ +0.33 m). Optional,
- *               default 0. Field-calibrated per mount; see pose/pose_mlp.h.
- * Resets the per-track ring buffers, so send before sensorStart (or to re-arm).
+ * poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain]
+ *   enable    : 1 run BOTH per-track fall legs each frame and emit TLV 321, 0 off
+ *   zOffset_cm: MLP leg -- height remap (cm) added to posZ so a standing person
+ *               reads TI's reference posz (~ +33 cm). Default 0.
+ *   mount_cm  : window leg -- radar height above floor (cm). Default 100.
+ *   tilt_deg  : window leg -- radar DOWN-tilt (deg, 0 = horizontal). Default 0.
+ *               world height h = mount + z*cos(tilt) - y*sin(tilt).
+ *   margin_cm : window leg -- "down" when the 2nd-highest point's h <= this (cm).
+ *               Default 45.
+ *   sustain   : window leg -- frames held low before latching down. Default 5.
+ * Resets the per-track state, so send before sensorStart (or to re-arm).
+ * Set mount/tilt to match the rig (e.g. 200 cm / 25 deg per dashboard-z-calib).
  */
 int32_t MmwDemo_CLIPoseCfg (int32_t argc, char* argv[])
 {
-    int32_t enable;
-    float   zOffCm = 0.0f;
+    int32_t enable, sustain = 5;
+    float   zOffCm = 0.0f, mountCm = 100.0f, tiltDeg = 0.0f, marginCm = 45.0f;
     if (argc < 2)
     {
-        CLI_write ("Error: poseCfg <enable> [zOffset_cm]\n");
+        CLI_write ("Error: poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain]\n");
         return -1;
     }
     enable = atoi (argv[1]);
-    if (argc >= 3)
-    {
-        zOffCm = (float) atof (argv[2]);
-    }
+    if (argc >= 3) zOffCm   = (float) atof (argv[2]);
+    if (argc >= 4) mountCm  = (float) atof (argv[3]);
+    if (argc >= 5) tiltDeg  = (float) atof (argv[4]);
+    if (argc >= 6) marginCm = (float) atof (argv[5]);
+    if (argc >= 7) sustain  = atoi (argv[6]);
+
     PoseMlp_init ();
-    PoseMlp_setZOffset (zOffCm * 0.01f);       /* cm -> m */
+    PoseMlp_setZOffset (zOffCm * 0.01f);                   /* cm -> m */
+    PoseMlp_setWindowCfg (mountCm * 0.01f,                 /* cm -> m */
+                          tiltDeg * 0.01745329252f,        /* deg -> rad */
+                          marginCm * 0.01f,                /* cm -> m */
+                          (uint8_t) sustain, (uint8_t) sustain);
     gMmwMssMCB.poseEnable     = (enable != 0) ? 1 : 0;
     gMmwMssMCB.poseNumResults = 0;
     return 0;
@@ -3245,7 +3257,7 @@ void CLI_init (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "poseCfg";
-    cliCfg.tableEntry[cnt].helpString     = "<enable> [zOffset_cm]";
+    cliCfg.tableEntry[cnt].helpString     = "<enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain]";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIPoseCfg;
     cnt++;
 

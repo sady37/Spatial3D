@@ -227,13 +227,18 @@ def _scene():
     poses = sc.get("poses") or {}            # {tid: Pose} from firmware TLV 321
     tg = [{"tid": int(t.tid), "x": round(t.x, 3), "y": round(t.y, 3),
            "z": round(t.z, 3), "speed": round(t.speed, 2)} for t in tgts]
-    for d in tg:                             # attach per-track pose (aux fall leg)
+    for d in tg:                             # attach per-track fall legs (TLV 321)
         p = poses.get(d["tid"])
         if p is not None and p.valid:
             d["pose"] = p.label
             d["falling_prob"] = round(p.falling_prob, 3)
         else:
             d["pose"] = None
+        if p is not None and p.win_valid:    # window leg (sustained down-state)
+            d["down"] = bool(p.down)
+            d["h_s_cm"] = p.h_s_cm
+        else:
+            d["down"] = None
     if tg:
         zsm = sc.get("z_smooth")
         zval = zsm if zsm is not None else tg[0]["z"]
@@ -335,16 +340,25 @@ def _scene():
         if len(_floor_pts) >= 200 and len(_floor.hg) == 0:
             _floor.fit(_floor_pts)
 
-    # Module 1: sustained max-height window on the primary track's points
+    # Module 1: sustained max-height window on the primary track's points.
+    # Prefer the FIRMWARE window leg (TLV 321, true 10 fps sustain) when it's
+    # emitting; else fall back to this server-side reference (~3 scene-calls/s).
     prim_pts = [(p[0], p[1], p[2]) for p in pc_pts if prim and p[3] == prim["ti"]]
-    wout = _window.update(prim_pts)
+    wout = _window.update(prim_pts)                    # keep running (floor calib + fallback)
+    fw = poses.get(prim["tid"]) if prim else None      # firmware legs for the primary track
+    if fw is not None and fw.win_valid:
+        w_down, w_hs = bool(fw.down), fw.h_s_cm / 100.0
+        w_src = "fw"
+    else:
+        w_down, w_hs = bool(wout["down"]), wout["h_s"]
+        w_src = "srv"
 
     # REAL-PERSON gate: reject ghost tracks (jumpy, out-of-room, few points) so a low
     # ghost / stray floor clutter never triggers a fall or spams cubeQuery.
     real_person = bool(prim and prim.get("n", 0) >= 12
                        and abs((prim["x0"] + prim["x1"]) / 2.0) < 3.5
                        and prim["y1"] < 5.5)
-    down = bool(wout["down"] and real_person)          # gated trigger
+    down = bool(w_down and real_person)                # gated trigger
     now = time.time()
 
     # server-triggered cube fetch: only on a REAL down, rate-limited (1 per episode + a
@@ -365,7 +379,11 @@ def _scene():
     if now - _cube_result["t"] < 12.0:
         cube_ev = {"rr": _cube_result["rr"], "floor_frac": _cube_result["floor_frac"]}
 
-    dec = _cleaner.decide({"down": down, "h_s": wout["h_s"]}, None, cube=cube_ev, geom=None)
+    # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
+    # 8-frame window fills. OR-fused with the window leg inside the cleaner.
+    mlp_out = ({"pose": fw.label, "falling_p": fw.falling_prob}
+               if (fw is not None and fw.valid) else None)
+    dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
     fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
@@ -373,8 +391,8 @@ def _scene():
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
             "fall_p": dec["confidence"], "primary_pose": primary_pose,
-            "fall_ev": {"window": bool(wout["down"]), "real": real_person,
-                        "h_s": (round(wout["h_s"], 2) if wout["h_s"] is not None else None),
+            "fall_ev": {"window": bool(w_down), "real": real_person, "win_src": w_src,
+                        "h_s": (round(w_hs, 2) if w_hs is not None else None),
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
                         "cube": (cube_ev is not None),
                         "rr": (cube_ev.get("rr") if cube_ev else None),

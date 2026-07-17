@@ -41,14 +41,23 @@
  * extra tracks beyond POSE_MAX_TRACKS simply get no pose this frame. */
 #define POSE_MAX_TRACKS        8
 
-/* One track's pose result for the frame. */
+/* One track's fall/pose result for the frame. Carries BOTH on-chip triggers
+ * (the server OR-fuses them, then cleans with the cube second-check -- see
+ * pc/falldet/clean.py):
+ *   - MLP leg   : pose + fallingProb (falling MOTION + free pose)
+ *   - window leg: winDown + winHsCm  (sustained DOWN-state, robust to track
+ *                 freeze -- 2nd-highest point sits near the local floor for K
+ *                 frames). Ports pc/falldet/window.py WindowDetector on-chip. */
 typedef struct PoseResult_t
 {
     uint32_t tid;          /* track id this result belongs to               */
     uint8_t  pose;         /* POSE_STOOD..POSE_FALLING, or POSE_UNKNOWN      */
     uint8_t  fallingProb;  /* P(Falling) scaled 0..255                       */
     uint8_t  valid;        /* 1 if pose is a real inference this frame       */
-    uint8_t  pad;
+    uint8_t  winDown;      /* 1 if window leg says sustained down-state      */
+    int16_t  winHsCm;      /* 2nd-highest point's height above floor, cm     */
+    uint8_t  winLowRun;    /* consecutive low frames (saturates at 255)      */
+    uint8_t  winValid;     /* 1 if the window leg had >=2 points this frame  */
 } PoseResult;
 
 /* One tracked target's raw kinematics for a frame, in the 6844 Z-up frame.
@@ -93,6 +102,19 @@ void PoseMlp_init(void);
  *         feature_posz = raw_posZ + zOffset. Field-calibrated via CLI poseCfg.
  */
 void PoseMlp_setZOffset(float zOffset);
+
+/*!
+ * @brief  Configure the window (sustained-down) leg's floor geometry + timing.
+ *
+ * A point's height above the floor is computed in the SAME world transform the
+ * server uses (points are radar-frame; world2sensor is unused in this demo):
+ *     h = mountM + z*cos(tiltRad) - y*sin(tiltRad)
+ * A track is "down" when its 2nd-highest point's h stays <= marginM for
+ * `sustain` frames, and clears after `clear` frames above. Defaults mirror
+ * pc/falldet/window.py (margin 0.45 m, sustain/clear 5).
+ */
+void PoseMlp_setWindowCfg(float mountM, float tiltRad, float marginM,
+                          uint8_t sustain, uint8_t clear);
 
 /*!
  * @brief  Classify every target for this frame.
