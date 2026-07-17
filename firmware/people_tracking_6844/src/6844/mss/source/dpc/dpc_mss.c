@@ -2768,6 +2768,18 @@ static void MmwDemo_tbcExtractBin(int32_t cbin, uint16_t half)
     gMmwMssMCB.tbcNumEntries = e;
 }
 
+/* PosePointGet over the tracker's Cartesian input set (read in place, no copy).
+ * CartExt.snr is int16 in 0.1 dB steps; classes.zip trained on dB -> x0.1. */
+static void MmwDemo_poseGetPoint(const void *ctx, uint32_t i,
+                                 float *x, float *y, float *z, float *snr)
+{
+    const DPIF_PointCloudCartesianExt *p = (const DPIF_PointCloudCartesianExt *)ctx + i;
+    *x   = p->x;
+    *y   = p->y;
+    *z   = p->z;
+    *snr = (float)p->snr * 0.1f;
+}
+
 void DPC_Execute(){
     int32_t retVal;
     int32_t errCode = 0;
@@ -2991,19 +3003,15 @@ void DPC_Execute(){
             {
                 uint32_t nT = result->trackerOutParams.numTargets;
                 trackerProc_Target *tl = (trackerProc_Target *)result->trackerOutParams.tList;
-                /* Scratch pinned to TCMB (.bss.pose): posePts is ~32 KB
-                 * (DPIF_DOA_OUTPUT_MAXPOINTS x 16 B) and must NOT spill into TCMA
-                 * (~5.8 KB free -> boot brick, see fallsm-boot-bug). */
+                /* Only the tiny per-track kinematics is copied (256 B). The point
+                 * set is read IN PLACE from dpcAoAObjOutCartExt via MmwDemo_poseGetPoint
+                 * -- no ~32 KB PosePoint scratch (which would also risk TCMA). */
                 static PoseTrackKin poseKin[POSE_MAX_TRACKS]
-                    __attribute__((section(".bss.pose")));
-                static PosePoint    posePts[MMWDEMO_OUTPUT_POINT_CLOUD_LIST_MAX_SIZE]
                     __attribute__((section(".bss.pose")));
                 uint32_t nP = result->numObjOut;
                 uint32_t i;
 
                 if (nT > POSE_MAX_TRACKS) nT = POSE_MAX_TRACKS;
-                if (nP > MMWDEMO_OUTPUT_POINT_CLOUD_LIST_MAX_SIZE)
-                    nP = MMWDEMO_OUTPUT_POINT_CLOUD_LIST_MAX_SIZE;
 
                 for (i = 0; i < nT; i++)
                 {
@@ -3016,17 +3024,10 @@ void DPC_Execute(){
                     poseKin[i].accY = tl[i].accY;
                     poseKin[i].accZ = tl[i].accZ;
                 }
-                for (i = 0; i < nP; i++)
-                {
-                    posePts[i].x   = gMmwMssMCB.dpcAoAObjOutCartExt[i].x;
-                    posePts[i].y   = gMmwMssMCB.dpcAoAObjOutCartExt[i].y;
-                    posePts[i].z   = gMmwMssMCB.dpcAoAObjOutCartExt[i].z;
-                    /* CartExt.snr is int16 in 0.1 dB steps; classes.zip trained
-                     * on dB -> scale by 0.1 to match the model's snr feature. */
-                    posePts[i].snr = (float)gMmwMssMCB.dpcAoAObjOutCartExt[i].snr * 0.1f;
-                }
                 gMmwMssMCB.poseNumResults =
-                    (uint16_t)PoseMlp_process(poseKin, nT, posePts, nP,
+                    (uint16_t)PoseMlp_process(poseKin, nT,
+                                              gMmwMssMCB.dpcAoAObjOutCartExt, nP,
+                                              MmwDemo_poseGetPoint,
                                               gMmwMssMCB.poseResults);
             }
             else

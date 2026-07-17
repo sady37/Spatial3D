@@ -62,13 +62,26 @@ typedef struct PoseTrackKin_t
     float    accY, accZ;
 } PoseTrackKin;
 
-/* One Cartesian detection point (major-motion set), 6844 Z-up frame. */
+/* One Cartesian detection point (major-motion set), 6844 Z-up frame. Used by
+ * the host tests and as a convenience buffer; the firmware does NOT copy into
+ * this -- it reads its own dpcAoAObjOutCartExt in place via PosePointGet. */
 typedef struct PosePoint_t
 {
     float x, y, z;
     float snr;             /* linear or dB -- only relative height ordering
                               and the trained snr scale matter               */
 } PosePoint;
+
+/*!
+ * @brief  Read point i's Cartesian coords + snr from the caller's own buffer.
+ *
+ * Lets PoseMlp_process gate points without a copy: the firmware passes
+ * dpcAoAObjOutCartExt (float x/y/z + int16 snr) directly and scales snr in the
+ * accessor, avoiding a ~32 KB PosePoint scratch array. ctx is the caller's
+ * point array base; i is 0..numPoints-1.
+ */
+typedef void (*PosePointGet)(const void *ctx, uint32_t i,
+                             float *x, float *y, float *z, float *snr);
 
 /*!
  * @brief  Reset all per-track ring buffers. Call once at config time.
@@ -90,13 +103,15 @@ void PoseMlp_setZOffset(float zOffset);
  *
  * @param kin       array of per-target kinematics (numTargets entries)
  * @param numTargets number of targets
- * @param pts       Cartesian detection points for the frame
+ * @param ptsCtx    opaque base of the caller's point buffer (read in place)
  * @param numPoints number of points
+ * @param getPoint  reads point i's x/y/z/snr from ptsCtx (no copy; firmware
+ *                  passes dpcAoAObjOutCartExt directly, host tests a PosePoint[])
  * @param out       filled with up to numTargets PoseResult (caller-sized >= numTargets)
  * @return          number of PoseResult written (== numTargets, capped at POSE_MAX_TRACKS)
  */
 uint32_t PoseMlp_process(const PoseTrackKin *kin, uint32_t numTargets,
-                         const PosePoint *pts, uint32_t numPoints,
-                         PoseResult *out);
+                         const void *ptsCtx, uint32_t numPoints,
+                         PosePointGet getPoint, PoseResult *out);
 
 #endif /* POSE_MLP_H_ */

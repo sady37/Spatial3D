@@ -75,15 +75,17 @@ ARMv7-R 镜像**。TI 也没随附 `.pth`/`.onnx`,只有 `.a` 里的 TVM rodata 
 
 ### 固件侧改动(4 处 + 新目录 `mss/source/pose/`)
 1. **pose/pose_mlp.{c,h} + pose/pose_model.c**(生成)— 折叠后 forward(纯 乘加+relu+softmax)+
-   **每 track 20×8 环形缓冲**(`POSE_MAX_TRACKS=8`,~13KB .bss)。每 track:把点云按半径 0.75m 门到
+   **每 track 20×8 环形缓冲**(`POSE_MAX_TRACKS=8`,~6.5KB .bss)。每 track:把点云按半径 0.75m 门到
    该 track,取最高 5 点建 20 特征帧,压入环形缓冲;满 8 帧才推理。TI 原版是单 track(`tList[0]`),
-   这里泛化到多 track。权重放 `.rodata.pose_model`(50.7KB)。
+   这里泛化到多 track。权重放 `.rodata.pose_model`(50.7KB)。**零拷贝**:点云用 `PosePointGet`
+   访问器**就地读** `dpcAoAObjOutCartExt`,不建 PosePoint 拷贝数组(否则最坏 2000 点×16B=32KB scratch)。
+   core 不 #include SDK 类型 → host 可编/可测。
 2. **linker.cmd** — 新规则 `.rodata.pose_model: {} palign(8) > TCMB_RAM`,放在通用 `.rodata`
    GROUP **之前**(first-match),把 51KB 权重**钉在 TCMB**。绝不能溢到 TCMA(cubeQuery 后只剩
-   ~5.8KB,溢 51KB 直接 brick,见 `fallsm-boot-bug`)。
+   ~5.8KB,溢 51KB 直接 brick,见 `fallsm-boot-bug`)。`.bss.pose`(~6.5KB 环形+scratch+poseKin)同钉 TCMB。
 3. **dpc_mss.c** — `DPU_TrackerProc_process` 之后,由 `tList`(trackerProc_Target)建 per-track
-   kinematics + 由 `dpcAoAObjOutCartExt` 建 Cartesian 点(snr ×0.1 把 0.1dB-steps 换成 classes.zip
-   的 dB 尺度),调 `PoseMlp_process`,结果存 MCB。
+   kinematics(仅 256B 小拷贝),点云传 `dpcAoAObjOutCartExt` 指针 + `MmwDemo_poseGetPoint` 访问器
+   (就地读 + snr ×0.1 把 0.1dB-steps 换成 classes.zip 的 dB 尺度),调 `PoseMlp_process`,结果存 MCB。
 4. **mmwave_demo_mss.{c,h}** — TLV 321 enum + MCB 字段(`poseEnable`/`poseNumResults`/
    `poseResults[]`)+ header/write 两趟 emit;`MMWDEMO_OUTPUT_ALL_MSG_MAX` 11→14。
 5. **mmw_cli.c** — `poseCfg <enable> [zOffset_cm]`(`MmwDemo_CLIPoseCfg`):重置环形缓冲 +
@@ -119,8 +121,9 @@ host 侧已验证(build 前就证明逻辑对):C `poseInfer` vs Python folded_fo
 - **VM 编译要核对的一件事**:`trackerProc_Target` 的字段名。本 version 用 `tid/posX/posY/posZ/
   velY/velZ/accY/accZ`(vital_signs guide 的 targetStruct3D + TI 6432 pose demo 注释均如此)。Mac 上
   没有 SDK 头无法预检;若 VM 报字段名错,是一行改名的事(如 `tid`→`trackerID`)。
-- 内存:pose_model 51KB 进 TCMB(256KB,富余)。核对 map 里 TCMA free 仍 ~5.8KB(pose 的 .bss
-  环形缓冲 ~13KB 默认进 TCMA/TCMB spill;若 TCMA 吃紧,把 `gPoseSlots` 也加 `.bss.dsp_tcmb` 段)。
+- 内存:pose 共用 TCMB ~57KB(rodata 51KB + `.bss.pose` ~6.5KB),256KB 富余。核对 map 里 TCMA
+  free 仍 ~5.8KB —— pose 的 rodata + .bss + dpc 里的 `poseKin` 都已显式钉 `.bss.pose`/
+  `.rodata.pose_model` → TCMB,**不应有任何 pose 段进 TCMA**;若 map 显示有,查 linker first-match。
 
 ## 构建 recipe（VM，CCS headless）
 见 memory `track-bin-cube-patch`(BUILD RECIPE 段)。要点:CCS toolbox 的 makefile 是坏模板,别用;

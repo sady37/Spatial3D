@@ -159,9 +159,10 @@ static PoseSlot *poseSlotFor(uint32_t tid)
 }
 
 /* Build one frame's 20-feature vector for a target into dst[POSE_NUM_FEATURES].
- * Returns 1 on success, 0 if fewer than POSE_NUM_POINTS points gate to it. */
-static int poseBuildFrame(const PoseTrackKin *k, const PosePoint *pts,
-                          uint32_t numPoints, float *dst)
+ * Reads points in place through getPt (no copy). Returns 1 on success, 0 if
+ * fewer than POSE_NUM_POINTS points gate to it. */
+static int poseBuildFrame(const PoseTrackKin *k, const void *ptsCtx,
+                          uint32_t numPoints, PosePointGet getPt, float *dst)
 {
     /* Top-5 highest gated points, kept as a size-5 ascending-by-z heap.
      * top[0] is the lowest of the current top-5 (the one to evict). */
@@ -174,15 +175,16 @@ static int poseBuildFrame(const PoseTrackKin *k, const PosePoint *pts,
 
     for (p = 0; p < numPoints; p++)
     {
-        float dx = pts[p].x - k->posX;
-        float dy = pts[p].y - k->posY;
+        float px, py, pz, s;
+        getPt(ptsCtx, p, &px, &py, &pz, &s);
+        float dx = px - k->posX;
+        float dy = py - k->posY;
         if (dx * dx + dy * dy > POSE_GATE_RADIUS_SQ)
         {
             continue;
         }
-        float z  = pts[p].z;
-        float yr = pts[p].y - k->posY;
-        float s  = pts[p].snr;
+        float z  = pz;
+        float yr = py - k->posY;
 
         if (n < POSE_NUM_POINTS)
         {
@@ -257,8 +259,8 @@ static void poseFlatten(const PoseSlot *s)
 }
 
 uint32_t PoseMlp_process(const PoseTrackKin *kin, uint32_t numTargets,
-                         const PosePoint *pts, uint32_t numPoints,
-                         PoseResult *out)
+                         const void *ptsCtx, uint32_t numPoints,
+                         PosePointGet getPoint, PoseResult *out)
 {
     uint32_t t, written = 0;
     int i, c, best;
@@ -287,7 +289,7 @@ uint32_t PoseMlp_process(const PoseTrackKin *kin, uint32_t numTargets,
             continue;   /* table full */
         }
 
-        if (!poseBuildFrame(&kin[t], pts, numPoints, frame))
+        if (!poseBuildFrame(&kin[t], ptsCtx, numPoints, getPoint, frame))
         {
             /* Not enough points this frame: keep the buffer, no push.
              * Still age so a long point-starved track eventually frees. */
