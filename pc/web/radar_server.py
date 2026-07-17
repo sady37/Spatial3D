@@ -90,13 +90,13 @@ def _fetch_cube_bg(range_bin):
 
 
 def _fall_range_bin(sc):
-    """Range bin to cubeQuery — the range where 320 ACTUALLY fired most recently. This is
-    the only reliable anchor: the 3001 cloud's slant range differs from the 320 range by
-    ~1 m (cloud sees the fallen body's true slant ~3 m; 320 fires at the track's ~2 m), and
-    the track is garbage at the fall. So we do NOT compute range from cloud or track — we
-    reuse the last-known 320 bins (held ~12 s, so a track-death fall queries the person's
-    range from just before the track dropped; the person fell in place). Returns None if
-    320 has never fired / is too stale."""
+    """Range bin to cubeQuery = where the BREATHING actually is. VERIFIED on 233000:
+    breathing-band (0.15-0.5 Hz) energy peaks at 320 bins 31-39 — i.e. the range where 320
+    itself fires (the track / fall-cfg range), NOT the 3001 minor-cloud slant (~bin 44,
+    which reads ~1 m FARTHER than the body — a cloud range bias/multipath). So the reliable
+    anchor is where 320 last fired, held ~12 s (a track-death fall queries the person's
+    range from just before the track dropped — they fall in place). NOT cloud, NOT track
+    bbox. Returns None if 320 has never fired / is stale."""
     import time as _t
     bins = sc.get("cube_bins")
     if not bins or (_t.time() - float(sc.get("cube_bins_ts", 0.0) or 0.0)) > 12.0:
