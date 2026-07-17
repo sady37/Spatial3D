@@ -22,12 +22,16 @@ CFG_DIR = "/Users/sady3721/project/TI/Tiinstall"
 # breathing/RR/HR populate continuously = the display bring-up default. fall (enable 1)
 # only bursts 320 on fall candidates -> vitals blank while seated; use it to test falls.
 CFGS = {
-    "trackcube": "sbr_3dpt_5m_trackcube.cfg",   # default: scene + vitals always on
+    "pose":      "sbr_3dpt_5m_pose.cfg",         # Phase2+3 firmware: MLP + window fall legs (TLV 321)
+    "trackcube": "sbr_3dpt_5m_trackcube.cfg",   # scene + vitals always on
     "fall":      "sbr_3dpt_5m_fall.cfg",         # fall ARM/CONFIRM/BURST state machine
     "5m":        "sbr_3dpt_5m.cfg",              # tracking only (no 320 -> no vitals)
     "10m":       "sbr_3dpt_10m.cfg",             # 10m range, tracking only
 }
-arg = sys.argv[1] if len(sys.argv) > 1 else "trackcube"
+# Default is `pose` now that the people_tracking_6844_POSE firmware is the current
+# flash: it enables both per-track fall legs; cube-RR for the red-Fall second-check
+# still comes from the server's on-demand `cubeQuery` (Phase 1, in the image).
+arg = sys.argv[1] if len(sys.argv) > 1 else "pose"
 CFG = arg if os.path.sep in arg else os.path.join(CFG_DIR, CFGS.get(arg, arg))
 if not os.path.exists(CFG):
     sys.exit(f"cfg not found: {CFG}\n  known shortnames: {', '.join(CFGS)}")
