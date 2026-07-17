@@ -3008,7 +3008,14 @@ void DPC_Execute(){
                  * -- no ~32 KB PosePoint scratch (which would also risk TCMA). */
                 static PoseTrackKin poseKin[POSE_MAX_TRACKS]
                     __attribute__((section(".bss.pose")));
-                uint32_t nP = result->numObjOut;
+                /* Feed BOTH major + minor Cartesian points -- exactly the set the
+                 * tracker gets. dpcAoAObjOutCartExt holds major [0..Major) then
+                 * minor [Major..Major+Minor) (sphericalToCartesianMinorMotionPointCloud).
+                 * A still/lying person is almost all MINOR motion, so major-only
+                 * (numObjOut) starves the pose legs after a fall -> they never
+                 * confirm sustained-down. */
+                uint32_t nP = gMmwMssMCB.numDetectedPointsMajor +
+                              gMmwMssMCB.numDetectedPointsMinor;
                 uint32_t i;
 
                 if (nT > POSE_MAX_TRACKS) nT = POSE_MAX_TRACKS;
