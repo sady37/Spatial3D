@@ -120,6 +120,8 @@ class LiveSource:
         self._pc_hist = deque()                # (ts, xyz, snr) 3001 points, ~0.5s accum
         self._cube_hold_ts = 0.0               # last ts a TLV 320 fired = fall-trigger (fall cfg ARM)
         self._fall_since = 0.0                 # ts the CURRENT continuous 320 episode began (for confirm timer)
+        self._cube_bins = None                 # last range bins where 320 actually fired (cubeQuery anchor)
+        self._cube_bins_ts = 0.0
         self._cube_query = None                # server-triggered cube fetch state (see request_cube)
         self._lock = threading.Lock()
         self._run = False
@@ -324,6 +326,11 @@ class LiveSource:
                     if not self._cube_hold_ts or (sc_ts - self._cube_hold_ts) > 1.5:
                         self._fall_since = sc_ts
                     self._cube_hold_ts = sc_ts
+                    # remember WHERE 320 is actually firing (its real range bins) — this is the
+                    # correct anchor for a server cubeQuery (cloud slant != 320 range). Held so
+                    # that when the track dies + 320 stops, we query the LAST-known person range.
+                    self._cube_bins = sorted(int(e.range_bin) for e in tbc.entries)
+                    self._cube_bins_ts = sc_ts
                 # server-triggered cube fetch: collect N frames of 320 at the queried range
                 q = self._cube_query
                 if q is not None:
@@ -352,7 +359,8 @@ class LiveSource:
                                "z_smooth": z_smooth,
                                "y0": float(tgts[0].y) if tgts else None,
                                "pc_xyz": pc_xyz, "pc_snr": pc_snr,
-                               "cube_ts": self._cube_hold_ts, "fall_since": self._fall_since}
+                               "cube_ts": self._cube_hold_ts, "fall_since": self._fall_since,
+                               "cube_bins": self._cube_bins, "cube_bins_ts": self._cube_bins_ts}
                 # Feed the breathing/HR pipeline: this firmware emits the slow-time cube
                 # as TLV 320 (per STILL-track per-bin 16-ant zero-Doppler vectors), NOT
                 # range_antenna. Route those into the SAME per-bin buffer window() reads,

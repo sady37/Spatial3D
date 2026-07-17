@@ -89,6 +89,21 @@ def _fetch_cube_bg(range_bin):
         _cube_busy[0] = False
 
 
+def _fall_range_bin(sc):
+    """Range bin to cubeQuery — the range where 320 ACTUALLY fired most recently. This is
+    the only reliable anchor: the 3001 cloud's slant range differs from the 320 range by
+    ~1 m (cloud sees the fallen body's true slant ~3 m; 320 fires at the track's ~2 m), and
+    the track is garbage at the fall. So we do NOT compute range from cloud or track — we
+    reuse the last-known 320 bins (held ~12 s, so a track-death fall queries the person's
+    range from just before the track dropped; the person fell in place). Returns None if
+    320 has never fired / is too stale."""
+    import time as _t
+    bins = sc.get("cube_bins")
+    if not bins or (_t.time() - float(sc.get("cube_bins_ts", 0.0) or 0.0)) > 12.0:
+        return None
+    return int(sorted(bins)[len(bins) // 2])          # median of the last-fired 320 bins
+
+
 def _pose_of(x0, x1, y0, y1, z0, z1):
     """Pose from the two projections' extents of a per-track MERGED box:
     L = horizontal footprint (XY, longest side), Zv = vertical extent (XZ/YZ).
@@ -273,11 +288,14 @@ def _scene():
     prim_pts = [(p[0], p[1], p[2]) for p in pc_pts if prim and p[3] == prim["ti"]]
     wout = _window.update(prim_pts)
 
-    # server-triggered cube fetch on a down-trigger (background -> /api/scene never blocks)
-    if wout["down"] and not _cube_busy[0] and prim:
-        rb = int(round(((prim["y0"] + prim["y1"]) / 2.0) / RANGE_STEP))
-        _cube_busy[0] = True
-        threading.Thread(target=_fetch_cube_bg, args=(rb,), daemon=True).start()
+    # server-triggered cube fetch on a down-trigger. Range from the CLOUD (track-independent,
+    # slant range of the low/fallen points) — NOT the track bbox, which is garbage at the
+    # fall. Fires even without a valid track (background -> /api/scene never blocks).
+    if wout["down"] and not _cube_busy[0]:
+        rb = _fall_range_bin(sc)
+        if rb is not None:
+            _cube_busy[0] = True
+            threading.Thread(target=_fetch_cube_bg, args=(rb,), daemon=True).start()
 
     # cube second-check evidence: RR + floor-band energy from the vitals pipeline (fed by 320)
     cube_ev = None
