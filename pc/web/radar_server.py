@@ -116,7 +116,7 @@ def _fetch_cube_bg(range_bin, floor_frac):
     Non-blocking for /api/scene."""
     try:
         if hasattr(_src, "request_cube"):
-            ents = _src.request_cube(range_bin, n_frames=30, half_win=3)
+            ents = _src.request_cube(range_bin, n_frames=60, half_win=3, timeout=9.0)  # ~6s = ~2 breaths
             rr, strength = _rr_from_cube(ents)
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
                                 floor_frac=round(float(floor_frac), 2))
@@ -350,9 +350,11 @@ def _scene():
 
     # cube second-check evidence = RR + floor energy computed FROM the fetched 320 burst
     # (self-contained; a living body on the floor breathes -> RR -> red Fall; a dropped
-    # object does not -> no red). Fresh for ~8 s after a fetch.
+    # object does not -> no red). A confirmed RR is HELD 12 s (the person stays down and
+    # breathing; a single 3 s burst is < 1 breath cycle, so bridge the gaps) — the ~4 s
+    # re-query keeps it refreshed while down.
     cube_ev = None
-    if now - _cube_result["t"] < 8.0:
+    if now - _cube_result["t"] < 12.0:
         cube_ev = {"rr": _cube_result["rr"], "floor_frac": _cube_result["floor_frac"]}
 
     dec = _cleaner.decide({"down": down, "h_s": wout["h_s"]}, None, cube=cube_ev, geom=None)
