@@ -18,15 +18,28 @@ from .dataset import (CLASS_NAMES, FEATURE_COUNT, FEATURE_NAMES, INPUT_SIZE,
 SECTION = "__attribute__((section(\".rodata.pose_model\")))"
 
 
+def _row(vals: np.ndarray, indent: str) -> list[str]:
+    """Wrap a 1D run of floats at 8 per line, each line prefixed by `indent`."""
+    out = []
+    for i in range(0, vals.size, 8):
+        out.append(indent + " ".join(f"{v:+.8e}f," for v in vals[i:i + 8]))
+    return out
+
 def _arr(name: str, a: np.ndarray) -> str:
-    """Row-major float32 C array. Row-major matches the firmware's dot loop."""
-    flat = a.reshape(-1).astype(np.float32)
-    body = []
-    for i in range(0, flat.size, 8):
-        body.append("    " + " ".join(f"{v:+.8e}f," for v in flat[i:i + 8]))
+    """Row-major float32 C array. 2D matrices get per-row braces so tiarmclang's
+    -Wall -Werror (-Wmissing-braces) accepts the aggregate initializer; 1D
+    vectors stay flat. Row-major matches the firmware's dot loop."""
+    a = a.astype(np.float32)
     dims = "".join(f"[{d}]" for d in a.shape)
-    return (f"{SECTION}\nconst float {name}{dims} = {{\n"
-            + "\n".join(body) + f"\n}};   /* {flat.size} floats, {flat.nbytes} B */\n")
+    tail = f"   /* {a.size} floats, {a.nbytes} B */"
+    if a.ndim == 2:
+        rows = []
+        for r in a:
+            rows.append("    {\n" + "\n".join(_row(r, "        ")) + "\n    },")
+        body = "\n".join(rows)
+    else:
+        body = "\n".join(_row(a.reshape(-1), "    "))
+    return f"{SECTION}\nconst float {name}{dims} = {{\n{body}\n}};{tail}\n"
 
 
 def write_c(path: Path, layers, acc: float | None = None) -> None:

@@ -132,18 +132,36 @@ host 侧已验证(build 前就证明逻辑对,`pc/pose/host_test/run.sh`):**MLP 
 Python folded_forward 逐点 1e-6、整条 `PoseMlp_process` end-to-end MATCH;**window 腿** vs
 `pc/falldet/window.py` WindowDetector 在站立→躺地场景 MATCH(down 在第 5 帧准点闩锁,h_s 逐 cm 对齐)。
 
-### VM 构建注意（Phase 2 特有）
-- 新增 `mss/source/pose/{pose_mlp.c,pose_mlp.h,pose_model.c}` 已加进 mss projectspec 的 `<file>`
-  项(`targetDirectory="pose"`)。**projectImport 会把 .c 拷进 ccs_ws** → 记得把这三个新文件 +
-  改过的 `dpc_mss.c`/`mmwave_demo_mss.c`/`mmw_cli.c` scp 进 ws build 副本(见 `track-bin-cube-patch`
-  的 build-workspace note:改 toolbox src 不自动进 build)。`mmwave_demo_mss.h`/`pose_mlp.h` 走 `-I`
-  从 toolbox src,头改动能进 build。
-- **VM 编译要核对的一件事**:`trackerProc_Target` 的字段名。本 version 用 `tid/posX/posY/posZ/
-  velY/velZ/accY/accZ`(vital_signs guide 的 targetStruct3D + TI 6432 pose demo 注释均如此)。Mac 上
-  没有 SDK 头无法预检;若 VM 报字段名错,是一行改名的事(如 `tid`→`trackerID`)。
-- 内存:pose 共用 TCMB ~57KB(rodata 51KB + `.bss.pose` ~6.5KB),256KB 富余。核对 map 里 TCMA
-  free 仍 ~5.8KB —— pose 的 rodata + .bss + dpc 里的 `poseKin` 都已显式钉 `.bss.pose`/
-  `.rodata.pose_model` → TCMB,**不应有任何 pose 段进 TCMA**;若 map 显示有,查 linker first-match。
+### VM 构建 — ✅ 已通过 + appimage 已 stage（2026-07-17）
+`/media/sf_share/people_tracking_6844_POSE.release.appimage`(996568 B, md5
+`bbb484d7662f58864ad91f023876cacb`)。`strings` 含 `poseCfg <enable> [zOffset_cm] [mount_cm]
+[tilt_deg] [margin_cm] [sustain]`。`nm` 里 `PoseMlp_process`/`PoseMlp_setWindowCfg`/`MmwDemo_CLIPoseCfg`
+/`MmwDemo_poseGetPoint`/`gPoseW0` 都在。用户从 Win10 flash。核对项(下方)全部落实:
+- **`trackerProc_Target` 字段名** `tid/posX/posY/posZ/velY/velZ/accY/accZ` —— **编译通过 = 名字对**。
+- **内存(map 实测)**:`.rodata.pose_model` @0x08009000(TCMB)51920B、`.bss.pose` @0x0801cae0(TCMB)
+  6576B —— 都在 TCMB,**0 段进 TCMA**,如设计。⚠️ 但 pose 的 `.text`(~2KB)按通用 `.text >> TCMA|TCMB`
+  规则落进了 TCMA → **TCMA free 从 Phase1 的 5854B 降到 2336B**(仍 >0,能启动;远离 fallsm-boot-bug 的
+  5B 悬崖)。若后续再吃 TCMA,把 pose 函数也钉 TCMB(linker 加 `.text.pose* > TCMB` + 给 pose 函数
+  加 section)。
+
+### ccs_ws 手工接线(新增 source 文件必做,`gmake` 才认)
+projectImport 之后 ccs_ws 是 CDT 生成的 makefile;**加新 .c 不会自动进 build**,要手工接 4 处
+(本次已做,记录以便复现)。ws = `~/ccs_ws/people_tracking_6844_mss`(symlink→`_4_00_00_05`):
+1. 把改过的 `.c` + 新 `pose/{pose_mlp.c,pose_mlp.h,pose_model.c}` cp 进 ws(`dpc/dpc_mss.c`、
+   `mmwave_demo_mss.c`、`mmw_cli.c`、`linker.cmd`、新建 `ws/pose/`)。`mmwave_demo_mss.h`/`pose_mlp.h`
+   走 `-I` 从 toolbox src(已 rsync),头改动自动进 build。
+2. 新建 `Release/pose/subdir_vars.mk`(`C_SRCS/OBJS/*_QUOTED += ../pose/pose_{mlp,model}.{c,o}`)+
+   `Release/pose/subdir_rules.mk`(把 `dpc/subdir_rules.mk` 的 `dpc/`→`pose/`)。
+3. `Release/sources.mk` 的 `SUBDIRS` 加 `pose`。
+4. `Release/makefile` 加 `-include pose/subdir_vars.mk` + `-include pose/subdir_rules.mk`,
+   **且** `ORDERED_OBJS`(链接对象列表,不是 `$(OBJS)`)加 `"./pose/pose_mlp.o" "./pose/pose_model.o"`
+   —— 漏这条会「compile 过但 link unresolved」。
+5. `cd Release && gmake -k -j4 all` → mss `.out` + post-build 生成 `mss_img.Release.rig`。
+6. metaImage:写 cfg(buildImages=[新 mss rig, 旧 dss rig, rfs patch rig],`coreImages:[]` 让工具自推)
+   → 从 `people_tracking_6844_system/Release/` 跑(config_keys/ 相对路径)`metaImage_creator
+   --complete_metaimage <cfg>`(它是 **ELF 可执行**,别用 `python3` 跑)→ appimage。
+- **生成器坑(已修)**:`pose_model.c` 的 2D 权重数组必须**每行加花括号**(`export_c.py` `_arr` 已改)
+  —— tiarmclang `-Wall -Werror` 的 `-Wmissing-braces` 会把扁平初始化列表拒了(host `cc` 不报,VM 报)。
 
 ## 构建 recipe（VM，CCS headless）
 见 memory `track-bin-cube-patch`(BUILD RECIPE 段)。要点:CCS toolbox 的 makefile 是坏模板,别用;
