@@ -70,6 +70,12 @@ SECTIONS{
      * boot (see fallsm-boot-bug). TCMB is 256 KB and already hosts FIX2. */
     .rodata.pose_model: {} palign(8) > TCMB_RAM
 
+    /* Spatial3D: also pin the pose CODE (pose_mlp.o .text, ~2 KB) to TCMB so it
+     * doesn't eat the thin TCMA headroom (was 2336 B free with pose .text in
+     * TCMA). pose_model.o is rodata-only (already in TCMB). First-match before
+     * the general .text group. */
+    .text.pose: { *pose_mlp.o(.text) } palign(8) > TCMB_RAM
+
     GROUP {
         .text:   {} align(8)   /* This is where code resides */
         .rodata: {} align(8)   /* This is where const's go */

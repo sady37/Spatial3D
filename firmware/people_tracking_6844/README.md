@@ -133,16 +133,16 @@ Python folded_forward 逐点 1e-6、整条 `PoseMlp_process` end-to-end MATCH;**
 `pc/falldet/window.py` WindowDetector 在站立→躺地场景 MATCH(down 在第 5 帧准点闩锁,h_s 逐 cm 对齐)。
 
 ### VM 构建 — ✅ 已通过 + appimage 已 stage（2026-07-17）
-`/media/sf_share/people_tracking_6844_POSE.release.appimage`(996568 B, md5
-`bbb484d7662f58864ad91f023876cacb`)。`strings` 含 `poseCfg <enable> [zOffset_cm] [mount_cm]
+`/media/sf_share/people_tracking_6844_POSE.release.appimage`(996648 B, md5
+`26f41fccba710995251fdb0d08eafa31`)。`strings` 含 `poseCfg <enable> [zOffset_cm] [mount_cm]
 [tilt_deg] [margin_cm] [sustain]`。`nm` 里 `PoseMlp_process`/`PoseMlp_setWindowCfg`/`MmwDemo_CLIPoseCfg`
 /`MmwDemo_poseGetPoint`/`gPoseW0` 都在。用户从 Win10 flash。核对项(下方)全部落实:
 - **`trackerProc_Target` 字段名** `tid/posX/posY/posZ/velY/velZ/accY/accZ` —— **编译通过 = 名字对**。
-- **内存(map 实测)**:`.rodata.pose_model` @0x08009000(TCMB)51920B、`.bss.pose` @0x0801cae0(TCMB)
-  6576B —— 都在 TCMB,**0 段进 TCMA**,如设计。⚠️ 但 pose 的 `.text`(~2KB)按通用 `.text >> TCMA|TCMB`
-  规则落进了 TCMA → **TCMA free 从 Phase1 的 5854B 降到 2336B**(仍 >0,能启动;远离 fallsm-boot-bug 的
-  5B 悬崖)。若后续再吃 TCMA,把 pose 函数也钉 TCMB(linker 加 `.text.pose* > TCMB` + 给 pose 函数
-  加 section)。
+- **内存(map 实测)**:`.rodata.pose_model` @0x08009000(TCMB)、`.bss.pose` @0x0801cae0(TCMB)、
+  `.text.pose` @0x0801e490(TCMB,2016B)—— pose 的 rodata + bss + **代码全在 TCMB,0 段进 TCMA**。
+  linker 加了 `.text.pose: { *pose_mlp.o(.text) } > TCMB_RAM`(编译器已把函数拆成 `.text.PoseMlp_*`
+  子节,`*pose_mlp.o(.text)` 一并匹配;static 函数被 inline 进 `PoseMlp_process`)。**TCMA free 2336→4276B**
+  (安全边际恢复;剩余 ~1.5KB 是 dpc/cli/mss 里的 pose 接线代码,混在各自对象的 .text 里,量小不单独钉)。
 
 ### ccs_ws 手工接线(新增 source 文件必做,`gmake` 才认)
 projectImport 之后 ccs_ws 是 CDT 生成的 makefile;**加新 .c 不会自动进 build**,要手工接 4 处
