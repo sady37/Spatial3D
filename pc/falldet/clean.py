@@ -41,11 +41,15 @@ class Cleaner:
         if m_trig: conf += 0.3; reason.append(f"mlp:{mlp_out.get('pose')}")  # learned motion
 
         cleaned = None
-        # 1) cube second-check (the strong filter) — only when the server fetched a cube
+        # 1) cube second-check (the strong filter) — a red Fall REQUIRES it (rejects a
+        #    dropped object: energy on the floor but NO breathing). Without a cube fetched,
+        #    the best we can say is 'suspected'.
+        cube_ok = None
         if cube is not None:
             rr_ok = cube.get("rr") not in (None, 0)
             energy_ok = float(cube.get("floor_frac", 0.0)) >= self.floor_frac_min
-            if not (rr_ok and energy_ok):
+            cube_ok = bool(rr_ok and energy_ok)
+            if not cube_ok:
                 return {"fall": False, "suspected": False, "confidence": 0.0,
                         "trigger": trigger, "reason": reason,
                         "cleaned": "cube: no living body on floor"}
@@ -53,8 +57,8 @@ class Cleaner:
         # 2) geometry prior
         if geom is not None and geom.get("at_rest_spot"):
             conf *= 0.4; cleaned = "geom:rest-spot"
-        # 3) persistence -> confirmed fall
-        fall = bool(trigger and self.run >= self.persist and conf >= 0.5)
+        # 3) persistence + cube confirmation -> confirmed fall (else at most suspected)
+        fall = bool(trigger and self.run >= self.persist and cube_ok is True and conf >= 0.5)
         suspected = bool(trigger and not fall)
         return {"fall": fall, "suspected": suspected, "confidence": round(conf, 2),
                 "trigger": trigger, "reason": reason, "cleaned": cleaned}

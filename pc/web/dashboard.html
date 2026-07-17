@@ -80,7 +80,7 @@
     <div class="row"><span class="k">运动点高度 Z90 (m)</span><span id="posez">—</span></div>
     <div class="row"><span class="k">地板带能量占比 (≤0.4m)</span><span id="posefrac">—</span></div>
     <div class="row"><span class="k">跌倒概率 P (融合)</span><span id="fallp">—</span></div>
-    <div class="muted">融合三源:suspect(320) <b>0.2</b> + 静态几何(LIE,辅助) <b style="color:#f08c00">0.4</b> + 能量密度(floor-frac) <b style="color:#58a6ff">0.6</b>,P=min(0.95,Σ)。P≥0.8 → <b style="color:#f85149">Fall</b>(红);P≥0.4 → <b style="color:#f08c00">SuspectedFall</b>(橙)。能量腿:有 320 用 cube(MUSIC,已验证);无 320 用 <b>3001 点云地板占比</b>(代理,平躺~100% vs 坐~5%)。几何单独最多 0.4,红必须有能量。</div>
+    <div class="muted">falldet 管线:<b>持续窗</b>(最高点相对本地地面 H_g,持续 → 倒地)= <b style="color:#f08c00">SuspectedFall</b>(橙,抗 track 冻结)；触发 → <b>抽 cube</b> → <b style="color:#58a6ff">RR + 地板能量</b>复核(活体在地,非掉落物)→ 确认 <b style="color:#f85149">Fall</b>(红)。<b>红必须过 cube</b>(需 320/cubeQuery),否则只到橙。片上 window 见 <a>Phase 3</a>。</div>
   </div>
 
   <!-- RR -->
@@ -301,8 +301,11 @@ async function tick(){
 // [俯视 TOP-DOWN X×D] | [侧视 SIDE D×Z, fall morphology] | [Z height bar]. 3001 points
 // render in BOTH plan views; per-track boxes in both; pose = zspan/max(xspan,yspan). ----
 const SC_XMAX=3, SC_YMAX=5;                        // plane: +-3 m lateral, 0..5 m range
-const SC_ZONES=[[0,40,"Fall","#e03131"],[40,80,"Sit","#f08c00"],[80,200,"Stand","#2f9e44"]];
-function zoneOf(cm){ return cm<=40?["Fall","#e03131"]:(cm<80?["Sit","#f08c00"]:["Stand","#2f9e44"]); }
+// Z(cm) bands, world height above floor. Fall energy sits BELOW the floor (world Z<0):
+// validated on the 3 recent fall cases the point cloud is ~91% below -40 cm, mean -81 cm.
+// Fall = below -40 cm | Sit = 0..80 cm | Stand = 80..200 cm | -40..0 = transition (no band).
+const SC_ZONES=[[-120,-40,"Fall","#e03131"],[0,80,"Sit","#f08c00"],[80,200,"Stand","#2f9e44"]];
+function zoneOf(cm){ return cm<=-40?["Fall","#e03131"]:(cm<80?["Sit","#f08c00"]:["Stand","#2f9e44"]); }
 function drawScene(sc){
   const c=document.getElementById("scene"); if(!c) return;
   const cw=Math.round(c.clientWidth), ch=Math.round(c.clientHeight);   // responsive: fill flex height, align w/ right column
@@ -318,9 +321,10 @@ function drawScene(sc){
   const TX=x=> tL + ((SC_XMAX - x)/(2*SC_XMAX))*(tR-tL);         // top-down: +x to LEFT
   const TY=y=> pT + (Math.max(0,Math.min(SC_YMAX,y))/SC_YMAX)*(pB-pT);    // range DOWN
   const SX=d=> sL + (Math.max(0,Math.min(SC_YMAX,d))/SC_YMAX)*(sR-sL);    // side: D across
-  const ZR0=-0.4, ZR1=2.0;
+  const ZR0=-1.2, ZR1=2.0;   // world height axis: +2.0m top .. -1.2m bottom (fall energy is sub-floor)
   const SZ=z=> pB - (Math.max(ZR0,Math.min(ZR1,z))-ZR0)/(ZR1-ZR0)*(pB-pT);  // Z up
-  const HY=cm=> bB - (Math.max(0,Math.min(200,cm))/200)*(bB-bT);
+  const ZB0=-120, ZB1=200;   // Z-bar range (cm): 200 down to -120
+  const HY=cm=> bB - (Math.max(ZB0,Math.min(ZB1,cm))-ZB0)/(ZB1-ZB0)*(bB-bT);
   g.font="12px sans-serif";
   const PAL=["#4dabf7","#f08c00","#2f9e44","#e64980","#f7b731","#a55eea"];
   // === TOP-DOWN (X × D) ===
@@ -336,22 +340,25 @@ function drawScene(sc){
   g.fillStyle="#1971c2"; g.fillText("RADAR", TX(0)+10, TY(0)+2);
   // === SIDE (D × Z) — fall morphology ===
   g.fillStyle="#8b949e"; g.fillText("侧视 距离(m) × Z 高度(m)", sL, pT-10);
-  g.fillStyle="rgba(248,81,73,.07)"; g.fillRect(sL,SZ(0.5),sR-sL,SZ(ZR0)-SZ(0.5));
+  // fall zone = sub-floor energy, Z < -0.4 m
+  g.fillStyle="rgba(248,81,73,.07)"; g.fillRect(sL,SZ(-0.4),sR-sL,SZ(ZR0)-SZ(-0.4));
   g.strokeStyle="#30363d"; g.strokeRect(sL,pT,sR-sL,pB-pT);
   for(let d=1;d<=4;d++){ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(SX(d),pT);g.lineTo(SX(d),pB);g.stroke();
     g.fillStyle="#8b949e"; g.fillText(d+"m", SX(d)-6, pB+13); }
-  [0.5,1,1.5].forEach(z=>{ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(sL,SZ(z));g.lineTo(sR,SZ(z));g.stroke();
-    g.fillStyle="#8b949e"; g.fillText(z, sL-20, SZ(z)+3); });
+  [-1.0,-0.4,0.5,1,1.5].forEach(z=>{ g.strokeStyle="#181d24"; g.beginPath();g.moveTo(sL,SZ(z));g.lineTo(sR,SZ(z));g.stroke();
+    g.fillStyle="#8b949e"; g.fillText(z, sL-22, SZ(z)+3); });
   g.strokeStyle="#484f58"; g.beginPath();g.moveTo(sL,SZ(0));g.lineTo(sR,SZ(0));g.stroke();
   g.fillStyle="#8b949e"; g.fillText("floor0", sR-36, SZ(0)-3);
-  g.fillStyle="#f85149"; g.fillText("倒地<0.5m", sL+4, SZ(0.25));
+  g.strokeStyle="#f85149"; g.setLineDash([4,3]); g.beginPath();g.moveTo(sL,SZ(-0.4));g.lineTo(sR,SZ(-0.4));g.stroke(); g.setLineDash([]);
+  g.fillStyle="#f85149"; g.fillText("倒地<-0.4m", sL+4, SZ(-0.8));
   // === Z HEIGHT BAR ===
   g.fillStyle="#8b949e"; g.fillText("Z(cm)", bL-14, pT-10);
   SC_ZONES.forEach(([lo,hi,lbl,col])=>{ g.fillStyle=col+"44";
     g.fillRect(bL,HY(hi),bR-bL,HY(lo)-HY(hi));
     g.fillStyle="#8b949e"; g.fillText(lbl, bR+4, (HY(lo)+HY(hi))/2+3); });
   g.strokeStyle="#484f58"; g.strokeRect(bL,bT,bR-bL,bB-bT);
-  [0,40,80,120,160,200].forEach(cm=>{ g.fillStyle="#8b949e"; g.fillText(cm, bL-24, HY(cm)+3); });
+  [200,160,120,80,40,0,-40,-80,-120].forEach(cm=>{ g.fillStyle="#8b949e"; g.fillText(cm, bL-24, HY(cm)+3); });
+  g.strokeStyle="#484f58"; g.beginPath();g.moveTo(bL,HY(0));g.lineTo(bR,HY(0));g.stroke();   // floor0 ref
   const st=document.getElementById("scenestat");
   if(!sc||!sc.live){ g.fillStyle="#8b949e"; g.fillText("no live source (run: radar_server.py live)",tL+20,H/2); if(st)st.textContent="—"; return; }
   const fsz=sc.fall_state;
@@ -385,9 +392,10 @@ function drawScene(sc){
     else if(fsz==="suspected"){ fp.textContent="SuspectedFall"; fp.className="pill p-sfall"; }
     else { fp.textContent="Fall"; fp.className="pill p-dim"; } }
   const ev=sc.fall_ev||{};
-  const evs=[ev.suspect?"320":"",ev.geom?"几何":"",ev.energy?"能量":""].filter(Boolean).join("+")||"—";
+  const evs=(ev.reason&&ev.reason.length)?ev.reason.join("+"):(ev.window?"window":"—");
   const fpp=document.getElementById("fallp");
-  const ff=(ev.floor_frac!=null)?` 地板占比${Math.round(ev.floor_frac*100)}%${ev.energy_src?"("+ev.energy_src+")":""}`:"";
+  const ff=(ev.h_s!=null?` 顶Z ${ev.h_s}m`:"")+(ev.cube?" ·cube":"")+(ev.cleaned?" ·"+ev.cleaned:"")
+           +(ev.floor_cells?` (地面格${ev.floor_cells})`:"");
   if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}  [${evs}]${ff}` : "—");
   const fmark = (fsz==="none"||!fsz)?"":`  ⚠${fsz==="fall"?"FALL":"Suspected"} P=${sc.fall_p} [${evs}]`;
   st.textContent=`tracks:${(sc.boxes||[]).length}  ${poses.join("  ")||"(no track)"}  `+

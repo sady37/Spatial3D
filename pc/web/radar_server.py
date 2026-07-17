@@ -16,8 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # pc/ -> falldet
 import radar_pipeline as pipe
 from radar_source import make_source
+from falldet.window import FloorMap, WindowDetector
+from falldet.clean import Cleaner
 
 WIN_S = 20.0            # analysis window (user 2026-07-14, per sleepad validation 20-30s) —
                         # shorter window = faster real-time response to holds / person leaving
@@ -55,6 +58,26 @@ MOUNT = 2.0          # sensor height above floor, m
 FLOOR_Z = 0.4        # m; floor band top (matches radar_pipeline FLOOR_Z) — fall = energy below this
 _cache = {"t": 0.0, "key": None, "state": None}
 _lock = threading.Lock()
+
+# ---- live falldet pipeline (server-side reference; mirrors the on-chip Phase-3 window) ----
+RANGE_STEP = 0.085          # m per range bin (probe: bin36 = 3.07 m)
+_floor = FloorMap(cell=0.5)                                   # rolling floor map H_g(x,y)
+_floor_pts = []                                              # recent world points for calibration
+_window = WindowDetector(_floor, margin=0.45, sustain=3, clear=3)  # sustain in SCENE-calls (~3/s)
+_cleaner = Cleaner(mlp_trig=0.5, persist=2, floor_frac_min=0.7)
+_cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
+
+
+def _fetch_cube_bg(range_bin):
+    """Background: ask the firmware to burst 320 at range_bin so the vitals buffer fills
+    (RR / floor-energy for the cube second-check). Non-blocking for /api/scene."""
+    try:
+        if hasattr(_src, "request_cube"):
+            _src.request_cube(range_bin, n_frames=30, half_win=3)
+    except Exception:
+        pass
+    finally:
+        _cube_busy[0] = False
 
 
 def _pose_of(x0, x1, y0, y1, z0, z1):
@@ -220,44 +243,55 @@ def _scene():
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
             b["floor_frac"] = round(b.pop("_below") / max(b["n"], 1), 2)   # 3001 cloud floor-band fraction
             boxes.append(b)
-    # ---- fall = FUSED confidence over 3 evidence sources (weighted, saturating) -------
-    #   suspect  TLV-320 burst (fall-cfg firmware ARM)            weight 0.2
-    #   geometry primary box pose LIE (static, AUXILIARY only)    weight 0.4
-    #   energy   validated floor-frac model (radar_pipeline,      weight 0.6
-    #            lie 91% vs sit/stand 41-52% in Z<=0.4m band)
-    # P = min(0.95, sum of firing weights).  P>=0.8 => Fall(red);  P>=0.4 => SuspectedFall.
-    # Geometry alone (0.4) can NEVER reach 0.8 -> a crawl/sit false-LIE only ever shows a
-    # soft orange hint; a red Fall REQUIRES the energy model (+320). Energy alone (0.6) is
-    # also just 'suspected' until corroborated. (Fusion weights per user design 20260716.)
-    W_SUSPECT, W_GEOM, W_ENERGY = 0.2, 0.4, 0.6
-    now = time.time()
-    cube_ts = float(sc.get("cube_ts", 0.0) or 0.0)
+    # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------
+    # Server-side reference for the on-chip Phase-3 window trigger; also a fallback until
+    # the firmware window ships. MLP leg = firmware Phase 2 (absent here). Red Fall needs
+    # the cube second-check (RR + floor energy); without it the best verdict is Suspected.
+    global _floor_pts
     prim = next((b for b in boxes if b["ti"] == 0), None) or \
         (max(boxes, key=lambda b: b["n"]) if boxes else None)
     primary_pose = prim["pose"] if prim else None
     prim_ffrac = float(prim.get("floor_frac", 0.0)) if prim else 0.0
-    ev_suspect = bool(tg) and cube_ts > 0 and (now - cube_ts) < 3.0
-    ev_geom = primary_pose == "LIE"
-    try:                                   # validated energy verdict — needs the 320 cube
-        ev_energy_cube = _state(None, None).get("pose") == "fall"
+
+    # rolling floor calibration H_g(x,y) from the scene cloud (world x, wy, wz)
+    if pc_pts:
+        _floor_pts.extend((p[0], p[1], p[2]) for p in pc_pts)
+        _floor_pts = _floor_pts[-4000:]
+        if len(_floor_pts) >= 200 and len(_floor.hg) == 0:
+            _floor.fit(_floor_pts)
+
+    # Module 1: sustained max-height window on the primary track's points
+    prim_pts = [(p[0], p[1], p[2]) for p in pc_pts if prim and p[3] == prim["ti"]]
+    wout = _window.update(prim_pts)
+
+    # server-triggered cube fetch on a down-trigger (background -> /api/scene never blocks)
+    if wout["down"] and not _cube_busy[0] and prim:
+        rb = int(round(((prim["y0"] + prim["y1"]) / 2.0) / RANGE_STEP))
+        _cube_busy[0] = True
+        threading.Thread(target=_fetch_cube_bg, args=(rb,), daemon=True).start()
+
+    # cube second-check evidence: RR + floor-band energy from the vitals pipeline (fed by 320)
+    cube_ev = None
+    try:
+        st = _state(None, None)
+        if not st.get("warming"):
+            cube_ev = {"rr": st.get("rr"), "floor_frac": st.get("pose_floor_frac") or prim_ffrac}
     except Exception:
-        ev_energy_cube = False
-    # 3001-cloud floor-fraction = NO-320 proxy for the floor-energy model: the minor cloud
-    # is on-chip clutter-removed micro-motion, so its fraction below FLOOR_Z tracks the
-    # moving-energy floor-frac (measured 20260716: flat lie ~100% vs sit/stand ~5%).
-    ev_energy_cloud = prim_ffrac >= 0.7
-    ev_energy = ev_energy_cube or ev_energy_cloud
-    p_fall = min(0.95, W_SUSPECT * ev_suspect + W_GEOM * ev_geom + W_ENERGY * ev_energy)
-    fall_state = "fall" if p_fall >= 0.8 else ("suspected" if p_fall >= 0.4 else "none")
+        pass
+
+    dec = _cleaner.decide(wout, None, cube=cube_ev, geom=None)   # MLP leg = firmware Phase 2
+    fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
-            "fall_p": round(p_fall, 2), "primary_pose": primary_pose,
-            "fall_ev": {"suspect": bool(ev_suspect), "geom": bool(ev_geom), "energy": bool(ev_energy),
-                        "energy_src": ("cube" if ev_energy_cube else ("cloud" if ev_energy_cloud else "")),
-                        "floor_frac": prim_ffrac},
+            "fall_p": dec["confidence"], "primary_pose": primary_pose,
+            "fall_ev": {"window": bool(wout["down"]),
+                        "h_s": (round(wout["h_s"], 2) if wout["h_s"] is not None else None),
+                        "reason": dec["reason"], "cleaned": dec["cleaned"],
+                        "cube": (cube_ev is not None), "floor_frac": prim_ffrac,
+                        "floor_cells": len(_floor.hg)},
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 
