@@ -87,16 +87,24 @@ QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. 
 STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the sensor is
                              # wedged/stalled, so 320 bursts hit a DEAD firmware -- useless,
                              # and they can keep it from recovering. Gate every probe on this.
-MAX_PROBES_DRY = 6           # after this many consecutive bursts that return NO RR, the spot
-                             # is furniture (not a breathing body) -> STOP probing it. This is
-                             # what stops a false-latched static cluster from flooding 320
-                             # forever (the runaway that wedged the EVM: ffrac~0.02, rr=None,
-                             # sustained 1300 s). A real body returns RR early and resets it.
+MAX_CUBE_BURSTS = 3          # HARD cap on cubeQuery bursts PER fall/lost episode -- NOT reset by
+                             # finding RR. A fall grabs cube a FEW times to verify person-vs-
+                             # object (RR + the fused MLP), then STOPS. The old "reset on RR"
+                             # was the wedge cause: a breathing body returns RR every burst ->
+                             # counter never advances -> 320 floods the DATA UART for the whole
+                             # (100 s+) fall -> firmware WEDGES. Strictly bounded now: <=3 bursts
+                             # (~18 s of cube) per episode, then silent; the fall stays latched
+                             # via the window / floor-fall / sustained legs, no more cube needed.
 FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
                              # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
                              # NOT latch a permanent fall (that was the 22-minute false latch).
-_probe_dry = [0]             # consecutive down-probe bursts with no RR (reset on new episode/RR)
-_lost_probe_dry = {}         # floor-track id -> consecutive lost-probe bursts with no RR
+_cube_episode = [0]          # cube bursts fired in the CURRENT physical fall episode, UNIFIED
+                             # across down-probe + lost-probe. NOT per floor-track id -- those
+                             # CHURN with fragmentation, so a per-id cap leaked (each new id got
+                             # a fresh 3-burst budget -> dozens of bursts -> re-wedge). Hard cap.
+_cube_last_active = [0.0]    # last wall time a fall was active (down / floor-fall / latched)
+CUBE_RESET_S = 5.0           # after this long with NO active fall (person up & gone), the cube
+                             # episode budget resets -> the next distinct fall gets its own bursts
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
@@ -112,6 +120,11 @@ RECOVER_S = 2.0              # a CLEAR recovery this long CLEARS the latch early
                              # red). The centroid stays ~+0.7 m once up. Only clears when up.
 RECOVER_ZMED = 0.4           # whole-cloud median world height above this = the mass is UP (a
                              # lying body is -0.2..-0.5; standing/sitting is +0.5..+0.9).
+CANCEL_R = 0.5               # 30 s monitor: if a GTRACK track stands UP within this radius of
+                             # where the body fell (the person got up unaided at the fall spot),
+                             # DISCARD the fall -- a stumble that self-recovers is not an
+                             # emergency. Faster + more specific than the cloud-centroid clear.
+_last_low_xy = [None]        # radar-frame (x, y) of the most recent below-floor cloud mass
 _down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
 _down_last = [0.0]           # last wall time `down` was true (to bridge brief flicker gaps)
 FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can't get up) ->
@@ -306,6 +319,10 @@ def _scene():
         return {"live": False}
     import math, numpy as _np
     sc = _src.scene()
+    # UNIFIED cube budget: reset the per-episode burst count once the scene has been quiet
+    # (no active fall) for CUBE_RESET_S -> the next distinct fall gets its own MAX_CUBE_BURSTS.
+    if time.time() - _cube_last_active[0] > CUBE_RESET_S:
+        _cube_episode[0] = 0
     pts_raw = sc.get("points")
     tgts = sc.get("targets") or []
     mount_m = (MOUNT if MOUNT is not None else 1.0)
@@ -497,20 +514,19 @@ def _scene():
                 _lost_since.pop(ftk.id, None)                # GTRACK has it -> not lost
             elif ftk.person and ftk.source == "inherited":
                 _lost_since.setdefault(ftk.id, _now)         # mark when it became lost
-                if _rr_at(ftk.x, ftk.y):                     # this spot IS breathing -> living
-                    _lost_probe_dry[ftk.id] = 0              # body, keep probing (reset budget)
-                # GATED: sensor FRESH (never flood a wedged firmware) AND not gone dry
-                # (MAX_PROBES_DRY bursts with no RR = furniture -> stop). This stops a
-                # false "person" floor-track from flooding 320 forever and wedging the EVM.
+                # NO reset-on-RR here: a breathing body returns RR every burst, and resetting
+                # the counter kept it probing forever -> 320 flood -> WEDGE. Hard cap instead.
+                # GATED: sensor FRESH (never flood a wedged firmware) AND under the per-episode
+                # HARD burst cap (verify person-vs-object a few times, then STOP).
                 if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
                         and _now - _lost_query_t.get(ftk.id, 0) > LOST_QUERY_REFRESH_S
                         and not _cube_busy[0]
                         and (_now - sc.get("t", _now)) < STALE_GATE_S
-                        and _lost_probe_dry.get(ftk.id, 0) < MAX_PROBES_DRY):
+                        and _cube_episode[0] < MAX_CUBE_BURSTS):
                     rb = int(round(math.hypot(ftk.x, ftk.y) / RANGE_STEP))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
-                    _lost_probe_dry[ftk.id] = _lost_probe_dry.get(ftk.id, 0) + 1
+                    _cube_episode[0] += 1
                     # 60 frames (~6s): a single LONG cubeQuery (150/~15s) WEDGES the firmware
                     # -- the sustained 320 flood over DATA UART kills it ([NO-Done] + no frames).
                     # Long integration for a still body must come from stacking SHORT bursts
@@ -518,7 +534,7 @@ def _scene():
                     threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60),
                                      daemon=True).start()
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
-            _lost_since.pop(d, None); _lost_query_t.pop(d, None); _lost_probe_dry.pop(d, None)
+            _lost_since.pop(d, None); _lost_query_t.pop(d, None)
 
         # ---- floor-fall leg: ARM from the aggregate below-floor cloud (track-independent) ---
         below = wz < FLOOR_Z
@@ -610,18 +626,18 @@ def _scene():
 
     # server-triggered cube fetch: only on a REAL down, rate-limited (50% duty refresh) — not
     # every scene call. Range from the cloud GROUND wy (_fall_range_bin). GATED on: sensor is
-    # FRESH (never flood a wedged firmware) AND the spot hasn't gone dry (MAX_PROBES_DRY bursts
-    # with no RR = furniture, stop -- this is what prevents the runaway 320 flood that wedged
-    # the EVM on a false-latched cluster).
+    # FRESH (never flood a wedged firmware) AND under the per-episode HARD burst cap
+    # (MAX_CUBE_BURSTS: grab cube a few times to verify person-vs-object, then STOP -- an
+    # unbounded refresh floods 320 for the whole fall and WEDGES the EVM).
     fresh = (now - sc.get("t", now)) < STALE_GATE_S
     if (down and not _cube_busy[0] and fresh
             and (now - _last_query_t[0]) > QUERY_REFRESH_S
-            and _probe_dry[0] < MAX_PROBES_DRY):
+            and _cube_episode[0] < MAX_CUBE_BURSTS):
         rb = _fall_range_bin(sc)
         if rb is not None:
             _cube_busy[0] = True
             _last_query_t[0] = now
-            _probe_dry[0] += 1
+            _cube_episode[0] += 1
             threading.Thread(target=_fetch_cube_bg, args=(rb, prim_ffrac), daemon=True).start()
 
     # cube second-check evidence = RR + floor energy computed FROM the fetched 320 burst
@@ -632,8 +648,6 @@ def _scene():
     cube_ev = None
     if now - _cube_result["t"] < 12.0:
         cube_ev = {"rr": _cube_result["rr"], "floor_frac": _cube_result["floor_frac"]}
-    if _cube_result["rr"]:                      # a burst DID find breathing -> living body,
-        _probe_dry[0] = 0                       # not furniture -> reset the dry-probe budget
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
@@ -649,7 +663,6 @@ def _scene():
     if down:
         if _down_since[0] == 0.0:
             _down_since[0] = now
-            _probe_dry[0] = 0                      # new down-episode -> fresh probe budget
         _down_last[0] = now
     elif _down_since[0] and (now - _down_last[0]) > DOWN_GAP_S:
         _down_since[0] = 0.0                       # down truly gone -> reset the sustain timer
@@ -704,6 +717,10 @@ def _scene():
                 _fh.write(_line + "\n")
         except Exception:
             pass
+    # mark the cube episode active while a fall is in play, so the budget only resets after
+    # CUBE_RESET_S of genuine quiet (person up & gone) -- see the reset at the top of _scene.
+    if fall_state == "fall" or down or floor_fall:
+        _cube_last_active[0] = now
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
