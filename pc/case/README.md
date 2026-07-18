@@ -49,3 +49,24 @@ Feeds an npz back through the REAL `srv._scene()` (fake source + recorded ts as 
 + synchronous cube fetch from the recorded 320 vectors), so the fall count is the LIVE
 CODE's, reproducibly — not an ad-hoc script that drifts. `python3 web/fall_replay.py
 case/<f>.npz`. Validated: 215500→1, 222000→1 (match manual), 222500→2 (reveals the gap).
+
+## fall_013500.npz — CUBEGUARD firmware validation + chest-blockage fall (2026-07-18, 260s)
+FIRST recording on the CUBEGUARD firmware (people_tracking_6844_CUBEGUARD, guard 300/300/3000).
+A multi-fall session that used to WEDGE — here it stayed HEALTHY: max frame gap 0.2s, full
+2604 frames saved, 5 fall episodes. Validates the firmware self-protection.
+- 3001 suppression CONFIRMED: of the 300 frames carrying a 320 cube, only 1% also carry the
+  point cloud -> the firmware drops 3001 during a cube burst (halves the burst UART load).
+- Code verdict (replay): FALL x5 (33-71, 121-162, 176-201, 202-207, 220-260 s).
+
+⭐ The last fall (220-260 s) = "from the chair, head to the floor, body half-kneeling — a
+toilet chest-blockage (cardiac) collapse". Findings:
+- CAUGHT (red 222-249 s) — but via the WINDOW + sustained-down leg (36 s), NOT the cube:
+  cube rr=None the WHOLE time, because a chest/cardiac emergency has weak/absent breathing.
+- ⭐⭐ For a cardiac/chest emergency, "no RR" IS the signal, not a reason to downgrade. The
+  cube-RR gate ("no living body on floor" -> not red) is BACKWARDS here; only the sustained-
+  down escalation (red after 10 s down, no cube needed) saved it. Keep/strengthen that leg;
+  a fallen-GEOMETRY body with NO RR should ESCALATE suspicion (possible cardiac), not clear.
+- Half-kneel gap: the kneel phase (204-207 s, z_med +0.35..+0.48) reads geometry SIT/STAND
+  (body folded, not flat), and floor_fall needs z_med<0.15 -> a fall FROZEN in a half-kneel
+  (slumped on a toilet, never going flat) is the hardest case; caught here only because it
+  finally went flat (z+0.02 at 222 s+).
