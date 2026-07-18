@@ -283,7 +283,10 @@ def _scene():
     # discrete points) are DROPPED — not shown, not boxed.
     boxes = []; pc_pts = []
     pcx = sc.get("pc_xyz")
-    if pcx is not None and len(pcx) and tg:
+    # NOTE: no "and tg" here -- the block MUST run even with zero GTRACK tracks, because a
+    # fallen still body is exactly when GTRACK drops every track yet the 3001 cloud persists.
+    # Gating on tg was why the scene went blank after a fall (no cloud, no id near the floor).
+    if pcx is not None and len(pcx):
         px, py, pz = pcx[:, 0], pcx[:, 1], pcx[:, 2]
         wz = mount_m + pz * math.cos(th) - py * math.sin(th)   # world height
         wy = py * math.cos(th) + pz * math.sin(th)             # world ground range
@@ -359,30 +362,31 @@ def _scene():
         # The low orphan blobs above are the fallen person's cloud that GTRACK abandoned
         # (it allocates from motion; a still body reads as furniture). Give each a track_id:
         # inherited from the just-lost GTRACK tid ("track lost + floor blob here" = fell), or
-        # a fresh negative id. It counts as a PERSON only with a real inherited tid OR cube RR
-        # (breathing); a never-tracked, non-breathing low blob is furniture -> not added.
+        # a fresh negative id. DISPLAY is decoupled from the alert: the floor cloud is ALWAYS
+        # drawn (so it never vanishes after a fall); the person-vs-furniture call (inherited
+        # real tid OR cube RR) only gates whether it gets a fall BOX/alert.
         def _rr_at(cx, cy):
             if _cube_result["rr"] in (None, 0) or _cube_result.get("bin") is None:
                 return False
             return abs(math.hypot(cx, cy) / RANGE_STEP - _cube_result["bin"]) <= 4
         gtracks = {int(t["tid"]): (float(t["x"]), float(t["y"])) for t in tg}
-        by_xy = {(round(o["cx"], 3), round(o["cy"], 3)): o for o in orphan_low}
+        ftracks = _floor_tracker.update(time.time(), gtracks,
+                                        [(o["cx"], o["cy"], o["n"]) for o in orphan_low],
+                                        rr_at=_rr_at)
+        ft_by_xy = {(round(t.x, 3), round(t.y, 3)): t for t in ftracks if t.age == 0}
         boxed = {b["tid"] for b in boxes}
-        for ftk in _floor_tracker.update(time.time(), gtracks,
-                                         [(o["cx"], o["cy"], o["n"]) for o in orphan_low],
-                                         rr_at=_rr_at):
-            if ftk.age != 0 or not ftk.person or ftk.id in boxed:
-                continue                                   # matched this frame, a person, not dup
-            o = by_xy.get((round(ftk.x, 3), round(ftk.y, 3)))
-            if o is None:
-                continue
-            fb = {"tid": int(ftk.id), "ti": int(ftk.id), "x0": o["x0"], "x1": o["x1"],
-                  "y0": o["y0"], "y1": o["y1"], "z0": o["z0"], "z1": o["z1"], "n": o["n"],
-                  "floor_frac": round(o["below"] / max(o["n"], 1), 2), "floor_src": ftk.source}
-            fb["pose"] = _pose_of(fb["x0"], fb["x1"], fb["y0"], fb["y1"], fb["z0"], fb["z1"])
-            boxes.append(fb)
-            for p in o["pts"]:                             # ti = floor id (<0) groups its cloud
-                pc_pts.append([p[0], p[1], p[2], int(ftk.id)])
+        for o in orphan_low:
+            ftk = ft_by_xy.get((round(o["cx"], 3), round(o["cy"], 3)))
+            fid = int(ftk.id) if ftk else -999            # -999 = unassigned floor cloud
+            for p in o["pts"]:                            # ALWAYS draw the floor cloud
+                pc_pts.append([p[0], p[1], p[2], fid])
+            if ftk and ftk.person and ftk.id not in boxed:   # person -> add a fall box/alert
+                fb = {"tid": int(ftk.id), "ti": int(ftk.id), "x0": o["x0"], "x1": o["x1"],
+                      "y0": o["y0"], "y1": o["y1"], "z0": o["z0"], "z1": o["z1"], "n": o["n"],
+                      "floor_frac": round(o["below"] / max(o["n"], 1), 2), "floor_src": ftk.source}
+                fb["pose"] = _pose_of(fb["x0"], fb["x1"], fb["y0"], fb["y1"], fb["z0"], fb["z1"])
+                boxes.append(fb)
+                boxed.add(ftk.id)
     # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------
     # Server-side reference for the on-chip Phase-3 window trigger; also a fallback until
     # the firmware window ships. MLP leg = firmware Phase 2 (absent here). Red Fall needs
