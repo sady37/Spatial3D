@@ -133,19 +133,26 @@ def _rr_from_cube(entries, fps=10.0):
     T = min(len(byb[b]) for b in bins)                  # align lengths across bins
     C = [_np.stack(byb[b][:T]) for b in bins]           # C[i] = (T, nAnt) per bin
     chans = demod_channels(C, bins)                     # (nbin, T) mm displacement
-    rr, _f0, spread, per_bin = estimate_rr(chans, fps)
+    # interp=True: parabolic sub-bin peak so RR isn't quantized to the window's FFT grid
+    # (a 6 s burst -> 10 rpm bins made RR look stuck at 10/20). A longer burst still helps
+    # SNR + resolution; interp removes the quantization at any length.
+    rr, _f0, spread, per_bin = estimate_rr(chans, fps, interp=True)
     if rr is None or not per_bin:
         return None, 0.0
     strength = max(0.0, 1.0 - spread / 12.0)            # bins agree (low spread) -> confident
     return (round(rr, 1) if strength > 0.2 else None), round(strength, 2)
 
 
-def _fetch_cube_bg(range_bin, floor_frac):
+def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
     """Background: burst 320 at range_bin, then compute RR from it (the cube second-check).
-    Non-blocking for /api/scene."""
+    n_frames sets the integration window: 60 (~6s, ~2 breaths) for a quick fall confirm;
+    the lost-track/still-person probe uses a LONGER window (~15s) -- a still body is not
+    time-limited, and longer coherent integration lifts weak breathing above the ~1um
+    noise floor (SNR ~ sqrt(T)) AND sharpens RR resolution. Non-blocking for /api/scene."""
     try:
         if hasattr(_src, "request_cube"):
-            ents = _src.request_cube(range_bin, n_frames=60, half_win=3, timeout=9.0)  # ~6s = ~2 breaths
+            ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=3,
+                                     timeout=n_frames / 10.0 + 3.0)
             rr, strength = _rr_from_cube(ents)
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
                                 floor_frac=round(float(floor_frac), 2), bin=int(range_bin))
@@ -419,7 +426,10 @@ def _scene():
                     rb = int(round(math.hypot(ftk.x, ftk.y) / RANGE_STEP))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
-                    threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0), daemon=True).start()
+                    # 150 frames (~15s): a still/lying person can afford a long integration
+                    # -> weak breathing lifted above the noise floor + fine RR (Sleepad-style).
+                    threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 150),
+                                     daemon=True).start()
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None)
     # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------

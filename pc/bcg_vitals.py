@@ -66,11 +66,25 @@ def sqi(x, fps, lo, hi):
     return Eb / (S.sum() - Eb + 1e-12)
 
 
-def fft_peak(x, fps, lo, hi):
+def fft_peak(x, fps, lo, hi, interp=False):
+    """Peak frequency (Hz) of x in [lo,hi]. interp=True adds parabolic sub-bin
+    interpolation of the SAME peak -> a non-quantized frequency; the FFT grid steps
+    1/T Hz (e.g. a 6 s window -> 10 rpm bins), which makes RR look stuck at 10/20.
+    Default False keeps the validated main path byte-identical (interp only used by
+    the on-demand cube RR, where the window is short)."""
     f = np.fft.rfftfreq(len(x), 1 / fps)
     S = np.abs(np.fft.rfft(x - x.mean())) ** 2
     m = (f >= lo) & (f <= hi)
-    return f[m][np.argmax(S[m])] if m.any() else None
+    if not m.any():
+        return None
+    idx = np.where(m)[0]
+    k = int(idx[np.argmax(S[idx])])           # global bin of the in-band peak
+    if not interp or k <= 0 or k >= len(S) - 1:
+        return f[k]
+    a, b, c = S[k - 1], S[k], S[k + 1]         # parabolic vertex between the 3 bins
+    denom = a - 2 * b + c
+    d = 0.5 * (a - c) / denom if denom != 0 else 0.0
+    return f[k] + max(-0.5, min(0.5, d)) * (f[1] - f[0])
 
 
 def autocorr_peak(sig, fps, lo_bpm=48, hi_bpm=150, interp=False):
@@ -120,15 +134,16 @@ def demod_channels(C, bins):
     return np.array(chans)                        # (nbin, T)
 
 
-def estimate_rr(chans, fps, topk=8):
+def estimate_rr(chans, fps, topk=8, interp=False):
     """RR via low-freq SQI-top bins, MEDIAN fft peak. Returns (rr_rpm, f0_hz,
-    bin_spread, per_bin_list). f0 also drives the HR-band RR-harmonic notch."""
+    bin_spread, per_bin_list). f0 also drives the HR-band RR-harmonic notch.
+    interp=True: parabolic sub-bin peak (un-quantizes RR on a short window)."""
     rr_sqi = np.array([sqi(bandpass(c, fps, RR_LO, RR_HI), fps, RR_LO, RR_HI)
                        for c in chans])
     rr_top = np.argsort(rr_sqi)[::-1][:topk]
     rr_f = []
     for i in rr_top:
-        ff = fft_peak(chans[i], fps, RR_LO, RR_HI)
+        ff = fft_peak(chans[i], fps, RR_LO, RR_HI, interp=interp)
         if ff: rr_f.append(ff * 60)
     rr = float(np.median(rr_f)) if rr_f else None
     f0 = rr / 60.0 if rr else 0.25
