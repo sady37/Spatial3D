@@ -3048,10 +3048,19 @@ void DPC_Execute(){
          * Must run HERE - radarCube[0] still holds this frame; the next frame's range
          * proc is triggered just below (which starts overwriting it). While a query is
          * armed, extract bin +- halfWin and count the frame down; disarm at zero. */
-        if (gMmwMssMCB.tbcQueryActive && gMmwMssMCB.tbcQueryFramesLeft > 0)
+        /* GUARD (cubeGuardCfg): refill the cube-frame budget at each rolling window boundary */
+        if ((uint32_t)(gMmwMssMCB.stats.frameStartIntCounter - gMmwMssMCB.tbcBudgetWindowStart)
+                >= (uint32_t)gMmwMssMCB.tbcBudgetWindow)
+        {
+            gMmwMssMCB.tbcBudgetUsed        = 0;
+            gMmwMssMCB.tbcBudgetWindowStart = gMmwMssMCB.stats.frameStartIntCounter;
+        }
+        if (gMmwMssMCB.tbcQueryActive && gMmwMssMCB.tbcQueryFramesLeft > 0
+                && gMmwMssMCB.tbcBudgetUsed < gMmwMssMCB.tbcBudgetFrames)
         {
             MmwDemo_tbcExtractBin((int32_t)gMmwMssMCB.tbcQueryBin,
                                   gMmwMssMCB.tbcQueryHalfWin);
+            gMmwMssMCB.tbcBudgetUsed++;           /* spend one cube-frame from the budget */
             if (--gMmwMssMCB.tbcQueryFramesLeft <= 0)
             {
                 gMmwMssMCB.tbcQueryActive = 0;   /* burst complete -> stop */
@@ -3059,7 +3068,7 @@ void DPC_Execute(){
         }
         else
         {
-            gMmwMssMCB.tbcQueryActive = 0;
+            gMmwMssMCB.tbcQueryActive = 0;        /* done / budget exhausted -> stop */
             gMmwMssMCB.tbcNumEntries  = 0;       /* no query -> emit no TLV 320 */
         }
 

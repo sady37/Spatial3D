@@ -490,7 +490,12 @@ void MmwDemo_transmitProcessedOutputTask()
         packetLen = sizeof(MmwDemo_output_message_header);
 
         /*** Point cloud ***/
-        if ((pGuiMonSel->pointCloud) && (headerID.numDetectedObjMinor > 0))
+        /* Spatial3D: SUPPRESS the minor point cloud (the "3001") while a cubeQuery burst is
+         * active -- the 320 cube already carries the spatial info at the query window, and
+         * dropping 3001 during the burst halves the DATA-UART load (17.4 -> 9.8 KB/s), the
+         * spike that backs up the frame pipeline and wedges the sensor. */
+        if ((pGuiMonSel->pointCloud) && (headerID.numDetectedObjMinor > 0)
+                && !gMmwMssMCB.tbcQueryActive)
         {
 
             // Minor
@@ -611,7 +616,8 @@ void MmwDemo_transmitProcessedOutputTask()
         /***************************************************/
         /* Send Point Cloud, feature extraction Classifier */
         /***************************************************/
-        if ((pGuiMonSel->pointCloud) && (headerID.numDetectedObjMinor  > 0))
+        if ((pGuiMonSel->pointCloud) && (headerID.numDetectedObjMinor  > 0)
+                && !gMmwMssMCB.tbcQueryActive)   /* suppress 3001 during a cube burst */
         {
             // Minor
             /* Send point cloud */

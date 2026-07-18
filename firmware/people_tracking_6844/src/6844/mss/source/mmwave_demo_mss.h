@@ -1518,6 +1518,18 @@ typedef struct MmwDemo_MSS_MCB_t
     volatile uint16_t     tbcQueryHalfWin;     /*!< +- range bins around the center bin  */
     volatile int32_t      tbcQueryFramesLeft;  /*!< frames still to emit for this query  */
 
+    /* Spatial3D: cubeQuery GUARD (firmware self-protection, `cubeGuardCfg`). The 320 cube
+     * shares the DATA UART with the point cloud + costs R5F cycles per frame; an unbounded
+     * or too-frequent burst backs the frame pipeline up and WEDGES the sensor. These bound
+     * it in the FIRMWARE so no host mistake can flood 320: a single query is clamped to
+     * tbcMaxFramesPerQuery, and at most tbcBudgetFrames cube-frames may run per rolling
+     * tbcBudgetWindow frames. Default 300 / 300 / 3000 (30 s single, 30 s per 300 s = 10%). */
+    uint16_t              tbcMaxFramesPerQuery; /*!< hard cap on one cubeQuery (frames)     */
+    uint16_t              tbcBudgetFrames;      /*!< max cube-frames per budget window      */
+    uint16_t              tbcBudgetWindow;      /*!< budget window length (frames, 3000=300s)*/
+    volatile uint16_t     tbcBudgetUsed;        /*!< cube-frames spent in the current window */
+    volatile uint32_t     tbcBudgetWindowStart; /*!< frame counter at window start          */
+
     /* Spatial3D: per-track pose classification (auxiliary fall leg). Filled in
      * dpc_mss.c right after DPU_TrackerProc_process (track kinematics + gated
      * Cartesian points), drained into TLV 321 by the transmit task. The MLP is

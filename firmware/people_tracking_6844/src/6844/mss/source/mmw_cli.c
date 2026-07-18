@@ -3130,10 +3130,52 @@ int32_t MmwDemo_CLICubeQuery (int32_t argc, char* argv[])
     {
         half = (TBC_MAX_ENTRIES - 1) / 2;
     }
+    /* GUARD (cubeGuardCfg): clamp to the single-query hard cap AND the remaining budget in
+     * the current window, so no host request can flood 320 and wedge the sensor. */
+    if (nFrames > (int32_t) gMmwMssMCB.tbcMaxFramesPerQuery)
+    {
+        nFrames = (int32_t) gMmwMssMCB.tbcMaxFramesPerQuery;
+    }
+    {
+        int32_t avail = (int32_t) gMmwMssMCB.tbcBudgetFrames -
+                        (int32_t) gMmwMssMCB.tbcBudgetUsed;
+        if (avail <= 0)
+        {
+            CLI_write ("cubeQuery: budget exhausted this window\n");
+            return 0;                        /* refuse -- protect the frame pipeline */
+        }
+        if (nFrames > avail)
+        {
+            nFrames = avail;
+        }
+    }
     gMmwMssMCB.tbcQueryBin        = (uint16_t) bin;
     gMmwMssMCB.tbcQueryHalfWin    = (uint16_t) half;
     gMmwMssMCB.tbcQueryFramesLeft = nFrames;
     gMmwMssMCB.tbcQueryActive     = 1;      /* arm last */
+    return 0;
+}
+
+/**
+ * cubeGuardCfg <maxFramesPerQuery> <budgetFrames> <budgetWindowFrames>
+ *   Firmware self-protection for the 320 cube burst (see MMwMssMCB.tbc* guard fields).
+ *   maxFramesPerQuery  : hard cap on a single cubeQuery (frames; 300 = 30 s @ 10 fps)
+ *   budgetFrames       : max cube-frames allowed per window (300 = 30 s of cube)
+ *   budgetWindowFrames : rolling window length (frames; 3000 = 300 s)
+ *   Default 300 300 3000 = a single query <= 30 s, and <= 30 s of cube per any 300 s (10%).
+ */
+int32_t MmwDemo_CLICubeGuardCfg (int32_t argc, char* argv[])
+{
+    if (argc < 4)
+    {
+        CLI_write ("Error: cubeGuardCfg <maxFramesPerQuery> <budgetFrames> <budgetWindowFrames>\n");
+        return -1;
+    }
+    gMmwMssMCB.tbcMaxFramesPerQuery = (uint16_t) atoi (argv[1]);
+    gMmwMssMCB.tbcBudgetFrames      = (uint16_t) atoi (argv[2]);
+    gMmwMssMCB.tbcBudgetWindow      = (uint16_t) atoi (argv[3]);
+    gMmwMssMCB.tbcBudgetUsed        = 0;
+    gMmwMssMCB.tbcBudgetWindowStart = gMmwMssMCB.stats.frameStartIntCounter;
     return 0;
 }
 
@@ -3201,6 +3243,16 @@ void CLI_init (uint8_t taskPriority)
     status = SemaphoreP_constructBinary(&gUartReadDoneSem, 0);
     DebugP_assert(SystemP_SUCCESS == status);
 
+    /* Spatial3D cubeQuery GUARD defaults (active from boot, before any cubeGuardCfg): a
+     * single query <= 30 s (300 frames) and <= 30 s of cube per rolling 300 s (10% duty).
+     * Without this the zero-init would set the window to 0 (no protection) and the per-query
+     * cap to 0 (no cube at all). Override at runtime with `cubeGuardCfg`. */
+    gMmwMssMCB.tbcMaxFramesPerQuery = 300;
+    gMmwMssMCB.tbcBudgetFrames      = 300;
+    gMmwMssMCB.tbcBudgetWindow      = 3000;
+    gMmwMssMCB.tbcBudgetUsed        = 0;
+    gMmwMssMCB.tbcBudgetWindowStart = 0;
+
     /* Initialize the CLI configuration: */
     memset ((void *)&cliCfg, 0, sizeof(CLI_Cfg));
 
@@ -3254,6 +3306,11 @@ void CLI_init (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmd            = "cubeQuery";
     cliCfg.tableEntry[cnt].helpString     = "<range_bin> <half_win> <n_frames>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLICubeQuery;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "cubeGuardCfg";
+    cliCfg.tableEntry[cnt].helpString     = "<maxFramesPerQuery> <budgetFrames> <budgetWindowFrames>";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLICubeGuardCfg;
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "poseCfg";
