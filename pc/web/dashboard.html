@@ -90,6 +90,7 @@
       <span><span id="rr">—</span> <span class="unit">rpm</span></span>
       <span style="font-size:16px;font-weight:400"><span style="color:var(--dim)">pause</span> <span id="pause" style="font-weight:700">—</span> <span class="unit">s</span></span>
       <span id="breathflag" class="muted" style="font-size:12px;align-self:center"></span>
+      <span id="cuberr" class="muted" style="font-size:13px;align-self:center"></span>
     </div>
     <canvas id="breathwave" width="560" height="90" style="width:100%;height:90px;margin-top:8px;
       background:#0d1117;border:1px solid #21262d;border-radius:6px"></canvas>
@@ -408,6 +409,14 @@ function drawScene(sc){
   if(fp){ if(fsz==="fall"){ fp.textContent="Fall"; fp.className="pill p-bad"; }
     else if(fsz==="suspected"){ fp.textContent="SuspectedFall"; fp.className="pill p-sfall"; }
     else { fp.textContent="Fall"; fp.className="pill p-dim"; } }
+  // cube RR (fall breathing check, SAME estimator as vitals RR). Show it in the RR panel;
+  // if the vitals RR (#rr) is idle (no still track), fill it with the cube RR too.
+  const cr=document.getElementById("cuberr");
+  if(cr){ cr.textContent = (sc.cube_rr!=null)
+      ? `cube RR ${sc.cube_rr} rpm (str ${sc.cube_rr_str}, ${sc.cube_rr_age}s前)` : ""; }
+  const rrEl=document.getElementById("rr");
+  if(rrEl && (rrEl.textContent==="—"||rrEl.textContent==="") && sc.cube_rr!=null)
+    rrEl.textContent = sc.cube_rr;
   const ev=sc.fall_ev||{};
   const evs=(ev.reason&&ev.reason.length)?ev.reason.join("+"):(ev.window?"window":"—");
   const fpp=document.getElementById("fallp");

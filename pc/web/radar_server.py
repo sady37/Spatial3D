@@ -101,32 +101,33 @@ _floor_tracker = FloorTracker()
 
 
 def _rr_from_cube(entries, fps=10.0):
-    """Breathing-band RR straight from a fetched 320 burst (the cube second-check —
-    self-contained, no vitals presence gate). Per range bin, the ant-0 slow-time -> FFT ->
-    fraction of power in 0.15-0.5 Hz; the strongest bin wins. A LIVING body on the floor
-    has clear breathing here; a DROPPED OBJECT does not -> RR None -> not a red Fall.
-    Returns (rr_bpm | None, strength 0..1)."""
+    """Breathing RR from a fetched 320 burst, using the SAME estimator as the vitals
+    path -- ONE RR module (bcg_vitals.demod_channels -> estimate_rr), not a second
+    ad-hoc FFT. Per range bin, stack the 16-antenna zero-Doppler vectors into a (T, nAnt)
+    slow-time cube; demod_channels coherently combines the antennas and phase-demodulates
+    to a mm-displacement channel; estimate_rr picks the SQI-top bins and takes the median
+    breathing-band peak. Breathing 'present' (the fall gate) = the top bins AGREE on the
+    RR (low spread); a dropped object gives scattered per-bin peaks. Returns
+    (rr_bpm | None, strength 0..1)."""
     import numpy as _np
     from collections import defaultdict
+    from bcg_vitals import demod_channels, estimate_rr
     if not entries:
         return None, 0.0
     byb = defaultdict(list)
     for e in entries:
-        byb[int(e.range_bin)].append(complex(e.vec[0]))
-    best = (0.0, None)
-    for series in byb.values():
-        if len(series) < 12:
-            continue
-        x = _np.asarray(series, complex); x = x - x.mean()
-        F = _np.abs(_np.fft.fft(x)) ** 2; f = _np.fft.fftfreq(len(x), 1.0 / fps)
-        keep = _np.abs(f) > 0.05; band = keep & (_np.abs(f) >= 0.15) & (_np.abs(f) <= 0.5)
-        tot = F[keep].sum() + 1e-9
-        ratio = F[band].sum() / tot
-        if ratio > best[0]:
-            pk = abs(f[band][_np.argmax(F[band])]) if band.any() else 0.0
-            best = (ratio, pk * 60.0)
-    strength, rr = best
-    return (round(rr, 1) if strength > 0.25 else None), round(strength, 2)
+        byb[int(e.range_bin)].append(_np.asarray(e.vec, complex))   # 16-ant vec per frame
+    bins = [b for b, s in byb.items() if len(s) >= 12]
+    if not bins:
+        return None, 0.0
+    T = min(len(byb[b]) for b in bins)                  # align lengths across bins
+    C = [_np.stack(byb[b][:T]) for b in bins]           # C[i] = (T, nAnt) per bin
+    chans = demod_channels(C, bins)                     # (nbin, T) mm displacement
+    rr, _f0, spread, per_bin = estimate_rr(chans, fps)
+    if rr is None or not per_bin:
+        return None, 0.0
+    strength = max(0.0, 1.0 - spread / 12.0)            # bins agree (low spread) -> confident
+    return (round(rr, 1) if strength > 0.2 else None), round(strength, 2)
 
 
 def _fetch_cube_bg(range_bin, floor_frac):
@@ -511,6 +512,11 @@ def _scene():
                         "rr": (cube_ev.get("rr") if cube_ev else None),
                         "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg)},
             "elev_acc_deg": ELEV_ACC_DEG,
+            # cube RR (breathing from the fall cube second-check, SAME estimator as the
+            # vitals RR: bcg_vitals demod_channels + estimate_rr). Surfaced top-level so the
+            # dashboard shows it even when the vitals /api/state RR is idle (no still track).
+            "cube_rr": _cube_result["rr"], "cube_rr_str": _cube_result["strength"],
+            "cube_rr_age": (round(time.time() - _cube_result["t"], 1) if _cube_result["t"] else None),
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 
