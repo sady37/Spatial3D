@@ -623,6 +623,51 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/rec/status":
             r = _src.rec_status() if hasattr(_src, "rec_status") else {"saving": False}
             return self._send(200, json.dumps(r))
+        if u.path == "/api/replay/list":
+            # npz recordings available to replay (case/ + record/), newest first.
+            import glob
+            root = os.path.join(HERE, "..")
+            files = []
+            for sub in ("case", "record"):
+                for p in glob.glob(os.path.join(root, sub, "*.npz")):
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    files.append({"path": f"{sub}/{os.path.basename(p)}",
+                                  "label": f"{sub}/{os.path.basename(p)}",
+                                  "size": st.st_size, "mtime": st.st_mtime})
+            files.sort(key=lambda f: f["mtime"], reverse=True)
+            return self._send(200, json.dumps({"files": files}))
+        if u.path == "/api/replay":
+            # Run the npz back through the REAL fall pipeline in a SUBPROCESS (fall_replay.py
+            # monkeypatches module globals -> must NOT run in this live process). Returns the
+            # code-of-record fall verdict + timeline. file must sit under case/ or record/.
+            import subprocess
+            q = parse_qs(u.query)
+            rel = (q.get("file", [""])[0]).replace("\\", "/")
+            mnt = q.get("mount", [str(MOUNT if MOUNT is not None else 2.0)])[0]
+            tlt = q.get("tilt", [str(TILT or 25.0)])[0]
+            if (not rel or ".." in rel or rel.split("/")[0] not in ("case", "record")
+                    or not rel.endswith(".npz")):
+                return self._send(400, json.dumps({"error": "bad file (want case/*.npz or record/*.npz)"}))
+            root = os.path.abspath(os.path.join(HERE, ".."))
+            fp = os.path.abspath(os.path.join(root, rel))
+            if not fp.startswith(root + os.sep) or not os.path.exists(fp):
+                return self._send(404, json.dumps({"error": "file not found"}))
+            try:
+                out = subprocess.run(
+                    [sys.executable, os.path.join(HERE, "fall_replay.py"), fp,
+                     "--mount", str(mnt), "--tilt", str(tlt), "--json"],
+                    capture_output=True, text=True, timeout=180, cwd=root)
+                if out.returncode != 0:
+                    return self._send(200, json.dumps({"error": "replay failed",
+                                                       "stderr": out.stderr[-2000:]}))
+                return self._send(200, out.stdout.strip() or "{}")
+            except subprocess.TimeoutExpired:
+                return self._send(200, json.dumps({"error": "replay timed out"}))
+            except Exception as e:
+                return self._send(200, json.dumps({"error": str(e)}))
         if u.path == "/api/quit":
             # graceful programmatic shutdown (== Ctrl+C): flush + release the
             # read-only serial attach without stopping the sensor.

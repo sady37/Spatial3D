@@ -110,6 +110,25 @@
     <div class="row"><span class="k">cardiac-SNR / 周期强度</span><span id="hrq">—</span></div>
   </div>
 
+  <!-- REPLAY: run a recorded npz back through the REAL server fall pipeline -->
+  <div class="card" style="grid-column:1 / -1">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <h3 style="margin:0">重放 Replay — 用录制 npz 跑<b>线上 fall 代码</b>(判决即代码,可复现)</h3>
+      <select id="rpfile" style="background:#0d1117;color:var(--fg);border:1px solid var(--line);
+        border-radius:6px;padding:4px 8px;font-size:12px;max-width:340px"></select>
+      <button id="rpbtn" style="background:#238636;color:#fff;border:0;border-radius:6px;
+        padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">重放</button>
+      <button id="rprefresh" style="background:#21262d;color:var(--fg);border:1px solid var(--line);
+        border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px">刷新列表</button>
+      <span class="muted" id="rpstat" style="font-size:12px">选择一个 case/record 的 npz</span>
+    </div>
+    <div id="rpeps" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <canvas id="rptl" width="1040" height="86" style="width:100%;height:86px;background:#0d1117;
+      border:1px solid #21262d;border-radius:6px"></canvas>
+    <div class="muted" style="margin-top:4px;font-size:11px">时间条:🟥红=Fall(代码判定,含30s latch) · 🟨黄=Suspected · 灰=none；
+      下缘刻度=window down(w) / real-person(r)；折线=cube RR。悬停看该刻状态。</div>
+    <div class="muted" id="rphover" style="font-size:11px;height:1.2em">—</div>
+  </div>
 
 </div>
 
@@ -463,6 +482,95 @@ function drawSceneSide(sc){
 // scene canvas is responsive: drawScene syncs the backing store to the flex-sized
 // display box each frame, so the plane + Z-bar fill the card and align with the right column.
 async function tickScene(){ try{ drawScene(await (await fetch("/api/scene")).json()); }catch(e){} }
+
+// ---- REPLAY: recorded npz -> REAL server fall pipeline (code-of-record verdict) ----
+let RP=null;   // last replay result {episodes, timeline, dur, ...}
+function fmtSize(b){ return b>1e6?(b/1e6).toFixed(1)+"M":(b/1e3).toFixed(0)+"K"; }
+async function loadReplayList(){
+  try{
+    const r=await (await fetch("/api/replay/list")).json();
+    const sel=document.getElementById("rpfile");
+    const keep=sel.value;
+    sel.innerHTML="";
+    (r.files||[]).forEach(f=>{
+      const o=document.createElement("option");
+      o.value=f.path; o.textContent=`${f.label}  (${fmtSize(f.size)})`;
+      sel.appendChild(o);
+    });
+    if(keep) sel.value=keep;
+    document.getElementById("rpstat").textContent=`${(r.files||[]).length} 个 npz`;
+  }catch(e){ document.getElementById("rpstat").textContent="列表加载失败"; }
+}
+async function runReplay(){
+  const sel=document.getElementById("rpfile"); const file=sel.value;
+  if(!file) return;
+  const stat=document.getElementById("rpstat"), btn=document.getElementById("rpbtn");
+  stat.textContent="重放中…（跑线上 _scene，可能几秒）"; btn.disabled=true;
+  document.getElementById("rpeps").innerHTML="";
+  try{
+    const d=await (await fetch("/api/replay?file="+encodeURIComponent(file))).json();
+    if(d.error){ stat.textContent="错误: "+d.error+(d.stderr?" · "+d.stderr.slice(-200):""); btn.disabled=false; return; }
+    RP=d;
+    const eps=d.episodes||[];
+    stat.textContent=`${d.file} · ${d.frames}帧 ${Math.round(d.dur)}s · 代码判定 FALL ${eps.length} 段`;
+    const box=document.getElementById("rpeps");
+    if(!eps.length){ box.innerHTML='<span class="pill p-dim">代码判定 0 段</span>'; }
+    eps.forEach((e,i)=>{
+      const s=document.createElement("span");
+      s.className="pill"; s.style.background="#5a1a1a"; s.style.color="#ffb3b3";
+      s.textContent=`#${i+1}  ${e.a.toFixed(0)}–${e.b.toFixed(0)}s (${e.dur}s)  ${(e.reason||[]).join("+")}`;
+      box.appendChild(s);
+    });
+    drawReplay(d);
+  }catch(e){ stat.textContent="请求失败: "+e; }
+  btn.disabled=false;
+}
+function drawReplay(d){
+  const cv=document.getElementById("rptl"), g=cv.getContext("2d");
+  const W=cv.width, H=cv.height, tl=d.timeline||[], dur=d.dur||1;
+  g.clearRect(0,0,W,H);
+  const x=t=>t/dur*(W-2)+1;
+  // state band (top ~54px)
+  const bandY=4, bandH=42;
+  const col={fall:"#f85149",suspected:"#f0a800",none:"#20262e"};
+  for(let i=0;i<tl.length;i++){
+    const t0=tl[i].t, t1=(i+1<tl.length?tl[i+1].t:dur);
+    g.fillStyle=col[tl[i].s]||"#20262e";
+    g.fillRect(x(t0),bandY,Math.max(1,x(t1)-x(t0)+0.5),bandH);
+  }
+  // w-down + real ticks (thin rows below the band)
+  const wY=bandY+bandH+4, rY=wY+7;
+  for(let i=0;i<tl.length;i++){
+    const t0=tl[i].t, t1=(i+1<tl.length?tl[i+1].t:dur), w=Math.max(1,x(t1)-x(t0)+0.5);
+    if(tl[i].wd){ g.fillStyle="#58a6ff"; g.fillRect(x(t0),wY,w,5); }
+    if(tl[i].re){ g.fillStyle="#3fb950"; g.fillRect(x(t0),rY,w,5); }
+  }
+  // cube RR polyline (map 0..40 rpm into the band height, only where rr present)
+  g.strokeStyle="#ffd33d"; g.lineWidth=1.2; g.beginPath(); let pen=false;
+  tl.forEach(p=>{ if(p.rr){ const yy=bandY+bandH-(Math.min(p.rr,40)/40)*bandH;
+    if(pen) g.lineTo(x(p.t),yy); else{ g.moveTo(x(p.t),yy); pen=true; } } else pen=false; });
+  g.stroke();
+  // time gridlines every 30s
+  g.fillStyle="#8b949e"; g.font="10px monospace";
+  for(let t=0;t<=dur;t+=30){ g.strokeStyle="#30363d"; g.beginPath();
+    g.moveTo(x(t),bandY); g.lineTo(x(t),bandY+bandH); g.stroke();
+    g.fillText(t+"s",x(t)+2,H-2); }
+  cv._tl=tl; cv._dur=dur;
+}
+function rpHover(ev){
+  const cv=document.getElementById("rptl"); if(!cv._tl) return;
+  const rc=cv.getBoundingClientRect(), fx=(ev.clientX-rc.left)/rc.width;
+  const t=fx*cv._dur; let best=cv._tl[0];
+  for(const p of cv._tl){ if(Math.abs(p.t-t)<Math.abs(best.t-t)) best=p; }
+  document.getElementById("rphover").textContent=
+    `t=${best.t.toFixed(1)}s · ${best.s.toUpperCase()} · pose=${best.pose||"-"} · `+
+    `w_down=${best.wd}(${best.ws}) real=${best.re} down_dur=${best.dur}s · `+
+    `cube_rr=${best.rr??"-"}(${best.rs})`;
+}
+document.getElementById("rpbtn").addEventListener("click",runReplay);
+document.getElementById("rprefresh").addEventListener("click",loadReplayList);
+document.getElementById("rptl").addEventListener("mousemove",rpHover);
+loadReplayList();
 
 setInterval(tick,1000); tick();
 setInterval(pollRec,1000); pollRec();

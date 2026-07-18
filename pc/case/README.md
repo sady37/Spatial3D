@@ -33,3 +33,19 @@ Track present 57 % (flickery). 4 cube bursts, interpolated RR 11.6 / 20.7 / 10.3
 - Weak-target breathing SNR ≈ 1 (micro-motion ~0.5–1 µm ≈ noise floor); only close
   chest bins reach SNR ~2–3. Long coherent integration is the only lift — but via
   STACKED short cube bursts (sliding buffer), never one long burst (wedges the fw).
+
+## fall_222500.npz — 3-fall session (22:25, 278 s), REPLAY-VALIDATED
+Ground truth (user): **3 falls**; the MIDDLE one was at ~4.5 m, behind ChairR.
+Real-code verdict via `web/fall_replay.py` (drives the live `radar_server._scene`):
+**2 fall episodes** — #1 158.5–220.2 s, #2 236.7–277.5 s. The middle 4.5 m fall
+(≈198–222 s) is NOT independently detected — it only reads red because it lands inside
+fall #1's 30 s latch. At 198–219 s the replay shows `real=0, w=0`: the `real_person`
+gate (n≥12 cloud points, radar_server.py:475) fails because a lying body at 4.5 m
+collapses the 3001 cloud below 12 points (0 points for 204–216 s). => **far falls (>~3.5 m)
+are a real gap**; only the cube energy at that range still sees the body.
+
+## Replay harness — web/fall_replay.py
+Feeds an npz back through the REAL `srv._scene()` (fake source + recorded ts as the clock
++ synchronous cube fetch from the recorded 320 vectors), so the fall count is the LIVE
+CODE's, reproducibly — not an ad-hoc script that drifts. `python3 web/fall_replay.py
+case/<f>.npz`. Validated: 215500→1, 222000→1 (match manual), 222500→2 (reveals the gap).
