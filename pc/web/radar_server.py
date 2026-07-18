@@ -129,6 +129,11 @@ FALL_LEG_ZMED = 0.15         # AND the local region's MEDIAN world height must b
                              # (231000 100-139s: z_med +0.2..+0.9 yet below_n 18-87) and dragged
                              # the armed region across the room. A lying body's z_med is -0.2..-0.5.
 FALL_REGION_M = 1.6          # region radius (a lying body spreads ~1.5 m; arm + sustain gate)
+FALL_UPRIGHT_M = 0.4         # a LIVE GTRACK track in the region whose world height is above this
+                             # = a person standing / getting up here, NOT a fallen body -> VETO
+                             # the leg. Kills the "got up from a prior lie" residual-cloud false
+                             # trigger (231000 open: residual floor pts + churning track deaths
+                             # armed floor_fall for 7 s -> hit sustained -> 30 s false red latch).
 FALL_DEATH_S = 8.0           # a GTRACK track that died this recently near the blob = fell here
 FALL_EXIT_GRACE_S = 3.0      # the below-floor blob may vanish this long before the leg disarms
 _gtrack_prev = {}            # tid -> (x, y) last frame, for GTRACK-death detection
@@ -510,7 +515,14 @@ def _scene():
             near = ((px - bx) ** 2 + (py - by) ** 2) < FALL_REGION_M ** 2
             reg_below = int((near & below).sum()); reg_tot = int(near.sum())
             reg_med_z = float(_np.median(wz[near])) if reg_tot else 1.0   # local mass height
-            if (reg_below >= FALL_LEG_MIN_PTS and reg_below >= FALL_LEG_FRAC * reg_tot
+            # VETO: a LIVE GTRACK track in the region that is UPRIGHT (world height above the
+            # fall band) = a person standing / getting up here, not a fallen body.
+            veto_up = any(((t["x"] - bx) ** 2 + (t["y"] - by) ** 2 < FALL_REGION_M ** 2)
+                          and (mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th))
+                          > FALL_UPRIGHT_M for t in tg)
+            if veto_up:
+                _fall_region["since"] = 0.0        # someone is upright here -> drop it now
+            elif (reg_below >= FALL_LEG_MIN_PTS and reg_below >= FALL_LEG_FRAC * reg_tot
                     and reg_med_z < FALL_LEG_ZMED):
                 # a substantial, floor-DOMINATED blob. Arm ONLY if a person went DOWN here: a
                 # GTRACK track died nearby recently (a still body drops off GTRACK). NOT on a
