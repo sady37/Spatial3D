@@ -77,7 +77,26 @@ _window = WindowDetector(_floor, margin=0.45, sustain=3, clear=3)  # sustain in 
 _cleaner = Cleaner(mlp_trig=0.5, persist=2, floor_frac_min=0.7)
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
-QUERY_REFRESH_S = 4.0        # min seconds between cubeQuery bursts while down
+QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. A 60-frame
+                             # burst is ~6 s -> 6 s on + 6 s idle = 50% DATA-UART duty. The
+                             # firmware wedges when 320 floods the DATA UART for MINUTES; a
+                             # single 6 s burst is safe, but back-to-back 6 s bursts at ~60%
+                             # duty accumulate and wedge it. The fix is a BIGGER idle gap
+                             # (>=burst), NOT a tiny 0.4 s micro-gap (that raises duty ->
+                             # worse). See [[fall-detection-design]] / the wedge in fall log.
+STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the sensor is
+                             # wedged/stalled, so 320 bursts hit a DEAD firmware -- useless,
+                             # and they can keep it from recovering. Gate every probe on this.
+MAX_PROBES_DRY = 6           # after this many consecutive bursts that return NO RR, the spot
+                             # is furniture (not a breathing body) -> STOP probing it. This is
+                             # what stops a false-latched static cluster from flooding 320
+                             # forever (the runaway that wedged the EVM: ffrac~0.02, rr=None,
+                             # sustained 1300 s). A real body returns RR early and resets it.
+FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
+                             # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
+                             # NOT latch a permanent fall (that was the 22-minute false latch).
+_probe_dry = [0]             # consecutive down-probe bursts with no RR (reset on new episode/RR)
+_lost_probe_dry = {}         # floor-track id -> consecutive lost-probe bursts with no RR
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
@@ -96,7 +115,7 @@ DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting t
 # the RR for a sitting/fallen still person. WAIT 2 s first: most track losses are brief
 # flickers that re-acquire, and we must not spend a ~6 s cube burst on those.
 LOST_WAIT_S = 2.0            # a track must stay lost this long (not a flicker) before probing
-LOST_QUERY_REFRESH_S = 8.0  # min seconds between lost-probe cubeQuery bursts per track
+LOST_QUERY_REFRESH_S = 12.0 # min seconds between lost-probe cubeQuery bursts per track (50% duty)
 _lost_since = {}            # floor-track id -> wall time it became inherited (lost); cleared on re-acquire
 _lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall time
 
@@ -420,12 +439,20 @@ def _scene():
                 _lost_since.pop(ftk.id, None)                # GTRACK has it -> not lost
             elif ftk.person and ftk.source == "inherited":
                 _lost_since.setdefault(ftk.id, _now)         # mark when it became lost
+                if _rr_at(ftk.x, ftk.y):                     # this spot IS breathing -> living
+                    _lost_probe_dry[ftk.id] = 0              # body, keep probing (reset budget)
+                # GATED: sensor FRESH (never flood a wedged firmware) AND not gone dry
+                # (MAX_PROBES_DRY bursts with no RR = furniture -> stop). This stops a
+                # false "person" floor-track from flooding 320 forever and wedging the EVM.
                 if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
                         and _now - _lost_query_t.get(ftk.id, 0) > LOST_QUERY_REFRESH_S
-                        and not _cube_busy[0]):
+                        and not _cube_busy[0]
+                        and (_now - sc.get("t", _now)) < STALE_GATE_S
+                        and _lost_probe_dry.get(ftk.id, 0) < MAX_PROBES_DRY):
                     rb = int(round(math.hypot(ftk.x, ftk.y) / RANGE_STEP))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
+                    _lost_probe_dry[ftk.id] = _lost_probe_dry.get(ftk.id, 0) + 1
                     # 60 frames (~6s): a single LONG cubeQuery (150/~15s) WEDGES the firmware
                     # -- the sustained 320 flood over DATA UART kills it ([NO-Done] + no frames).
                     # Long integration for a still body must come from stacking SHORT bursts
@@ -433,7 +460,7 @@ def _scene():
                     threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60),
                                      daemon=True).start()
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
-            _lost_since.pop(d, None); _lost_query_t.pop(d, None)
+            _lost_since.pop(d, None); _lost_query_t.pop(d, None); _lost_probe_dry.pop(d, None)
     # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------
     # Server-side reference for the on-chip Phase-3 window trigger; also a fallback until
     # the firmware window ships. MLP leg = firmware Phase 2 (absent here). Red Fall needs
@@ -480,13 +507,20 @@ def _scene():
     real_person = (now - _real_since[0]) < REAL_GRACE_S     # debounced
     down = bool(w_down and real_person)                # gated trigger
 
-    # server-triggered cube fetch: only on a REAL down, rate-limited (1 per episode + a
-    # ~4 s refresh) — not every scene call. Range from the cloud GROUND wy (_fall_range_bin).
-    if down and not _cube_busy[0] and (now - _last_query_t[0]) > QUERY_REFRESH_S:
+    # server-triggered cube fetch: only on a REAL down, rate-limited (50% duty refresh) — not
+    # every scene call. Range from the cloud GROUND wy (_fall_range_bin). GATED on: sensor is
+    # FRESH (never flood a wedged firmware) AND the spot hasn't gone dry (MAX_PROBES_DRY bursts
+    # with no RR = furniture, stop -- this is what prevents the runaway 320 flood that wedged
+    # the EVM on a false-latched cluster).
+    fresh = (now - sc.get("t", now)) < STALE_GATE_S
+    if (down and not _cube_busy[0] and fresh
+            and (now - _last_query_t[0]) > QUERY_REFRESH_S
+            and _probe_dry[0] < MAX_PROBES_DRY):
         rb = _fall_range_bin(sc)
         if rb is not None:
             _cube_busy[0] = True
             _last_query_t[0] = now
+            _probe_dry[0] += 1
             threading.Thread(target=_fetch_cube_bg, args=(rb, prim_ffrac), daemon=True).start()
 
     # cube second-check evidence = RR + floor energy computed FROM the fetched 320 burst
@@ -497,6 +531,8 @@ def _scene():
     cube_ev = None
     if now - _cube_result["t"] < 12.0:
         cube_ev = {"rr": _cube_result["rr"], "floor_frac": _cube_result["floor_frac"]}
+    if _cube_result["rr"]:                      # a burst DID find breathing -> living body,
+        _probe_dry[0] = 0                       # not furniture -> reset the dry-probe budget
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
@@ -512,11 +548,16 @@ def _scene():
     if down:
         if _down_since[0] == 0.0:
             _down_since[0] = now
+            _probe_dry[0] = 0                      # new down-episode -> fresh probe budget
         _down_last[0] = now
     elif _down_since[0] and (now - _down_last[0]) > DOWN_GAP_S:
         _down_since[0] = 0.0                       # down truly gone -> reset the sustain timer
     down_dur = (now - _down_since[0]) if _down_since[0] else 0.0
-    sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S and real_person)
+    # ffrac guard: a real fall puts the cloud BELOW the floor line (high floor_frac). A
+    # ~0.45 m furniture cluster (floor_frac~0.02) reads "down" via the window leg but is NOT
+    # on the floor -> must never latch a permanent fall (that was the 22-minute false latch).
+    sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S and real_person
+                          and prim_ffrac >= FALL_FFRAC_MIN)
     if sustained_fall and not dec["fall"]:
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
