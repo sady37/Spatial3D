@@ -94,10 +94,12 @@ DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting t
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None}  # latest cube 2nd-check
-# FloorTracker: gives a GTRACK-dropped fallen body a continuous track_id from its floor
-# point cloud (inherits the lost tid; furniture rejected via no-history + no-RR). See
-# falldet/floor_track.py.
-_floor_tracker = FloorTracker()
+# FloorTracker: gives a GTRACK-dropped STILL body (fallen OR just sitting motionless) a
+# continuous track_id from its point cloud (inherits the lost tid; furniture rejected via
+# no-history + no-RR). death_grace_s=30 because a sitting person's GTRACK track can flicker
+# off for 15+ s -- a spot tracked within the last 30 s is still that person, not furniture.
+# See falldet/floor_track.py.
+_floor_tracker = FloorTracker(death_grace_s=30.0)
 
 
 def _rr_from_cube(entries, fps=10.0):
@@ -318,7 +320,7 @@ def _scene():
                        round(float(_np.percentile(a, 95)), 2))
         tx = _np.array([t["x"] for t in tg]); ty = _np.array([t["y"] for t in tg])
         bytid = {}                                        # ti -> ONE merged box per track
-        orphan_low = []                                   # low clusters near NO GTRACK track
+        orphans = []                                       # clusters near NO GTRACK track (any height)
         for lab in _np.unique(labels):
             m = labels == lab
             if int(m.sum()) < 4:                          # drop tiny clusters (noise)
@@ -327,17 +329,19 @@ def _scene():
             d2 = (tx - cx) ** 2 + (ty - cy) ** 2
             ti = int(d2.argmin()) if len(tx) else -1
             if ti < 0 or float(d2[ti]) > 0.8 ** 2:        # cluster not near any GTRACK track
-                # Keep it if it's a LOW blob (candidate fallen body GTRACK dropped) — the
-                # FloorTracker below may give it a (inherited) id instead of discarding it.
-                if float(_np.median(wz[m])) < FLOOR_Z:
-                    x0o, x1o = q(px[m]); y0o, y1o = q(wy[m]); z0o, z1o = q(wz[m])
-                    io = _np.where(m)[0]
-                    orphan_low.append({
-                        "cx": cx, "cy": cy, "n": int(m.sum()),
-                        "x0": x0o, "x1": x1o, "y0": y0o, "y1": y1o, "z0": z0o, "z1": z1o,
-                        "below": int((wz[m] < FLOOR_Z).sum()),
-                        "pts": [[round(float(px[i]), 2), round(float(wy[i]), 2),
-                                 round(float(wz[i]), 2)] for i in io[::max(1, len(io) // 60)]]})
+                # Orphan blob GTRACK left unassigned. Keep it (ANY height, not just low):
+                # a STILL person -- sitting OR fallen -- gets dropped by GTRACK's motion-based
+                # allocator, and the FloorTracker below re-attaches the person's identity
+                # (inherited from the flickering track). Low-only would miss a sitting body
+                # (world-z ~0.65) and make it flicker in/out of the scene.
+                x0o, x1o = q(px[m]); y0o, y1o = q(wy[m]); z0o, z1o = q(wz[m])
+                io = _np.where(m)[0]
+                orphans.append({
+                    "cx": cx, "cy": cy, "n": int(m.sum()),
+                    "x0": x0o, "x1": x1o, "y0": y0o, "y1": y1o, "z0": z0o, "z1": z1o,
+                    "below": int((wz[m] < FLOOR_Z).sum()),
+                    "pts": [[round(float(px[i]), 2), round(float(wy[i]), 2),
+                             round(float(wz[i]), 2)] for i in io[::max(1, len(io) // 60)]]})
                 continue
             x0, x1 = q(px[m]); y0, y1 = q(wy[m]); z0, z1 = q(wz[m])
             below = int((wz[m] < FLOOR_Z).sum()); tot = int(m.sum())    # cloud floor-band count
@@ -372,11 +376,11 @@ def _scene():
             return abs(math.hypot(cx, cy) / RANGE_STEP - _cube_result["bin"]) <= 4
         gtracks = {int(t["tid"]): (float(t["x"]), float(t["y"])) for t in tg}
         ftracks = _floor_tracker.update(time.time(), gtracks,
-                                        [(o["cx"], o["cy"], o["n"]) for o in orphan_low],
+                                        [(o["cx"], o["cy"], o["n"]) for o in orphans],
                                         rr_at=_rr_at)
         ft_by_xy = {(round(t.x, 3), round(t.y, 3)): t for t in ftracks if t.age == 0}
         boxed = {b["tid"] for b in boxes}
-        for o in orphan_low:
+        for o in orphans:
             ftk = ft_by_xy.get((round(o["cx"], 3), round(o["cy"], 3)))
             fid = int(ftk.id) if ftk else -999            # -999 = unassigned floor cloud
             for p in o["pts"]:                            # ALWAYS draw the floor cloud

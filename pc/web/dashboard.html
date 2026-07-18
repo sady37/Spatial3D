@@ -255,12 +255,9 @@ async function tick(){
   document.getElementById("rng").textContent=fmt(st.range_m,2);
   document.getElementById("win").textContent=(st.win_s||"—")+"s @"+(st.fps||"—")+"fps";
 
-  // pose (RR centroid): STAND/SIT from the energy pose. The FALL pill is owned by
-  // drawScene (fused P over suspect+geom+energy), so it is NOT set here.
-  const poses={stand:"pose-stand",sit:"pose-sit"};
-  const pcls={stand:"p-ok",sit:"p-warn"};
-  for(const k in poses){const el=document.getElementById(poses[k]);
-    el.className="pill "+(st.pose===k?pcls[k]:"p-dim");}
+  // pose STAND/SIT pills are driven by drawScene from the GEOMETRY pose (sc.primary_pose,
+  // from the 3001 cloud footprint) — it works for a sitting/standing person with NO cube,
+  // unlike the vitals st.pose which needs a continuous 320 stream (idle when not falling).
   const t=st.target;
   document.getElementById("posexyz").textContent=t?`${fmt(t.x,2)} / ${fmt(t.y,2)} / ${fmt(t.z,2)}`:"—";
   document.getElementById("posez").textContent=fmt(st.pose_z90,2);
@@ -417,6 +414,11 @@ function drawScene(sc){
   const rrEl=document.getElementById("rr");
   if(rrEl && (rrEl.textContent==="—"||rrEl.textContent==="") && sc.cube_rr!=null)
     rrEl.textContent = sc.cube_rr;
+  // STAND/SIT pills from the geometry pose (primary box), always available from the cloud.
+  const gp=sc.primary_pose;   // "STAND" | "SIT" | "LIE" | null
+  const ps=document.getElementById("pose-stand"), pt=document.getElementById("pose-sit");
+  if(ps) ps.className="pill "+(gp==="STAND"?"p-ok":"p-dim");
+  if(pt) pt.className="pill "+(gp==="SIT"?"p-warn":"p-dim");
   const ev=sc.fall_ev||{};
   const evs=(ev.reason&&ev.reason.length)?ev.reason.join("+"):(ev.window?"window":"—");
   const fpp=document.getElementById("fallp");
