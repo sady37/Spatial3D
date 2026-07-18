@@ -458,6 +458,11 @@ class LiveSource:
         import threading as _th
         if not self._sess:
             return []
+        # HARD CAP a single cubeQuery at 30 s (300 frames): a sustained 320 flood over the
+        # DATA UART WEDGES the firmware (a 150-frame/15s burst already did -> [NO-Done] +
+        # sensor stops). Long integration must come from STACKING short bursts server-side,
+        # never one giant burst. This guard applies to every caller.
+        n_frames = max(1, min(int(n_frames), 300))
         q = {"bin": int(range_bin), "hw": int(half_win), "left": int(n_frames),
              "entries": [], "done": _th.Event()}
         with self._lock:
