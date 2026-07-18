@@ -91,6 +91,14 @@ FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can
                              # body the cube-RR second-check can't lock onto. The cube still
                              # gets its ~6 s first; this is the fallback for real sustained down.
 DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting the sustain timer
+# Lost-track RR probe: when GTRACK drops a still person's track (FloorTracker inherits it),
+# actively cubeQuery that spot to get RR -- confirms a living body (vs furniture) and shows
+# the RR for a sitting/fallen still person. WAIT 2 s first: most track losses are brief
+# flickers that re-acquire, and we must not spend a ~6 s cube burst on those.
+LOST_WAIT_S = 2.0            # a track must stay lost this long (not a flicker) before probing
+LOST_QUERY_REFRESH_S = 8.0  # min seconds between lost-probe cubeQuery bursts per track
+_lost_since = {}            # floor-track id -> wall time it became inherited (lost); cleared on re-acquire
+_lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall time
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None}  # latest cube 2nd-check
@@ -392,6 +400,28 @@ def _scene():
                 fb["pose"] = _pose_of(fb["x0"], fb["x1"], fb["y0"], fb["y1"], fb["z0"], fb["z1"])
                 boxes.append(fb)
                 boxed.add(ftk.id)
+
+        # ---- lost-track RR probe: a GTRACK-dropped person (inherited) that has stayed lost
+        # past the flicker window (LOST_WAIT_S) gets an active cubeQuery at its range, to
+        # read RR (confirm living body + show it). GTRACK re-acquiring clears the timer, so a
+        # brief flicker never triggers a burst.
+        _now = time.time()
+        alive_ids = set()
+        for ftk in ftracks:
+            alive_ids.add(ftk.id)
+            if ftk.source == "gtrack":
+                _lost_since.pop(ftk.id, None)                # GTRACK has it -> not lost
+            elif ftk.person and ftk.source == "inherited":
+                _lost_since.setdefault(ftk.id, _now)         # mark when it became lost
+                if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
+                        and _now - _lost_query_t.get(ftk.id, 0) > LOST_QUERY_REFRESH_S
+                        and not _cube_busy[0]):
+                    rb = int(round(math.hypot(ftk.x, ftk.y) / RANGE_STEP))
+                    _cube_busy[0] = True
+                    _lost_query_t[ftk.id] = _now
+                    threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0), daemon=True).start()
+        for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
+            _lost_since.pop(d, None); _lost_query_t.pop(d, None)
     # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------
     # Server-side reference for the on-chip Phase-3 window trigger; also a fallback until
     # the firmware window ships. MLP leg = firmware Phase 2 (absent here). Red Fall needs
