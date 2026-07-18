@@ -83,3 +83,61 @@ fast recovery). Runs in `pc/web/radar_server.py` (Python), validated by replay �
 
 Current code-of-record replay counts (baseline to beat): 215500→1, 222000→1, 222500→2 (middle
 4.5 m latch-covered not independent), 231000→2, 231500→2, 000000→2, 013500→5.
+
+---
+
+## IMPLEMENTATION & RESULTS (2026-07-18)
+
+Built server-side in `radar_server._scene()` (no firmware), validated by `fall_replay.py`
+(code-of-record). Three deliverables:
+
+### 1. ⭐ Cardiac / collapse-suspect flag  (`collapse_suspect`, `collapse_conf`)
+Encodes brief insight #1 (no-RR = SIGNAL, not downgrade). A sustained red Fall (`down_dur >=
+COLLAPSE_SUSTAIN_S=12`) with **fallen geometry** (floor_fall OR pose LIE OR flat/folded OR a
+below-floor mass) and **breathing never confirmed** on the episode (`_fall_had_rr` false)
+ESCALATES — it can never clear on "no RR". `collapse_conf`: **strong** = cube bursts were spent
+at the fall spot and still returned no RR (measured apnea); **weak** = we never got to measure
+(far fall / cloud collapse — a fall we can't rule out breathing on). Episode-scoped (resets on
+`CUBE_RESET_S` of quiet). Exposed top-level + in `fall_ev`.
+- **Fires**: `fall_013500` (💔 the ⭐ chest-blockage half-kneel, rr=None throughout) and
+  `fall_231000` (💔 no-RR 2.5 m GTRACK-drop far fall). **Silent** on 215500/222000/222500/
+  231500/000000 (breathing confirmed → not cardiac). Good specificity: only the 2 falls where
+  breathing was never confirmed flag, which is the intended safety-first behavior.
+
+### 2. Fall-ONSET event counter  (`fall_event`)  — latch-blind re-segmentation
+The 30 s display latch MERGES falls <30 s apart into one `fall_state` episode. `fall_event`
+counts distinct onsets from the PRE-latch red trigger, re-arming only after a genuine RECOVERY
+(whole-cloud centroid risen `cloud_up`, held `FALL_EVENT_GAP_S=4`). Gating on the stand-up (not
+raw `down` clearing) is what makes it robust — a far-fall cloud collapse drops `down` while the
+body is still on the floor but the mass never rises, so it does NOT falsely re-arm.
+- Events vs truth: 215500 **1/1**, 222000 **1/1**, 231500 **2/2**, 000000 **2/2** (exact);
+  222500 2/3, 231000 2/3, 013500 4/5 (off-by-one). The 3 misses are FUNDAMENTAL, not tuning:
+  222500's middle 4.5 m fall's cloud fully collapses (no fresh `down` — survives only as the
+  latch), 231000's "mid" fall never sustains past the 10 s gate (stays 🟡suspected), 013500's
+  #3/#4 are a 1 s flicker-split of one physical fall. Closing 222500 needs a far-range
+  cube-energy-at-bin leg (per [[fall-replay-harness]]); not chased here to avoid overfitting 7 files.
+- Purpose is RE-ALERT (fresh alarm when a recovered person falls again), for which
+  recovery-gated re-arm is the correct semantics regardless of exact count.
+
+### 3. Feature extractor + labeler + interpretable fusion  (`pose/scene_features.py`)
+`extract` drives the REAL `_scene()` over the npz set (reusing `fall_replay`) and dumps the
+per-frame 6-class feature vector + code decision + collapse + event → `record/scene_feats.npz`.
+Label = physical cloud-height (`f_height < 0` sustained), INDEPENDENT of the decision legs
+(non-circular). `train` fits a Leave-One-Recording-Out logistic fusion.
+- **Mean LORO-CV AUC = 0.924** (000000 .96, 215500 .97, 222000 .98, 222500 .93, 231000 .88,
+  231500 .95, 013500 .80): the 6 features linearly predict the physical fallen-state and
+  generalize across held-out recordings.
+- Learned weights rank: **f_win .88 > floor_fall .86 > down_dur .74 > f_geom .42** — agrees with
+  the hand-tuned `_fall_fuse`. **f_mlp ≈ 0** empirically confirms the firmware MLP (falling_prob
+  =0) is dead weight in every current recording. `rr_absent` is NOT a fall predictor (slightly
+  negative) — confirming no-RR is the CARDIAC-escalation signal on an already-detected fall, not
+  a fall signal itself (so the collapse flag correctly gates on fallen-geometry first).
+- HONEST SCOPE: ~7 recordings makes this a calibration / feature-validation sanity check, not a
+  deployable trained classifier. The two production wins above need NO training. A real trained
+  scene model needs a larger labelled set (fresh empty/furniture scene-format captures included —
+  the current empty_/emptychair_ files are the old vitals-cube schema and can't replay `_scene`).
+
+### Regression
+All `fall_state` episode counts UNCHANGED (215500→1, 222000→1, 222500→2, 231000→2, 231500→2,
+000000→2, 013500→5) — the additions are new flags/outputs and do not touch the validated
+decision path.

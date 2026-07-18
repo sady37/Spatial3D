@@ -132,6 +132,29 @@ FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can
                              # body the cube-RR second-check can't lock onto. The cube still
                              # gets its ~6 s first; this is the fallback for real sustained down.
 DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting the sustain timer
+# ---- ⭐ Cardiac / collapse-suspect flag ------------------------------------------------
+# The MOST critical output. A fallen body that is IMMOBILE with NO breathing (RR) is a
+# chest/cardiac collapse -- the ABSENCE of RR is the SIGNAL, not a reason to downgrade. The
+# cube-RR gate ("no living body on the floor -> not red") is BACKWARDS for a heart/chest
+# emergency: weak/absent breathing IS the emergency. So a sustained red Fall whose geometry is
+# fallen (floor_fall OR lying/folded OR a below-floor mass) and where breathing was NEVER
+# confirmed on this episode ESCALATES to collapse-suspect -- it must never clear on "no RR".
+# fall_013500 #5 (chest-blockage half-kneel, rr=None throughout) is the gold positive case; a
+# fall where the cube DID lock RR (e.g. 222500 #1) is a breathing fall, NOT collapse-suspect.
+COLLAPSE_SUSTAIN_S = 12.0    # immobile-down this long with no confirmed RR -> collapse-suspect
+_fall_had_rr = [False]       # any confirmed cube RR seen during the CURRENT fall episode
+_collapse_since = [0.0]      # wall time collapse-suspect first latched this episode (0 = none)
+# ---- Fall-ONSET event counter (distinct events; re-segments latch-merged falls) --------
+# The 30 s display latch MERGES two falls <30 s apart into ONE fall_state episode, so a person
+# who falls, is helped up, then falls again reads as a single event -- that is why 222500 (3
+# real falls) and 231000 (3) only ever counted 2. We count DISTINCT onsets from the PRE-latch
+# red trigger: +1 the first red frame of an episode, then re-arm only after the raw `down`
+# signal has been clear FALL_EVENT_GAP_S (the person got back up between falls). Latch-blind,
+# so it separates the merged falls while the display stays red the whole time.
+FALL_EVENT_GAP_S = 4.0       # raw `down` must be clear this long before a new onset can count
+_fall_event_n = [0]          # distinct fall events seen this run (monotonic)
+_fall_onset_armed = [True]   # ready to count the next onset (re-armed when down clears >= gap)
+_down_clear_since = [0.0]    # wall time raw `down` has been continuously clear (0 = down now)
 # ---- Track-INDEPENDENT floor-fall leg -------------------------------------------------
 # window/real/cube all hang on `prim` (a GTRACK box or a FloorTracker person id). A spread
 # lying body FRAGMENTS into churning orphan bits, so FloorTracker can't hold its identity
@@ -351,6 +374,8 @@ def _scene():
     # (no active fall) for CUBE_RESET_S -> the next distinct fall gets its own MAX_CUBE_BURSTS.
     if time.time() - _cube_last_active[0] > CUBE_RESET_S:
         _cube_episode[0] = 0
+        _fall_had_rr[0] = False       # new physical fall -> re-assess breathing from scratch
+        _collapse_since[0] = 0.0
     pts_raw = sc.get("points")
     tgts = sc.get("targets") or []
     mount_m = (MOUNT if MOUNT is not None else 1.0)
@@ -744,6 +769,46 @@ def _scene():
                            prim["z0"], prim["z1"]) if prim else 0.0
     fall_p = _fall_fuse(_mlp_p, w_down, cloud_wz_med, cloud_below_frac,
                         _rr_ok, _geom_flat, floor_fall)
+    # ---- ⭐ Cardiac / collapse-suspect flag + fall-onset event counter -----------------
+    # episode-level breathing memory: was RR EVER confirmed while this fall was active? (once
+    # true it sticks until the episode resets on CUBE_RESET_S of quiet, at the top of _scene).
+    if _rr_ok:
+        _fall_had_rr[0] = True
+    # fallen geometry = on the floor (floor_fall), lying flat, a folded/half-kneel body (mid
+    # geom_flat), OR a below-floor mass. This is what separates a collapse from a crouch.
+    fallen_geom = bool(floor_fall or primary_pose == "LIE"
+                       or cloud_below_frac >= 0.5 or _geom_flat >= 0.55)
+    # collapse-suspect: a SUSTAINED red Fall, fallen geometry, and breathing NEVER confirmed on
+    # this episode. No-RR here is the SIGNAL (chest/cardiac), so we ESCALATE, never clear.
+    collapse_suspect = bool(fall_state == "fall" and down_dur >= COLLAPSE_SUSTAIN_S
+                            and fallen_geom and not _fall_had_rr[0])
+    if collapse_suspect:
+        if _collapse_since[0] == 0.0:
+            _collapse_since[0] = now
+    # collapse-suspect confidence: STRONG once cube bursts were spent probing the fall spot and
+    # still returned no RR (measured apnea, not merely unassessed); WEAK when we never got to
+    # measure (far fall / cloud collapse -- a fall we simply can't rule out breathing on).
+    collapse_conf = ("strong" if (collapse_suspect and _cube_episode[0] > 0)
+                     else ("weak" if collapse_suspect else None))
+
+    # fall-onset event count (PRE-latch, so latch-merged falls still separate). Count +1 on the
+    # first red trigger of an episode, then DISARM. Re-arm only after a genuine RECOVERY between
+    # falls -- the person actually got UP (whole-cloud centroid risen, cloud_up) for
+    # FALL_EVENT_GAP_S. Gating on cloud_up (not raw `down` clearing) is what makes it robust: a
+    # far-fall CLOUD COLLAPSE drops `down` while the person is still on the floor (would falsely
+    # re-arm -> overcount 231500/000000), but the mass never rises, so cloud_up stays false and
+    # the onset does NOT re-arm; two DISTINCT falls have a real stand-up between them (cloud_up).
+    red_trigger = bool(dec["fall"] or sustained_fall)
+    if red_trigger and _fall_onset_armed[0]:
+        _fall_event_n[0] += 1
+        _fall_onset_armed[0] = False
+    if down:
+        _down_clear_since[0] = 0.0
+    elif cloud_up:                                # person genuinely upright (mass risen)
+        if _down_clear_since[0] == 0.0:
+            _down_clear_since[0] = now
+        elif now - _down_clear_since[0] >= FALL_EVENT_GAP_S:
+            _fall_onset_armed[0] = True           # recovered -> ready for the next DISTINCT fall
     # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
     # red-Fall can be pinned to the exact failing gate. Goes to stdout AND
     # record/fall_debug.log (so it can be read back without copy-paste). Remove once tuned.
@@ -771,6 +836,10 @@ def _scene():
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
             "fall_p": fall_p, "primary_pose": primary_pose,
+            # ⭐ cardiac/collapse-suspect (fallen + immobile + no confirmed breathing) and the
+            # distinct-event count (latch-blind, separates falls the 30 s hold merges).
+            "collapse_suspect": collapse_suspect, "collapse_conf": collapse_conf,
+            "fall_event": _fall_event_n[0],
             "fall_ev": {"window": bool(w_down), "real": real_person, "win_src": w_src,
                         "h_s": (round(w_hs, 2) if w_hs is not None else None),
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
@@ -782,7 +851,15 @@ def _scene():
                         "f_height": (None if cloud_wz_med is None else round(cloud_wz_med, 2)),
                         "f_energy": round(cloud_below_frac, 2), "f_geom": _geom_flat,
                         "f_rr": int(_rr_ok),
-                        "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg)},
+                        "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg),
+                        # ⭐ collapse + full feature vector (for scene_features.py training set)
+                        "collapse": collapse_suspect, "collapse_conf": collapse_conf,
+                        "had_rr": _fall_had_rr[0], "event": _fall_event_n[0],
+                        "down": bool(down), "down_dur": round(down_dur, 1),
+                        "sustained": bool(sustained_fall), "pose": primary_pose,
+                        "prim_n": (int(prim.get("n", 0)) if prim else 0),
+                        "cube_str": _cube_result["strength"],
+                        "cube_bursts": _cube_episode[0]},
             "elev_acc_deg": ELEV_ACC_DEG,
             # cube RR (breathing from the fall cube second-check, SAME estimator as the
             # vitals RR: bcg_vitals demod_channels + estimate_rr). Surfaced top-level so the
