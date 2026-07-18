@@ -268,6 +268,34 @@ def _pose_of(x0, x1, y0, y1, z0, z1):
     return "STAND" if asp > 1.5 else ("LIE" if asp < 0.7 else "SIT")
 
 
+def _flatness(x0, x1, y0, y1, z0, z1):
+    """Fall GEOMETRY evidence in [0,1] from the XY/XZ/YZ extents (same basis as _pose_of):
+    a LYING body is flat & spread (L long, Zv small) -> ~1; a STANDING column (Zv tall) -> 0.
+    Scale-free vertical/horizontal aspect, robust to the ~1 m track-Z drift."""
+    L = max(x1 - x0, y1 - y0)
+    asp = (z1 - z0) / max(L, 0.05)                 # lying < 0.7, sitting ~1, standing > 1.5
+    return round(max(0.0, min(1.0, (1.3 - asp) / 1.3)), 2)
+
+
+def _fall_fuse(mlp_p, win_down, cloud_wz, below_frac, rr_ok, geom_flat, floor_fall):
+    """Server-side fusion -> fall probability P in [0,1] (dashboard '跌倒概率 P 融合').
+    Extends TI's on-chip MLP with the scene features the firmware can't see. Transparent
+    weighted evidence (no trained model -- no labelled scene-level data yet):
+      MLP P(falling) | 5-frame sustained-down window | 3001 cloud-centroid HEIGHT |
+      below-floor ENERGY density | XY/XZ/YZ GEOMETRY flatness ; gated by cube RR (a breathing
+      body on the floor = a real person, not a dropped object)."""
+    e_h = 0.0 if cloud_wz is None else max(0.0, min(1.0, (FLOOR_Z - cloud_wz) / 0.7))
+    ev = (0.22 * float(mlp_p or 0.0)            # TI MLP falling-motion prob
+          + 0.20 * (1.0 if win_down else 0.0)   # sustained-down time window
+          + 0.22 * e_h                          # cloud centroid below the floor line
+          + 0.18 * max(0.0, min(1.0, float(below_frac) / 0.8))   # below-floor energy density
+          + 0.18 * float(geom_flat))            # flat lying geometry
+    if floor_fall:                              # the track-free floor leg alone is strong
+        ev = max(ev, 0.6)
+    person = 1.0 if rr_ok else 0.7              # RR present -> living body confirmed (boost)
+    return round(max(0.0, min(1.0, ev)) * person, 2)
+
+
 def _state(bin_lo, bin_hi):
     """Compute (cached ~0.5s) the current state for the given HR bin window."""
     key = (bin_lo, bin_hi)
@@ -375,6 +403,7 @@ def _scene():
     # discrete points) are DROPPED — not shown, not boxed.
     boxes = []; pc_pts = []
     cloud_wz_med = None          # robust whole-cloud median world height (recovery / up signal)
+    cloud_below_frac = 0.0       # fraction of the cloud below the floor band (energy density)
     pcx = sc.get("pc_xyz")
     # NOTE: no "and tg" here -- the block MUST run even with zero GTRACK tracks, because a
     # fallen still body is exactly when GTRACK drops every track yet the 3001 cloud persists.
@@ -394,6 +423,7 @@ def _scene():
             px, py, wy, wz, P = px[keep], py[keep], wy[keep], wz[keep], P[keep]
         if len(wz):
             cloud_wz_med = float(_np.median(wz))       # robust up/down signal (all points)
+            cloud_below_frac = float((wz < FLOOR_Z).mean())   # below-floor energy density
         # CLUSTER by connectivity: points closer than EPS chain into one cluster; a gap
         # bigger than EPS (e.g. two people ~1 m apart) splits them into separate boxes.
         EPS = 0.4
@@ -540,6 +570,7 @@ def _scene():
         below = wz < FLOOR_Z
         if int(below.sum()) >= FALL_LEG_MIN_PTS:
             bx = float(_np.median(px[below])); by = float(_np.median(py[below]))  # radar-frame
+            _last_low_xy[0] = (bx, by)           # where the body is while low (30 s-cancel anchor)
             near = ((px - bx) ** 2 + (py - by) ** 2) < FALL_REGION_M ** 2
             reg_below = int((near & below).sum()); reg_tot = int(near.sum())
             reg_med_z = float(_np.median(wz[near])) if reg_tot else 1.0   # local mass height
@@ -689,17 +720,30 @@ def _scene():
     cloud_up = cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED
     if (dec["fall"] or sustained_fall) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
-    # RECOVERY clears the latch early: a tracked real person whose cloud centroid is up, held
-    # RECOVER_S -> they clearly got up and moved on. A still-fallen body's centroid stays low.
+    # RECOVERY / 30 s-CANCEL clears the latch early: the person got up and moved on -- a stumble
+    # that self-recovers is not an emergency. Signal = the CLOUD/energy centroid at the fall spot
+    # has RISEN (cloud_up). We do NOT use the GTRACK track's Z here: it floats ~1 m on a still
+    # body (fall-design), so a fallen person's coasting track reads "up" and would falsely cancel
+    # a real fall (it wrecked fall B in 000000). The cloud centroid is the reliable "up". A track
+    # near the fall spot must ALSO show the cloud up -- which cloud_up already requires. Held
+    # RECOVER_S to debounce, and only when a real person is present (real_inst).
     if real_inst and cloud_up:
         if _recover_since[0] == 0.0:
             _recover_since[0] = now
         if now - _recover_since[0] >= RECOVER_S:
             _fall_latch_until[0] = 0.0
+            _last_low_xy[0] = None                 # episode discarded -> forget the fall spot
     else:
         _recover_since[0] = 0.0
     if now < _fall_latch_until[0]:
         fall_state = "fall"
+    # fused fall probability P (dashboard '跌倒概率 P 融合'): TI MLP + the 5 scene features.
+    _mlp_p = (fw.falling_prob if (fw is not None and fw.valid) else 0.0)
+    _rr_ok = bool(cube_ev and cube_ev.get("rr"))
+    _geom_flat = _flatness(prim["x0"], prim["x1"], prim["y0"], prim["y1"],
+                           prim["z0"], prim["z1"]) if prim else 0.0
+    fall_p = _fall_fuse(_mlp_p, w_down, cloud_wz_med, cloud_below_frac,
+                        _rr_ok, _geom_flat, floor_fall)
     # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
     # red-Fall can be pinned to the exact failing gate. Goes to stdout AND
     # record/fall_debug.log (so it can be read back without copy-paste). Remove once tuned.
@@ -710,7 +754,7 @@ def _scene():
                  f"hs={w_hs if w_hs is None else round(w_hs,2)} prim=tid{prim['tid'] if prim else '-'} "
                  f"n={prim.get('n') if prim else '-'} pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
                  f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},age={now-cr['t']:.1f}s) "
-                 f"run={_cleaner.run} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}")
+                 f"run={_cleaner.run} P={fall_p} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}")
         print(_line, flush=True)
         try:
             with open(os.path.join(os.path.dirname(__file__), "..", "record", "fall_debug.log"), "a") as _fh:
@@ -726,13 +770,18 @@ def _scene():
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
-            "fall_p": dec["confidence"], "primary_pose": primary_pose,
+            "fall_p": fall_p, "primary_pose": primary_pose,
             "fall_ev": {"window": bool(w_down), "real": real_person, "win_src": w_src,
                         "h_s": (round(w_hs, 2) if w_hs is not None else None),
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
                         "cube": (cube_ev is not None),
                         "rr": (cube_ev.get("rr") if cube_ev else None),
                         "floor_fall": floor_fall,
+                        # fused-P feature breakdown (for the dashboard '跌倒概率 P 融合' tooltip)
+                        "P": fall_p, "f_mlp": round(_mlp_p, 2), "f_win": int(bool(w_down)),
+                        "f_height": (None if cloud_wz_med is None else round(cloud_wz_med, 2)),
+                        "f_energy": round(cloud_below_frac, 2), "f_geom": _geom_flat,
+                        "f_rr": int(_rr_ok),
                         "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg)},
             "elev_acc_deg": ELEV_ACC_DEG,
             # cube RR (breathing from the fall cube second-check, SAME estimator as the

@@ -441,9 +441,11 @@ function drawScene(sc){
   const ev=sc.fall_ev||{};
   const evs=(ev.reason&&ev.reason.length)?ev.reason.join("+"):(ev.window?"window":"—");
   const fpp=document.getElementById("fallp");
+  // fused-P feature breakdown: MLP · window · cloud-height · below-floor energy · geometry · RR
+  const fuse=(ev.P!=null)?` 融合[mlp${ev.f_mlp} win${ev.f_win} z${ev.f_height??"–"} e${ev.f_energy} g${ev.f_geom} rr${ev.f_rr}]`:"";
   const ff=(ev.h_s!=null?` 顶Z${ev.h_s}m`:"")+(ev.rr!=null?` RR${ev.rr}`:"")
            +(ev.cube?"·cube":"")+(ev.real===false?"·鬼影":"")+(ev.cleaned?"·"+ev.cleaned:"");
-  if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}  [${evs}]${ff}` : "—");
+  if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}${fuse} [${evs}]${ff}` : "—");
   const fmark = (fsz==="none"||!fsz)?"":`  ⚠${fsz==="fall"?"FALL":"Suspected"} P=${sc.fall_p} [${evs}]`;
   st.textContent=`tracks:${(sc.boxes||[]).length}  ${poses.join("  ")||"(no track)"}  `+
     `Z:${h!=null?Math.round(h)+"cm":"—"}${fmark}  (3001点:${(sc.pc||[]).length} mount${sc.mount_cm}cm age${sc.age_s}s)`;
