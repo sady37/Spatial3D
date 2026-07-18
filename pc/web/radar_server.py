@@ -110,6 +110,30 @@ FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can
                              # body the cube-RR second-check can't lock onto. The cube still
                              # gets its ~6 s first; this is the fallback for real sustained down.
 DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting the sustain timer
+# ---- Track-INDEPENDENT floor-fall leg -------------------------------------------------
+# window/real/cube all hang on `prim` (a GTRACK box or a FloorTracker person id). A spread
+# lying body FRAGMENTS into churning orphan bits, so FloorTracker can't hold its identity
+# (id churns, person stays False) and prim=None -> the whole pipeline goes dark on a clean
+# floor fall (231000-A @2.5m: 500 pts, 100% below the floor line, 60 s -> MISSED). This leg
+# reads the AGGREGATE below-floor cloud directly, armed by a GTRACK death nearby (a person
+# went DOWN here, not walked past), and stays sticky while the below-floor blob persists --
+# so it also holds far falls (222500-mid / 231500-#2 @4.5m) through the cloud collapse that
+# drops the n>=12 real-person gate. Furniture never arms it (no one ever fell there).
+FALL_LEG_MIN_PTS = 12        # min below-floor points to call it a body (rejects standing feet)
+FALL_LEG_FRAC = 0.8          # the local region must be >=this fraction below the floor band. A
+                             # LYING body is ~0.9-1.0; a SITTER's torso is above (frac ~0.4-0.6)
+                             # so 0.8 rejects sitting/standing-passing-through, accepts lying.
+FALL_LEG_ZMED = 0.15         # AND the local region's MEDIAN world height must be below this: the
+                             # body mass is truly on the floor. FLOOR_Z=0.4 alone is knee-height
+                             # -- a STANDING/walking person at range has a big below-0.4 leg cloud
+                             # (231000 100-139s: z_med +0.2..+0.9 yet below_n 18-87) and dragged
+                             # the armed region across the room. A lying body's z_med is -0.2..-0.5.
+FALL_REGION_M = 1.6          # region radius (a lying body spreads ~1.5 m; arm + sustain gate)
+FALL_DEATH_S = 8.0           # a GTRACK track that died this recently near the blob = fell here
+FALL_EXIT_GRACE_S = 3.0      # the below-floor blob may vanish this long before the leg disarms
+_gtrack_prev = {}            # tid -> (x, y) last frame, for GTRACK-death detection
+_fall_deaths = []            # [(t, x, y)] recent GTRACK deaths (a person may have gone down)
+_fall_region = {"since": 0.0, "last": 0.0, "x": 0.0, "y": 0.0}  # sticky armed fall region
 # Lost-track RR probe: when GTRACK drops a still person's track (FloorTracker inherits it),
 # actively cubeQuery that spot to get RR -- confirms a living body (vs furniture) and shows
 # the RR for a sitting/fallen still person. WAIT 2 s first: most track losses are brief
@@ -409,6 +433,15 @@ def _scene():
                 return False
             return abs(math.hypot(cx, cy) / RANGE_STEP - _cube_result["bin"]) <= 4
         gtracks = {int(t["tid"]): (float(t["x"]), float(t["y"])) for t in tg}
+        # GTRACK-death memory for the floor-fall leg: a tid present last frame, gone now, went
+        # DOWN here (a still body GTRACK drops), unless it walked off (its cloud goes with it).
+        global _gtrack_prev, _fall_deaths
+        _fdnow = time.time()
+        for _tid, _xy in _gtrack_prev.items():
+            if _tid not in gtracks:
+                _fall_deaths.append((_fdnow, _xy[0], _xy[1]))
+        _gtrack_prev = dict(gtracks)
+        _fall_deaths = [(t, x, y) for (t, x, y) in _fall_deaths if _fdnow - t < FALL_DEATH_S]
         ftracks = _floor_tracker.update(time.time(), gtracks,
                                         [(o["cx"], o["cy"], o["n"]) for o in orphans],
                                         rr_at=_rr_at)
@@ -469,6 +502,35 @@ def _scene():
                                      daemon=True).start()
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None); _lost_probe_dry.pop(d, None)
+
+        # ---- floor-fall leg: ARM from the aggregate below-floor cloud (track-independent) ---
+        below = wz < FLOOR_Z
+        if int(below.sum()) >= FALL_LEG_MIN_PTS:
+            bx = float(_np.median(px[below])); by = float(_np.median(py[below]))  # radar-frame
+            near = ((px - bx) ** 2 + (py - by) ** 2) < FALL_REGION_M ** 2
+            reg_below = int((near & below).sum()); reg_tot = int(near.sum())
+            reg_med_z = float(_np.median(wz[near])) if reg_tot else 1.0   # local mass height
+            if (reg_below >= FALL_LEG_MIN_PTS and reg_below >= FALL_LEG_FRAC * reg_tot
+                    and reg_med_z < FALL_LEG_ZMED):
+                # a substantial, floor-DOMINATED blob. Arm ONLY if a person went DOWN here: a
+                # GTRACK track died nearby recently (a still body drops off GTRACK). NOT on a
+                # live track nearby -- a standing/sitting tracked person must never arm it, and
+                # when GTRACK holds the track the normal window/real pipeline handles it; this
+                # leg exists for exactly the prim=None case. `armed_here` = sticky sustain.
+                near_death = any(_now - dt < FALL_DEATH_S
+                                 and (dx - bx) ** 2 + (dy - by) ** 2 < FALL_REGION_M ** 2
+                                 for (dt, dx, dy) in _fall_deaths)
+                armed_here = (_fall_region["since"] > 0.0 and
+                              (bx - _fall_region["x"]) ** 2 + (by - _fall_region["y"]) ** 2
+                              < FALL_REGION_M ** 2)
+                if near_death or armed_here:
+                    if _fall_region["since"] == 0.0:
+                        _fall_region["since"] = _now
+                    _fall_region["last"] = _now
+                    if near_death:                 # (re)anchor ONLY on a fresh fall here;
+                        _fall_region["x"] = bx     # sticky sustain keeps the ORIGINAL anchor
+                        _fall_region["y"] = by     # so the region can't WALK with a person who
+                                                   # got up and moved off (the 2.5->4.6m drift).
     # ---- fall via the falldet pipeline (Module 1 window + Module 3 clean) --------------
     # Server-side reference for the on-chip Phase-3 window trigger; also a fallback until
     # the firmware window ships. MLP leg = firmware Phase 2 (absent here). Red Fall needs
@@ -513,7 +575,14 @@ def _scene():
     if real_inst:
         _real_since[0] = now
     real_person = (now - _real_since[0]) < REAL_GRACE_S     # debounced
-    down = bool(w_down and real_person)                # gated trigger
+    # floor-fall leg (armed above): disarm when the below-floor blob is gone (person got up /
+    # moved off). It is track-INDEPENDENT, so it triggers `down` even when prim=None (GTRACK
+    # dropped a still body and FloorTracker fragmented its identity) -> catches the clean floor
+    # falls the prim pipeline misses, and sustains far falls through the cloud collapse.
+    if _fall_region["since"] and (now - _fall_region["last"]) > FALL_EXIT_GRACE_S:
+        _fall_region["since"] = 0.0
+    floor_fall = _fall_region["since"] > 0.0
+    down = bool((w_down and real_person) or floor_fall)     # gated trigger (+ track-free leg)
 
     # server-triggered cube fetch: only on a REAL down, rate-limited (50% duty refresh) — not
     # every scene call. Range from the cloud GROUND wy (_fall_range_bin). GATED on: sensor is
@@ -564,8 +633,12 @@ def _scene():
     # ffrac guard: a real fall puts the cloud BELOW the floor line (high floor_frac). A
     # ~0.45 m furniture cluster (floor_frac~0.02) reads "down" via the window leg but is NOT
     # on the floor -> must never latch a permanent fall (that was the 22-minute false latch).
-    sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S and real_person
-                          and prim_ffrac >= FALL_FFRAC_MIN)
+    # floor_fall already IS a below-floor body, so it satisfies both the real-person and the
+    # ffrac guard on its own (that is the whole point -- it carries the falls where n<12 / the
+    # prim box is absent). OR it in for the sustained -> red escalation.
+    sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S
+                          and (real_person or floor_fall)
+                          and (prim_ffrac >= FALL_FFRAC_MIN or floor_fall))
     if sustained_fall and not dec["fall"]:
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
@@ -583,7 +656,7 @@ def _scene():
     if down or dec["trigger"] or cube_ev is not None:
         cr = _cube_result
         _line = (f"[fall] {fall_state:9s} down={int(down)}(w={int(w_down)}/{w_src},"
-                 f"real_inst={int(real_inst)},real={int(real_person)}) "
+                 f"real_inst={int(real_inst)},real={int(real_person)},floor={int(floor_fall)}) "
                  f"hs={w_hs if w_hs is None else round(w_hs,2)} prim=tid{prim['tid'] if prim else '-'} "
                  f"n={prim.get('n') if prim else '-'} pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
                  f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},age={now-cr['t']:.1f}s) "
@@ -605,6 +678,7 @@ def _scene():
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
                         "cube": (cube_ev is not None),
                         "rr": (cube_ev.get("rr") if cube_ev else None),
+                        "floor_fall": floor_fall,
                         "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg)},
             "elev_acc_deg": ELEV_ACC_DEG,
             # cube RR (breathing from the fall cube second-check, SAME estimator as the

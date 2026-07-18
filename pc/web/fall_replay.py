@@ -107,6 +107,8 @@ def _reset_state():
     srv._floor_pts = []
     srv._lost_since.clear(); srv._lost_query_t.clear()
     srv._probe_dry[0] = 0; srv._lost_probe_dry.clear()
+    srv._gtrack_prev = {}; srv._fall_deaths = []
+    srv._fall_region.update(since=0.0, last=0.0, x=0.0, y=0.0)
     from falldet.window import FloorMap, WindowDetector
     from falldet.clean import Cleaner
     from falldet.floor_track import FloorTracker
@@ -140,6 +142,7 @@ def run(path, mount=2.0, tilt=25.0):
             "pose": out.get("primary_pose"),
             "w_down": bool(out["fall_ev"]["window"]), "w_src": out["fall_ev"]["win_src"],
             "real": bool(out["fall_ev"]["real"]),
+            "floor_fall": bool(out["fall_ev"].get("floor_fall")),
             "down_dur": round(srv._down_since[0] and (clock.t - srv._down_since[0]) or 0.0, 1),
             "cube_rr": out["cube_rr"], "cube_str": out["cube_rr_str"],
             "reason": out["fall_ev"]["reason"],
@@ -166,8 +169,8 @@ def to_json(path, mount=2.0, tilt=25.0, step=3):
     (every `step` frames -> ~0.3 s) so the front-end can draw a fall-state strip."""
     rows, eps, meta = run(path, mount, tilt)
     tl = [{"t": r["t"], "s": r["fall_state"], "pose": r["pose"], "wd": int(r["w_down"]),
-           "ws": r["w_src"], "re": int(r["real"]), "dur": r["down_dur"],
-           "rr": r["cube_rr"], "rs": r["cube_str"]}
+           "ws": r["w_src"], "re": int(r["real"]), "ff": int(r["floor_fall"]),
+           "dur": r["down_dur"], "rr": r["cube_rr"], "rs": r["cube_str"]}
           for r in rows[::max(1, step)]]
     return {**meta,
             "episodes": [{"a": a, "b": b, "dur": round(b - a, 1),

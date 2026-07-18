@@ -564,7 +564,7 @@ function rpHover(ev){
   for(const p of cv._tl){ if(Math.abs(p.t-t)<Math.abs(best.t-t)) best=p; }
   document.getElementById("rphover").textContent=
     `t=${best.t.toFixed(1)}s · ${best.s.toUpperCase()} · pose=${best.pose||"-"} · `+
-    `w_down=${best.wd}(${best.ws}) real=${best.re} down_dur=${best.dur}s · `+
+    `w_down=${best.wd}(${best.ws}) real=${best.re} floor_fall=${best.ff??0} down_dur=${best.dur}s · `+
     `cube_rr=${best.rr??"-"}(${best.rs})`;
 }
 document.getElementById("rpbtn").addEventListener("click",runReplay);
