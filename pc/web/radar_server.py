@@ -426,9 +426,11 @@ def _scene():
                     rb = int(round(math.hypot(ftk.x, ftk.y) / RANGE_STEP))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
-                    # 150 frames (~15s): a still/lying person can afford a long integration
-                    # -> weak breathing lifted above the noise floor + fine RR (Sleepad-style).
-                    threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 150),
+                    # 60 frames (~6s): a single LONG cubeQuery (150/~15s) WEDGES the firmware
+                    # -- the sustained 320 flood over DATA UART kills it ([NO-Done] + no frames).
+                    # Long integration for a still body must come from stacking SHORT bursts
+                    # into a server-side sliding buffer (option A), not one long burst.
+                    threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60),
                                      daemon=True).start()
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None)
