@@ -435,7 +435,15 @@ def _scene():
         alive_ids = set()
         for ftk in ftracks:
             alive_ids.add(ftk.id)
-            if ftk.source == "gtrack":
+            # a LIVE GTRACK track near this floor-track = the person is TRACKED, not lost.
+            # FloorTracker fragments a spread body into churning orphan bits that briefly
+            # inherit an old tid, so a NORMALLY-tracked (even standing) person spawns phantom
+            # "inherited" floor-tracks. lost-probing those floods 320 forever -- and because
+            # the person breathes, the RR reset above keeps the dry-cap from ever stopping it
+            # -> re-wedge. So NEVER lost-probe while GTRACK still has a track nearby.
+            near_live = any((gx - ftk.x) ** 2 + (gy - ftk.y) ** 2 < 1.5 ** 2
+                            for gx, gy in gtracks.values())
+            if ftk.source == "gtrack" or near_live:
                 _lost_since.pop(ftk.id, None)                # GTRACK has it -> not lost
             elif ftk.person and ftk.source == "inherited":
                 _lost_since.setdefault(ftk.id, _now)         # mark when it became lost
