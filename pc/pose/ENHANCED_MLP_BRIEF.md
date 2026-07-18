@@ -1,18 +1,34 @@
-# Server-side ENHANCED pose/fall MLP — design brief
+# Server-side TRACK-INDEPENDENT fall detector — design brief (NO MLP)
 
-## Objective
-Build a **server-side** classifier that fuses TI's on-chip per-track pose MLP with the
-scene-level features the firmware can't see, to output **pose + fall-probability + a
-cardiac/collapse flag**, and to close the hard cases the current hand-tuned pipeline still
-struggles with (far falls, GTRACK-drop, chest-blockage half-kneel, furniture rejection,
-fast recovery). Runs in `pc/web/radar_server.py` (Python), validated by replay — NOT firmware.
+## ⭐ DECISION 2026-07-18: DROP the MLP entirely (firmware AND server-side "MLP")
+Data proved TI's on-chip pose MLP is a STRUCTURAL dead-end for falls, so fall detection uses
+NO per-track classifier — only track-INDEPENDENT scene features off the 3001 cloud + cube:
+1. **Track-gated dead-end (primary):** the MLP runs once per LIVE GTRACK track. GTRACK
+   allocates tracks from MOTION, so a person lying still is DROPPED — measured in fall_013500:
+   30 s of a 36 s lie had ZERO tracks, so the MLP never ran during the exact pose it should
+   detect. It "never sends fall" because it never gets to look.
+2. **Feature mismatch (secondary):** even the few tracked frames output Stood despite posZ=-0.13
+   (correctly low) — the on-chip raw radar-frame posZ + uncalibrated `zOffset_cm=0` are out of
+   the training distribution, so the net falls back to the majority class Stood. Calibrating
+   zOffset would fix (2) but NOT (1), so the MLP can never be the fall detector.
+Empirical: across 8 recordings / ~11,400 track-frames the firmware MLP emitted Stood=9220,
+Sat=30, unknown=2146, **Lying=0, Falling=0**; falling_prob max ever 0.247. => feature #1 below
+is a dead constant — REMOVE it (its 0.22 weight in `_fall_fuse` is dead).
 
-## Why server-side (context)
-- The firmware MLP (TLV 321) reads `falling_prob = 0` in every recording we have — it only
-  sees per-track points and isn't emitting useful fall motion. The server has the WHOLE scene.
-- Current server logic is a **hand-tuned weighted fusion** `_fall_fuse()` (radar_server.py) +
-  a track-independent `floor_fall` leg + sustained-down + a 30 s recovery cancel. It works but
-  the weights are guessed. This brief upgrades it to a **trained** model on the same features.
+## Objective (revised)
+Formalize/tune the **track-INDEPENDENT** scene-feature fall pipeline (already ~built as
+`_fall_fuse` + `floor_fall` + sustained + geometry + recovery + collapse-suspect) into a clean
+transparent scorer + pose read-out, and close the hard cases (far falls, GTRACK-drop, chest-
+blockage half-kneel, furniture rejection, fast recovery). All legs read the 3001 cloud / cube,
+NONE need a per-track box or the firmware MLP. Runs in `radar_server.py`, validated by replay.
+
+## Why (context)
+- The firmware MLP (TLV 321) is dead (see DECISION above) — do not use it, do not train a
+  replacement per-track MLP; the fall pose (lying) is exactly when there is no track.
+- Current server logic is a **hand-tuned weighted fusion** `_fall_fuse()` + the track-free
+  `floor_fall` leg + sustained-down + a 30 s recovery cancel. It works but the weights are
+  guessed; this brief tunes them (optionally with a SMALL model on the scene features only,
+  never per-track). Keep everything track-independent.
 
 ## Feature vector (per track / per fallen-region, per frame or short window)
 1. **TI MLP** — pose one-hot (Stood/Sat/Lying/Falling) + falling_prob (TLV 321).
@@ -99,10 +115,39 @@ ESCALATES — it can never clear on "no RR". `collapse_conf`: **strong** = cube 
 at the fall spot and still returned no RR (measured apnea); **weak** = we never got to measure
 (far fall / cloud collapse — a fall we can't rule out breathing on). Episode-scoped (resets on
 `CUBE_RESET_S` of quiet). Exposed top-level + in `fall_ev`.
-- **Fires**: `fall_013500` (💔 the ⭐ chest-blockage half-kneel, rr=None throughout) and
-  `fall_231000` (💔 no-RR 2.5 m GTRACK-drop far fall). **Silent** on 215500/222000/222500/
-  231500/000000 (breathing confirmed → not cardiac). Good specificity: only the 2 falls where
-  breathing was never confirmed flag, which is the intended safety-first behavior.
+- **Fires**: `fall_013500` (the ⭐ chest-blockage half-kneel, rr=None throughout) and
+  `fall_231000` (no-RR 2.5 m GTRACK-drop far fall). **Silent** on 215500/222000/222500/
+  231500/000000 (breathing confirmed → not cardiac).
+
+#### ⭐ REVISION 2026-07-18b — micro-motion living-confirm + honest two-tier (from the record/ audit)
+A furniture/empty audit of yesterday's `record/live_scene_*` (via a sub-agent) found NO
+no-person false positives (the only clean empty, `214000`, is correctly rejected; gates hold).
+But it surfaced a REAL problem: **`💔` over-fired on 4 real BREATHING people** (fall rehearsals
+`133500/143000/152000/191500`) purely because the cube never LOCKED RR — and *"no RR
+confirmed" ≠ apnea*. A decisive cube-forensics experiment settled the design:
+- The 4 rehearsals' recorded cube HAS breathing-band micro-motion (band-frac 0.11–0.28, a
+  plausible per-bin rhythm) — the estimator just couldn't lock a confident RR.
+- The true cardiac `013500 #5` and the far `231000` have **NO recorded 320 at all** in the fall
+  (genuinely UNASSESSED), not "measured silence".
+So (per the user's steer *"RR 或微动 → 是人；能测 RR 更佳，没 RR 也可接受"*):
+1. **Living-body confirm = RR-lock OR cube micro-motion** (`_fall_living`; `_rr_from_cube` now
+   returns `(rr, strength, micro, measured)`). A breathing person the RR-lock misses is still
+   confirmed living → NOT a cardiac collapse.
+2. **Honest two-tier** (`collapse_conf`): **strong 💔** = cube MEASURED the chest and found it
+   silent (no RR + no micro = genuine apnea) → the real cardiac alarm, highest priority.
+   **weak ⚠️** = cube never returned data (unassessed) → labelled "跌倒-生命体征未确认" (a red
+   FALL with breathing we couldn't check), explicitly **NOT** a cardiac claim (no-RR is accepted,
+   the fall is not downgraded).
+- Result: **zero false 💔 cardiac alarms** in all data — the 4 rehearsals + 231000 + 013500 are
+  now ⚠️ weak (vitals-unconfirmed), and 💔 strong is reserved for measured apnea (needs a
+  recording that actually captures 320 during a silent chest — a data gap to fill).
+- LIMIT (replay ceiling): the recorded 320 is SPARSE (only where the original live run queried),
+  so replay can seldom feed the micro-motion path — `191500` was the one case a burst landed on
+  recorded 320 and confirmed living. A "settled-body cube gate" was tried to steer the tiny
+  3-burst budget onto the lie but it fragmented the red on clean falls (215500 1→6) and was
+  reverted; live deployment (where `request_cube` always returns data) will exercise micro-motion
+  far more than replay can. To truly validate 💔 strong vs weak, capture a scene with continuous
+  320 through a real breath-hold/apnea lie.
 
 ### 2. Fall-ONSET event counter  (`fall_event`)  — latch-blind re-segmentation
 The 30 s display latch MERGES falls <30 s apart into one `fall_state` episode. `fall_event`

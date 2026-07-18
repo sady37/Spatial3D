@@ -112,6 +112,8 @@ def _reset_state():
     srv._fall_region.update(since=0.0, last=0.0, x=0.0, y=0.0)
     srv._recover_since[0] = 0.0
     srv._fall_had_rr[0] = False; srv._collapse_since[0] = 0.0
+    srv._fall_living[0] = False; srv._fall_measured[0] = False
+    srv._cube_result.update(micro=False, measured=False)
     srv._fall_event_n[0] = 0; srv._fall_onset_armed[0] = True; srv._down_clear_since[0] = 0.0
     from falldet.window import FloorMap, WindowDetector
     from falldet.clean import Cleaner
@@ -198,13 +200,17 @@ def replay(path, mount=2.0, tilt=25.0, per_frame=False):
     collapse_rows = [r for r in rows if r["collapse"]]
     print(f"\n独立跌倒事件数 (latch-blind onset count) = {n_event}   "
           f"[真值对照见 ENHANCED_MLP_BRIEF 测试矩阵]")
-    if collapse_rows:
+    strong_rows = [r for r in collapse_rows if r["collapse_conf"] == "strong"]
+    if strong_rows:
+        c0, c1 = strong_rows[0]["t"], strong_rows[-1]["t"]
+        print(f"💔 心脏/胸梗疑似 STRONG (cube 测到胸腔静默: 无 RR + 无微动 = 真-无呼吸): "
+              f"{c0:.1f}-{c1:.1f}s — 最高优先，升级报警")
+    if collapse_rows and not strong_rows:
         c0, c1 = collapse_rows[0]["t"], collapse_rows[-1]["t"]
-        conf = collapse_rows[-1]["collapse_conf"]
-        print(f"⭐ 心脏/塌陷急症 collapse-suspect: {c0:.1f}-{c1:.1f}s ({conf}) "
-              f"— 倒地+静止+无RR，需升级报警")
-    else:
-        print("⭐ collapse-suspect: 无 (所有跌倒均确认呼吸 RR 或未达持续阈值)")
+        print(f"⚠️  跌倒-生命体征未确认 WEAK (未能测到呼吸/微动，非心脏判定): "
+              f"{c0:.1f}-{c1:.1f}s — 已是红色跌倒，建议核实呼吸")
+    if not collapse_rows:
+        print("✓  无 collapse: 所有跌倒都确认了活体(RR 或微动)或未达持续阈值")
 
     print("\n每 3s: fall_state | pose | w_down(src) real down_dur cube_rr(str)")
     seen = set()
@@ -214,7 +220,8 @@ def replay(path, mount=2.0, tilt=25.0, per_frame=False):
         seen.add(s3)
         rr = "-" if r["cube_rr"] in (None, 0) else f"{r['cube_rr']}"
         flag = {"fall": "🔴FALL", "suspected": "🟡susp", "none": "  ·  "}.get(r["fall_state"], r["fall_state"])
-        col = "💔" if r["collapse"] else "  "
+        col = ("💔" if (r["collapse"] and r["collapse_conf"] == "strong")
+               else ("⚠️" if r["collapse"] else "  "))
         print(f"  {r['t']:6.1f}s {flag:7s}{col} {str(r['pose'] or '-'):5s} "
               f"w={int(r['w_down'])}({r['w_src']}) real={int(r['real'])} "
               f"dur={r['down_dur']:4.0f} rr={rr}({r['cube_str']}) ev={r['event']}")

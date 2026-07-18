@@ -141,8 +141,14 @@ DOWN_GAP_S = 2.5             # `down` may drop out this long without resetting t
 # confirmed on this episode ESCALATES to collapse-suspect -- it must never clear on "no RR".
 # fall_013500 #5 (chest-blockage half-kneel, rr=None throughout) is the gold positive case; a
 # fall where the cube DID lock RR (e.g. 222500 #1) is a breathing fall, NOT collapse-suspect.
-COLLAPSE_SUSTAIN_S = 12.0    # immobile-down this long with no confirmed RR -> collapse-suspect
+COLLAPSE_SUSTAIN_S = 12.0    # immobile-down this long with no living vital sign -> collapse-suspect
 _fall_had_rr = [False]       # any confirmed cube RR seen during the CURRENT fall episode
+_fall_living = [False]       # ⭐ living body confirmed this episode by RR *OR* micro-motion. This
+                             # is the person-vs-object AND the "not a cardiac collapse" signal: a
+                             # breathing person whose RR the estimator couldn't LOCK still shows
+                             # chest micro-motion, so it must NOT escalate to 💔 (the 4 rehearsals).
+_fall_measured = [False]     # cube actually RETURNED usable data this episode (vs never measured):
+                             # separates measured-but-silent (strong apnea) from unassessed (weak).
 _collapse_since = [0.0]      # wall time collapse-suspect first latched this episode (0 = none)
 # ---- Fall-ONSET event counter (distinct events; re-segments latch-merged falls) --------
 # The 30 s display latch MERGES two falls <30 s apart into ONE fall_state episode, so a person
@@ -194,7 +200,8 @@ _lost_since = {}            # floor-track id -> wall time it became inherited (l
 _lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall time
 
 
-_cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None}  # latest cube 2nd-check
+_cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None,
+                "micro": False, "measured": False}  # latest cube 2nd-check (+micro-motion/measured)
 # FloorTracker: gives a GTRACK-dropped STILL body (fallen OR just sitting motionless) a
 # continuous track_id from its point cloud (inherits the lost tid; furniture rejected via
 # no-history + no-RR). death_grace_s=30 because a sitting person's GTRACK track can flicker
@@ -211,18 +218,20 @@ def _rr_from_cube(entries, fps=10.0):
     to a mm-displacement channel; estimate_rr picks the SQI-top bins and takes the median
     breathing-band peak. Breathing 'present' (the fall gate) = the top bins AGREE on the
     RR (low spread); a dropped object gives scattered per-bin peaks. Returns
-    (rr_bpm | None, strength 0..1)."""
+    (rr_bpm | None, strength 0..1, micro-motion present bool, measured bool). `micro` = living
+    chest micro-motion even when RR won't LOCK (person confirmed); `measured` = cube returned
+    usable data (to separate measured-silence=apnea from unassessed=far/no-data)."""
     import numpy as _np
     from collections import defaultdict
     from bcg_vitals import demod_channels, estimate_rr
     if not entries:
-        return None, 0.0
+        return None, 0.0, False, False            # cube returned nothing -> unassessed
     byb = defaultdict(list)
     for e in entries:
         byb[int(e.range_bin)].append(_np.asarray(e.vec, complex))   # 16-ant vec per frame
     bins = [b for b, s in byb.items() if len(s) >= 12]
     if not bins:
-        return None, 0.0
+        return None, 0.0, False, False            # too few frames per bin -> unassessed
     T = min(len(byb[b]) for b in bins)                  # align lengths across bins
     C = [_np.stack(byb[b][:T]) for b in bins]           # C[i] = (T, nAnt) per bin
     chans = demod_channels(C, bins)                     # (nbin, T) mm displacement
@@ -231,9 +240,26 @@ def _rr_from_cube(entries, fps=10.0):
     # SNR + resolution; interp removes the quantization at any length.
     rr, _f0, spread, per_bin = estimate_rr(chans, fps, interp=True)
     if rr is None or not per_bin:
-        return None, 0.0
+        # cube returned usable bins but the estimator found no rhythm at all -> measured, silent
+        return None, 0.0, False, True
     strength = max(0.0, 1.0 - spread / 12.0)            # bins agree (low spread) -> confident
-    return (round(rr, 1) if strength > 0.2 else None), round(strength, 2)
+    # ⭐ MICRO-MOTION / living-body confirm -- SOFTER than the RR lock. A living body's chest has
+    # breathing-band energy even when the RR estimator can't AGREE across bins (few bins / short
+    # burst / harmonic). Proven on the 4 breathing rehearsals the strict RR gate missed: they
+    # carry band-frac 0.11-0.28 and a plausible per-bin rhythm (spread<15) though strength<0.2.
+    # A STATIC object (furniture) has no periodic chest energy -> band-frac ~noise floor. So this
+    # says "it's a PERSON, not an object" without needing a confident RR. See fall-modular-pipeline.
+    import math as _m
+    band_fracs = []
+    for ch in chans:
+        c = ch - ch.mean()
+        sp = _np.abs(_np.fft.rfft(c * _np.hanning(len(c)))) ** 2
+        fq = _np.fft.rfftfreq(len(c), 1.0 / fps)
+        tot = float(sp[fq > 0.05].sum())
+        band_fracs.append(float(sp[(fq >= 0.15) & (fq <= 0.5)].sum()) / max(tot, 1e-9))
+    band_frac = float(_np.median(band_fracs)) if band_fracs else 0.0
+    micro = bool(band_frac > 0.10 or spread < 15.0)     # living chest micro-motion present
+    return (round(rr, 1) if strength > 0.2 else None), round(strength, 2), micro, True
 
 
 def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
@@ -246,9 +272,10 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
         if hasattr(_src, "request_cube"):
             ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=3,
                                      timeout=n_frames / 10.0 + 3.0)
-            rr, strength = _rr_from_cube(ents)
+            rr, strength, micro, measured = _rr_from_cube(ents)
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
-                                floor_frac=round(float(floor_frac), 2), bin=int(range_bin))
+                                floor_frac=round(float(floor_frac), 2), bin=int(range_bin),
+                                micro=micro, measured=measured)
     except Exception:
         pass
     finally:
@@ -374,7 +401,8 @@ def _scene():
     # (no active fall) for CUBE_RESET_S -> the next distinct fall gets its own MAX_CUBE_BURSTS.
     if time.time() - _cube_last_active[0] > CUBE_RESET_S:
         _cube_episode[0] = 0
-        _fall_had_rr[0] = False       # new physical fall -> re-assess breathing from scratch
+        _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
+        _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
     pts_raw = sc.get("points")
     tgts = sc.get("targets") or []
@@ -769,27 +797,37 @@ def _scene():
                            prim["z0"], prim["z1"]) if prim else 0.0
     fall_p = _fall_fuse(_mlp_p, w_down, cloud_wz_med, cloud_below_frac,
                         _rr_ok, _geom_flat, floor_fall)
-    # ---- ⭐ Cardiac / collapse-suspect flag + fall-onset event counter -----------------
-    # episode-level breathing memory: was RR EVER confirmed while this fall was active? (once
-    # true it sticks until the episode resets on CUBE_RESET_S of quiet, at the top of _scene).
+    # ---- ⭐ Living-body confirm + cardiac/collapse-suspect + fall-onset counter --------
+    # episode-level VITALS memory (sticks until CUBE_RESET_S quiet resets it at the top of
+    # _scene). living = RR locked OR cube micro-motion present -> a PERSON is here and ALIVE, so
+    # this is NOT a cardiac collapse (breathing rehearsals carry micro-motion the RR lock misses).
+    # measured = the cube actually returned usable data (to tell measured-silence from unassessed).
+    _cube_fresh = now - _cube_result["t"] < 12.0
+    _micro = bool(_cube_fresh and _cube_result.get("micro"))
     if _rr_ok:
         _fall_had_rr[0] = True
+    if _rr_ok or _micro:
+        _fall_living[0] = True
+    if _cube_fresh and _cube_result.get("measured"):
+        _fall_measured[0] = True
     # fallen geometry = on the floor (floor_fall), lying flat, a folded/half-kneel body (mid
     # geom_flat), OR a below-floor mass. This is what separates a collapse from a crouch.
     fallen_geom = bool(floor_fall or primary_pose == "LIE"
                        or cloud_below_frac >= 0.5 or _geom_flat >= 0.55)
-    # collapse-suspect: a SUSTAINED red Fall, fallen geometry, and breathing NEVER confirmed on
-    # this episode. No-RR here is the SIGNAL (chest/cardiac), so we ESCALATE, never clear.
+    # collapse-suspect: a SUSTAINED red Fall, fallen geometry, and NO living vital sign confirmed
+    # this episode -- neither RR nor micro-motion. Per the design (no-RR is acceptable, a fall is
+    # still a fall) this is the escalation, NOT a downgrade: we can't confirm the person is alive.
+    # Gated on `_fall_living` (not just RR) so a breathing person the RR lock missed does NOT
+    # falsely read as a cardiac collapse -- that was the 4-rehearsal 💔 over-fire.
     collapse_suspect = bool(fall_state == "fall" and down_dur >= COLLAPSE_SUSTAIN_S
-                            and fallen_geom and not _fall_had_rr[0])
-    if collapse_suspect:
-        if _collapse_since[0] == 0.0:
-            _collapse_since[0] = now
-    # collapse-suspect confidence: STRONG once cube bursts were spent probing the fall spot and
-    # still returned no RR (measured apnea, not merely unassessed); WEAK when we never got to
-    # measure (far fall / cloud collapse -- a fall we simply can't rule out breathing on).
-    collapse_conf = ("strong" if (collapse_suspect and _cube_episode[0] > 0)
-                     else ("weak" if collapse_suspect else None))
+                            and fallen_geom and not _fall_living[0])
+    if collapse_suspect and _collapse_since[0] == 0.0:
+        _collapse_since[0] = now
+    # confidence: STRONG only when the cube MEASURED the chest and found it silent (no RR, no
+    # micro-motion -- genuine apnea signature); WEAK when the cube never returned data (far fall /
+    # cloud collapse -- an unassessed fall we still alarm on but can't call apnea).
+    collapse_conf = (None if not collapse_suspect
+                     else ("strong" if _fall_measured[0] else "weak"))
 
     # fall-onset event count (PRE-latch, so latch-merged falls still separate). Count +1 on the
     # first red trigger of an episode, then DISARM. Re-arm only after a genuine RECOVERY between
@@ -839,7 +877,7 @@ def _scene():
             # ⭐ cardiac/collapse-suspect (fallen + immobile + no confirmed breathing) and the
             # distinct-event count (latch-blind, separates falls the 30 s hold merges).
             "collapse_suspect": collapse_suspect, "collapse_conf": collapse_conf,
-            "fall_event": _fall_event_n[0],
+            "living_confirmed": _fall_living[0], "fall_event": _fall_event_n[0],
             "fall_ev": {"window": bool(w_down), "real": real_person, "win_src": w_src,
                         "h_s": (round(w_hs, 2) if w_hs is not None else None),
                         "reason": dec["reason"], "cleaned": dec["cleaned"],
@@ -854,7 +892,9 @@ def _scene():
                         "floor_frac": prim_ffrac, "floor_cells": len(_floor.hg),
                         # ⭐ collapse + full feature vector (for scene_features.py training set)
                         "collapse": collapse_suspect, "collapse_conf": collapse_conf,
-                        "had_rr": _fall_had_rr[0], "event": _fall_event_n[0],
+                        "had_rr": _fall_had_rr[0], "living": _fall_living[0],
+                        "micro": _micro, "measured": _fall_measured[0],
+                        "event": _fall_event_n[0],
                         "down": bool(down), "down_dur": round(down_dur, 1),
                         "sustained": bool(sustained_fall), "pose": primary_pose,
                         "prim_n": (int(prim.get("n", 0)) if prim else 0),
