@@ -109,6 +109,7 @@ def _reset_state():
     srv._probe_dry[0] = 0; srv._lost_probe_dry.clear()
     srv._gtrack_prev = {}; srv._fall_deaths = []
     srv._fall_region.update(since=0.0, last=0.0, x=0.0, y=0.0)
+    srv._recover_since[0] = 0.0
     from falldet.window import FloorMap, WindowDetector
     from falldet.clean import Cleaner
     from falldet.floor_track import FloorTracker

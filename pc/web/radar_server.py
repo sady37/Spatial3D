@@ -102,7 +102,16 @@ REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
 FALL_HOLD_S = 30.0           # keep showing red Fall this long after the last confirmation
                              # (a caregiver must SEE it; it must not clear when the person
-                             # stirs/gets up). Cleared by /api/fall/reset.
+                             # stirs/gets up). Cleared by /api/fall/reset or a clear recovery.
+_recover_since = [0.0]       # wall time the person has been continuously upright & recovered
+RECOVER_S = 2.0              # a CLEAR recovery this long CLEARS the latch early: a tracked real
+                             # person whose WHOLE-cloud median height is up (RECOVER_ZMED). Uses
+                             # the robust cloud centroid, NOT the per-box pose/ffrac -- those
+                             # thrash as the walking-away body FRAGMENTS (000000: ffrac 0<->1,
+                             # pose SIT/STAND/LIE flicker, a stray fragment even re-latched the
+                             # red). The centroid stays ~+0.7 m once up. Only clears when up.
+RECOVER_ZMED = 0.4           # whole-cloud median world height above this = the mass is UP (a
+                             # lying body is -0.2..-0.5; standing/sitting is +0.5..+0.9).
 _down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
 _down_last = [0.0]           # last wall time `down` was true (to bridge brief flicker gaps)
 FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can't get up) ->
@@ -348,6 +357,7 @@ def _scene():
     # track index (for per-track colour). Points not near ANY track (stray/background
     # discrete points) are DROPPED — not shown, not boxed.
     boxes = []; pc_pts = []
+    cloud_wz_med = None          # robust whole-cloud median world height (recovery / up signal)
     pcx = sc.get("pc_xyz")
     # NOTE: no "and tg" here -- the block MUST run even with zero GTRACK tracks, because a
     # fallen still body is exactly when GTRACK drops every track yet the 3001 cloud persists.
@@ -365,6 +375,8 @@ def _scene():
             nn = cKDTree(P).query(P, k=2)[0][:, 1]
             keep = nn <= 5.0 * float(nn.mean())
             px, py, wy, wz, P = px[keep], py[keep], wy[keep], wz[keep], P[keep]
+        if len(wz):
+            cloud_wz_med = float(_np.median(wz))       # robust up/down signal (all points)
         # CLUSTER by connectivity: points closer than EPS chain into one cluster; a gap
         # bigger than EPS (e.g. two people ~1 m apart) splits them into separate boxes.
         EPS = 0.4
@@ -657,9 +669,22 @@ def _scene():
 
     # LATCH a confirmed red Fall so it stays visible on the dashboard for FALL_HOLD_S even
     # after the person stirs/gets up (a ~6 s red that clears the instant they move is easy
-    # to miss). Cleared by GET /api/fall/reset.
-    if dec["fall"] or sustained_fall:
+    # to miss). Cleared by GET /api/fall/reset or a sustained clear recovery below.
+    # `cloud_up` = the WHOLE-cloud centroid is up (robust to the per-box fragmentation that
+    # thrashes pose/ffrac as a body walks away). Don't RE-LATCH on a stray low fragment while
+    # the mass is clearly up -- that was extending the red long after the person got up.
+    cloud_up = cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED
+    if (dec["fall"] or sustained_fall) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
+    # RECOVERY clears the latch early: a tracked real person whose cloud centroid is up, held
+    # RECOVER_S -> they clearly got up and moved on. A still-fallen body's centroid stays low.
+    if real_inst and cloud_up:
+        if _recover_since[0] == 0.0:
+            _recover_since[0] = now
+        if now - _recover_since[0] >= RECOVER_S:
+            _fall_latch_until[0] = 0.0
+    else:
+        _recover_since[0] = 0.0
     if now < _fall_latch_until[0]:
         fall_state = "fall"
     # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
