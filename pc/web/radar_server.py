@@ -134,6 +134,11 @@ CANCEL_R = 0.5               # 30 s monitor: if a GTRACK track stands UP within 
                              # emergency. Faster + more specific than the cloud-centroid clear.
 _last_low_xy = [None]        # radar-frame (x, y) of the most recent below-floor cloud mass
 _down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
+_lying_since = [0.0]         # wall time the ExtraMLP lying_state has been continuously true
+_lying_last = [0.0]          # last time lying_state was true (bridge brief flicker gaps)
+LYING_SUSTAIN_S = 3.0        # lying_state (cloud-height) held this long (real body) -> red. Sustain
+                             # filters the start-transient + dynamic-transition flicker seen on falls.
+LYING_GAP_S = 2.0            # bridge a lying-flag dropout this long before resetting the sustain
 _down_last = [0.0]           # last wall time `down` was true (to bridge brief flicker gaps)
 FALL_SUSTAIN_S = 10.0        # sustained window-down this long (real person, can't get up) ->
                              # red Fall EVEN without cube RR. Catches a kid / weak-breathing
@@ -178,6 +183,15 @@ _down_clear_since = [0.0]    # wall time raw `down` has been continuously clear 
 # went DOWN here, not walked past), and stays sticky while the below-floor blob persists --
 # so it also holds far falls (222500-mid / 231500-#2 @4.5m) through the cloud collapse that
 # drops the n>=12 real-person gate. Furniture never arms it (no one ever fell there).
+# ⭐ ExtraMLP STATE classifier (2026-07-19, POC-validated 94% on 21 near/mid/far posture samples):
+# "is there a person LYING on the floor here" from the 3001 cloud HEIGHT of a box -- the box's z1
+# (95th-pct world-z = robust "top of body", == the validated `hi2`) below LYING_TOP_Z AND floor_frac
+# high. This RESOLVES the far-SIT trap (track wz reads +0.09 = looks lying via elevation bias, but
+# the 3001 z1 stays ~1.7 = upright) -> use the CLOUD height, NOT track-Z, NOT RR (RR is flat across
+# lie/upright + dies on prone/perpendicular). Furniture-robust because 3001 is the micro-motion cloud.
+LYING_TOP_Z = 0.5            # box top-of-body (z1, 95th-pct world-z) below this = on the floor
+LYING_FFRAC = 0.7           # AND this fraction of the box cloud below the floor band
+LYING_MIN_N = 10            # AND a real body (enough 3001 points)
 FALL_LEG_MIN_PTS = 12        # min below-floor points to call it a body (rejects standing feet)
 FALL_CLUSTER_MIN_N = 8       # per-cluster path: a floor-DOMINATED cluster this small still counts
                              # (a FAR faller collapses to <12 pts but is ~100% below floor). The
@@ -568,6 +582,10 @@ def _scene():
         for b in bytid.values():                          # per TRACK (merged whole body)
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
             b["floor_frac"] = round(b.pop("_below") / max(b["n"], 1), 2)   # 3001 cloud floor-band fraction
+            # ⭐ ExtraMLP STATE classifier: person LYING here = cloud top-of-body (z1) low AND
+            # floor-dominated AND a real body. Cloud-height based (robust to the track-Z far bias).
+            b["lying"] = bool(b["z1"] < LYING_TOP_Z and b["floor_frac"] >= LYING_FFRAC
+                              and b["n"] >= LYING_MIN_N)
             boxes.append(b)
 
         # ---- FloorTracker: a fallen body GTRACK dropped keeps a CONTINUOUS id ----------
@@ -606,6 +624,8 @@ def _scene():
                       "y0": o["y0"], "y1": o["y1"], "z0": o["z0"], "z1": o["z1"], "n": o["n"],
                       "floor_frac": round(o["below"] / max(o["n"], 1), 2), "floor_src": ftk.source}
                 fb["pose"] = _pose_of(fb["x0"], fb["x1"], fb["y0"], fb["y1"], fb["z0"], fb["z1"])
+                fb["lying"] = bool(fb["z1"] < LYING_TOP_Z and fb["floor_frac"] >= LYING_FFRAC
+                                   and fb["n"] >= LYING_MIN_N)          # state classifier (floor box)
                 boxes.append(fb)
                 boxed.add(ftk.id)
 
@@ -730,6 +750,10 @@ def _scene():
         (max(boxes, key=lambda b: b["n"]) if boxes else None)
     primary_pose = prim["pose"] if prim else None
     prim_ffrac = float(prim.get("floor_frac", 0.0)) if prim else 0.0
+    # ⭐ ExtraMLP STATE classifier verdict: is ANY real in-room body LYING on the floor (cloud-height)?
+    lying_box = next((b for b in boxes if b.get("lying")
+                      and abs((b["x0"] + b["x1"]) / 2.0) < 3.5 and b.get("y1", 9) < 5.5), None)
+    lying_state = lying_box is not None
 
     # rolling floor calibration H_g(x,y) from the scene cloud (world x, wy, wz)
     if pc_pts:
@@ -829,6 +853,17 @@ def _scene():
     sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S
                           and (real_person or floor_fall)
                           and (prim_ffrac >= FALL_FFRAC_MIN or floor_fall))
+    # ExtraMLP STATE classifier lying sustain (computed for inspection/output; NOT a standalone red
+    # path -- per-frame lying_state is too noisy on DYNAMIC recordings [fragmentation flicker] to red
+    # on its own; it blew up the event count. It will land as a CONFIRMATION of an existing trigger /
+    # a drop-in for the floor_fall med_wz gate, once the ambiguity sweep informs the gating.)
+    if lying_state:
+        if _lying_since[0] == 0.0:
+            _lying_since[0] = now
+        _lying_last[0] = now
+    elif _lying_since[0] and (now - _lying_last[0]) > LYING_GAP_S:
+        _lying_since[0] = 0.0
+    lying_confirmed = bool(_lying_since[0] and (now - _lying_since[0]) >= LYING_SUSTAIN_S)
     if sustained_fall and not dec["fall"]:
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
@@ -943,6 +978,7 @@ def _scene():
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
             "fall_p": fall_p, "primary_pose": primary_pose,
+            "lying_state": lying_state,          # ⭐ ExtraMLP state classifier: person lying on floor?
             # ⭐ cardiac/collapse-suspect (fallen + immobile + no confirmed breathing) and the
             # distinct-event count (latch-blind, separates falls the 30 s hold merges).
             "collapse_suspect": collapse_suspect, "collapse_conf": collapse_conf,

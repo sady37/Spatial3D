@@ -79,6 +79,32 @@ def feats_3001(d, t0, t1, bin_b):
                 micro=round(micro, 2))
 
 
+def feats_temporal(d, tq, bin_b, back=6.0):
+    """Cloud-height TRAJECTORY in [tq-back, tq]: per-frame median world-z near the bin, then
+    the peak DROP-RATE (most negative dH/dt) and the total height range. A fresh collapse ->
+    strong negative dH/dt; a held/static pose -> ~0."""
+    ts = d["ts"]; pf = d["p_frame"]; pxyz = d["pc_xyz"]
+    fis = np.where((ts >= tq - back) & (ts <= tq))[0]
+    traj_t, traj_h = [], []
+    for fi in fis:
+        m = pf == fi
+        if m.sum() < 3:
+            continue
+        pts = pxyz[m]; py, pz = pts[:, 1], pts[:, 2]
+        wz = MOUNT + pz * math.cos(TH) - py * math.sin(TH)
+        wy = py * math.cos(TH) + pz * math.sin(TH)
+        near = np.abs(wy - bin_b * STEP) < 0.6
+        if near.sum() < 3:
+            continue
+        traj_t.append(float(ts[fi])); traj_h.append(float(np.median(wz[near])))
+    if len(traj_h) < 3:
+        return dict(drop_rate=None, h_range=None, n_traj=len(traj_h))
+    tt, hh = np.array(traj_t), np.array(traj_h)
+    dh = np.diff(hh); dt = np.clip(np.diff(tt), 0.05, None)
+    return dict(drop_rate=round(float(np.min(dh / dt)), 2),    # most negative slope (m/s)
+                h_range=round(float(hh.max() - hh.min()), 3), n_traj=len(hh))
+
+
 def feats_cube(d, t0, t1, bin_b, hw=3):
     """Cube slow-time features at bin +-hw over [t0,t1]: per-bin ant0 FFT RR + energy."""
     if "e_frame" not in d.files:
@@ -134,11 +160,12 @@ def main():
         d = np.load(fn)
         f3 = feats_3001(d, t - 2, t + WIN - 2, b)
         fc = feats_cube(d, t - 2, t + WIN - 2, b)
-        rec = dict(query_t=t, label=lab, y=y, cls=cls, bin=b, chunk=os.path.basename(fn), **f3, **fc)
+        ft = feats_temporal(d, t, b)
+        rec = dict(query_t=t, label=lab, y=y, cls=cls, bin=b, chunk=os.path.basename(fn), **f3, **fc, **ft)
         out.append(rec)
-        print(f"{r.get('query_hms','?'):9s} {lab[:30]:30s} {y:<2d} {b:<4d} | {os.path.basename(fn):28s} "
-              f"{str(f3['n3001']):5s} {str(f3['hi2']):6s} {str(f3['floorfrac']):5s} {str(f3['micro']):5s} | "
-              f"{str(fc['ncube']):5s} {str(fc['rr']):5s} {str(fc['rr_str']):5s}")
+        print(f"{r.get('query_hms','?'):9s} {lab[:30]:30s} {y:<2d} {b:<4d} | "
+              f"hi2={str(f3['hi2']):6s} floor={str(f3['floorfrac']):5s} | "
+              f"drop_rate={str(ft['drop_rate']):6s} h_range={str(ft['h_range']):5s} n={ft['n_traj']}")
     # save
     if out:
         keys = list(out[0].keys())
