@@ -1,0 +1,14 @@
+# 6844 point-centroid pose-MLP training set (auto-labelled from cloud geometry, mount2.0/tilt25)
+# features = firmware poseBuildFrame (gate 0.75m, top-5 z, centroid cz, ring-diff velZ); snr=0 (no per-point snr in npz)
+# labels: Falling=world drop-rate<-1.5m/s | Stood=wz>0.6 | Sat=0.15<wz<=0.6 | Lying=wz<=0.15
+# run: python3 pose/train_6844.py $(cat pose/TRAINSET_6844.txt | grep -v '^#')
+case/fall_215500.npz
+case/fall_222000.npz
+case/fall_222500.npz
+case/fall_231000.npz
+case/fall_231500.npz
+case/fall_000000.npz
+case/fall_013500.npz
+case/fall_172500.npz
+case/fall_213500.npz
+case/fall_170000.npz
