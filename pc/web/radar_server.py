@@ -9,6 +9,7 @@ algorithm in radar_pipeline.py and this file is unchanged.
 from __future__ import annotations
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -22,6 +23,35 @@ from radar_source import make_source
 from falldet.window import FloorMap, WindowDetector
 from falldet.clean import Cleaner
 from falldet.floor_track import FloorTracker
+
+
+# --- audible fall tier (verification aid): 1 beep on SUSPECTED, 3 beeps on a CONFIRMED fall.
+# Toggle with FALL_BEEP=0. Runs in a daemon thread so the sequential playback never stalls
+# _scene(). macOS `afplay` (short Tink so N beeps stay countable); terminal-bell fallback over
+# SSH / Linux.
+_FALL_BEEP = os.environ.get("FALL_BEEP", "1") != "0"
+_BEEP_SND = "/System/Library/Sounds/Tink.aiff"
+
+
+def _beep(n=1):
+    if not _FALL_BEEP:
+        return
+    def _run():
+        for _ in range(n):
+            try:
+                subprocess.run(["afplay", _BEEP_SND],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                try:
+                    sys.stdout.write("\a")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            time.sleep(0.12)                       # gap so the beeps are countable
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_beep_last_state = [""]      # last fall_state we sounded on (rising-edge detect for SUSPECTED)
 
 WIN_S = 20.0            # analysis window (user 2026-07-14, per sleepad validation 20-30s) —
                         # shorter window = faster real-time response to holds / person leaving
@@ -954,6 +984,12 @@ def _scene():
     if red_trigger and _fall_onset_armed[0]:
         _fall_event_n[0] += 1
         _fall_onset_armed[0] = False
+        _beep(3)                                  # ⭐ CONFIRMED fall -> 3 beeps, once per distinct fall
+    # SUSPECTED (pre-confirm) -> 1 beep on the rising edge only (not every frame). A suspected that
+    # escalates to a confirmed fall gives 1 beep then 3 -- the audible escalation is intentional.
+    if fall_state == "suspected" and _beep_last_state[0] != "suspected":
+        _beep(1)
+    _beep_last_state[0] = fall_state
     if down:
         _down_clear_since[0] = 0.0
     elif cloud_up:                                # person genuinely upright (mass risen)
