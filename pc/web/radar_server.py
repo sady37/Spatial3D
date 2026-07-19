@@ -105,6 +105,14 @@ _cube_episode = [0]          # cube bursts fired in the CURRENT physical fall ep
 _cube_last_active = [0.0]    # last wall time a fall was active (down / floor-fall / latched)
 CUBE_RESET_S = 5.0           # after this long with NO active fall (person up & gone), the cube
                              # episode budget resets -> the next distinct fall gets its own bursts
+# ⭐ 3001-FIRST tiering emulated by DELAY (user 2026-07-18b): the deployed product bursts 18 s of
+# 3001 (cheap micro-motion/living confirm) BEFORE the bandwidth-heavy cube. In the dev prototype
+# 3001 streams continuously, so we get the SAME data ordering for free by just holding the cube
+# query CUBE_DELAY_S after the episode's trigger: 0-18 s the living gate = the 3001 below-floor
+# cloud (floor_fall, inherently micro-motion-keyed) + sustained-down -> red WITHOUT cube; at 18 s
+# the cube adds RR/floor-energy (tier 2) and gives the server ExtraMLP its cube features.
+CUBE_DELAY_S = 18.0          # hold the episode's FIRST cubeQuery this long after the trigger (3001 first)
+_cube_episode_t0 = [0.0]     # wall time the current cube episode's trigger fired (0 = no episode)
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
@@ -171,6 +179,9 @@ _down_clear_since = [0.0]    # wall time raw `down` has been continuously clear 
 # so it also holds far falls (222500-mid / 231500-#2 @4.5m) through the cloud collapse that
 # drops the n>=12 real-person gate. Furniture never arms it (no one ever fell there).
 FALL_LEG_MIN_PTS = 12        # min below-floor points to call it a body (rejects standing feet)
+FALL_CLUSTER_MIN_N = 8       # per-cluster path: a floor-DOMINATED cluster this small still counts
+                             # (a FAR faller collapses to <12 pts but is ~100% below floor). The
+                             # strict floor_frac + med_wz gates below keep noise out at low n.
 FALL_LEG_FRAC = 0.8          # the local region must be >=this fraction below the floor band. A
                              # LYING body is ~0.9-1.0; a SITTER's torso is above (frac ~0.4-0.6)
                              # so 0.8 rejects sitting/standing-passing-through, accepts lying.
@@ -190,6 +201,8 @@ FALL_EXIT_GRACE_S = 3.0      # the below-floor blob may vanish this long before 
 _gtrack_prev = {}            # tid -> (x, y) last frame, for GTRACK-death detection
 _fall_deaths = []            # [(t, x, y)] recent GTRACK deaths (a person may have gone down)
 _fall_region = {"since": 0.0, "last": 0.0, "x": 0.0, "y": 0.0}  # sticky armed fall region
+_fall_anchor = [None]        # world GROUND range (wy) of the selected fallen cluster -> cube target
+                             # (per-cluster selection; None -> fall back to aggregate _fall_range_bin)
 # Lost-track RR probe: when GTRACK drops a still person's track (FloorTracker inherits it),
 # actively cubeQuery that spot to get RR -- confirms a living body (vs furniture) and shows
 # the RR for a sitting/fallen still person. WAIT 2 s first: most track losses are brief
@@ -198,6 +211,10 @@ LOST_WAIT_S = 2.0            # a track must stay lost this long (not a flicker) 
 LOST_QUERY_REFRESH_S = 12.0 # min seconds between lost-probe cubeQuery bursts per track (50% duty)
 _lost_since = {}            # floor-track id -> wall time it became inherited (lost); cleared on re-acquire
 _lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall time
+# NOTE: the z-DESCENT / windowed-2nd-highest-z signal lives ON-CHIP, not here -- the deployed
+# server (ESP32-C5 link) has no continuous point cloud to compute it. Firmware Phase 2 (MLP,
+# POINT-CENTROID velZ -> Falling) + Phase 3 (window leg, 2nd-highest world-z sustained-down,
+# TLV 321) already emit the descent/down TRIGGER; the server only does the cube 2nd-check.
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None,
@@ -289,8 +306,15 @@ def _fall_range_bin(sc):
     fires at the ground-projected range, and we compute it straight from the cloud —
     track-INDEPENDENT and ALWAYS computable (this is what fixes the recent-320-bin bootstrap
     deadlock: a fall with no prior 320 — e.g. 235000 — now still gets a valid query range,
-    so cubeQuery fires and bootstraps 320). Returns None only if there is no cloud."""
+    so cubeQuery fires and bootstraps 320). Returns None only if there is no cloud.
+
+    Multi-person: PREFER the per-cluster fall anchor (`_fall_anchor`, the ground range of the
+    selected FALLEN cluster) over the aggregate below-floor median -- the aggregate mixes a
+    seated 2nd person with the faller and lands between them (190500), so the cube query missed
+    the far faller's bin. The aggregate stays as the fallback when no cluster was selected."""
     import numpy as _np, math as _m
+    if _fall_anchor[0] is not None:
+        return int(round(float(_fall_anchor[0]) / RANGE_STEP))
     pcx = sc.get("pc_xyz")
     if pcx is None or not len(pcx):
         return None
@@ -401,6 +425,7 @@ def _scene():
     # (no active fall) for CUBE_RESET_S -> the next distinct fall gets its own MAX_CUBE_BURSTS.
     if time.time() - _cube_last_active[0] > CUBE_RESET_S:
         _cube_episode[0] = 0
+        _cube_episode_t0[0] = 0.0     # episode ended -> restart the 18 s cube-delay clock next fall
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
@@ -454,7 +479,7 @@ def _scene():
     # 3001 point cloud, PER TRACK: assign points near each track, box them, tag by
     # track index (for per-track colour). Points not near ANY track (stray/background
     # discrete points) are DROPPED — not shown, not boxed.
-    boxes = []; pc_pts = []
+    boxes = []; pc_pts = []; clusters = []      # per-cluster fall selection (multi-person)
     cloud_wz_med = None          # robust whole-cloud median world height (recovery / up signal)
     cloud_below_frac = 0.0       # fraction of the cloud below the floor band (energy density)
     pcx = sc.get("pc_xyz")
@@ -496,11 +521,18 @@ def _scene():
         tx = _np.array([t["x"] for t in tg]); ty = _np.array([t["y"] for t in tg])
         bytid = {}                                        # ti -> ONE merged box per track
         orphans = []                                       # clusters near NO GTRACK track (any height)
+        # `clusters` (init'd above the block) = EVERY connected-component (radar frame):
+        # {cx,cy radar centroid, wy_med ground range, n, floor_frac, med_wz}
+        # for multi-person per-cluster fall selection.
         for lab in _np.unique(labels):
             m = labels == lab
             if int(m.sum()) < 4:                          # drop tiny clusters (noise)
                 continue
             cx = float(px[m].mean()); cy = float(py[m].mean())   # radar-frame centroid
+            _cbelow = int((wz[m] < FLOOR_Z).sum()); _ctot = int(m.sum())
+            clusters.append({"cx": cx, "cy": cy, "wy_med": float(_np.median(wy[m])),
+                             "n": _ctot, "floor_frac": _cbelow / max(_ctot, 1),
+                             "med_wz": float(_np.median(wz[m]))})
             d2 = (tx - cx) ** 2 + (ty - cy) ** 2
             ti = int(d2.argmin()) if len(tx) else -1
             if ti < 0 or float(d2[ti]) > 0.8 ** 2:        # cluster not near any GTRACK track
@@ -597,16 +629,33 @@ def _scene():
                 _lost_since.pop(ftk.id, None)                # GTRACK has it -> not lost
             elif ftk.person and ftk.source == "inherited":
                 _lost_since.setdefault(ftk.id, _now)         # mark when it became lost
+                if _cube_episode_t0[0] == 0.0:               # start the 3001-first clock on this trigger
+                    _cube_episode_t0[0] = _now
                 # NO reset-on-RR here: a breathing body returns RR every burst, and resetting
                 # the counter kept it probing forever -> 320 flood -> WEDGE. Hard cap instead.
-                # GATED: sensor FRESH (never flood a wedged firmware) AND under the per-episode
-                # HARD burst cap (verify person-vs-object a few times, then STOP).
+                # GATED: 3001-first DELAY elapsed (18 s of 3001 before the cube) AND sensor FRESH
+                # (never flood a wedged firmware) AND under the per-episode HARD burst cap.
                 if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
+                        and (_now - _cube_episode_t0[0]) >= CUBE_DELAY_S
                         and _now - _lost_query_t.get(ftk.id, 0) > LOST_QUERY_REFRESH_S
                         and not _cube_busy[0]
                         and (_now - sc.get("t", _now)) < STALE_GATE_S
                         and _cube_episode[0] < MAX_CUBE_BURSTS):
-                    rb = int(round(math.hypot(ftk.x, ftk.y) / RANGE_STEP))
+                    # WHERE to query (Q: lost坐标记录了吗/查的是它吗/考虑地板能量吗):
+                    # 1) PREFER the floor-band ENERGY cluster (`_fall_anchor`, max floor_frac) --
+                    #    a still/fallen body IS the floor energy; the FloorTracker position
+                    #    `ftk.x,ftk.y` DRIFTS onto whatever orphan cloud is densest (190500: the
+                    #    seated 2nd person, bin10) and wasted every burst there.
+                    # 2) else the DEATH coordinate near this lost track (where a person went DOWN,
+                    #    from `_fall_deaths`) -- not the drifted floor position.
+                    # 3) else fall back to the floor-track position.
+                    if _fall_anchor[0] is not None:
+                        rb = int(round(float(_fall_anchor[0]) / RANGE_STEP))
+                    else:
+                        _dxy = [(dx, dy) for (dt, dx, dy) in _fall_deaths
+                                if (dx - ftk.x) ** 2 + (dy - ftk.y) ** 2 < FALL_REGION_M ** 2]
+                        _ax, _ay = _dxy[-1] if _dxy else (ftk.x, ftk.y)
+                        rb = int(round(math.hypot(_ax, _ay) / RANGE_STEP))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
                     _cube_episode[0] += 1
@@ -619,14 +668,31 @@ def _scene():
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None)
 
-        # ---- floor-fall leg: ARM from the aggregate below-floor cloud (track-independent) ---
+        # ---- floor-fall leg: pick the FALLEN cluster by PER-CLUSTER floor-band ratio --------
+        # Multi-person: a dense SEATED 2nd person has MORE points but a LOW floor_frac; the
+        # faller's cluster is floor-DOMINATED (frac ~1.0) even far/sparse. Selecting the
+        # max-floor_frac cluster -- NOT the aggregate below-floor median, which mixes two people
+        # and lands between them (190500: seated (2.1,1.3) bin15 + faller (-0.2,2.5) bin29 ->
+        # aggregate scattered the anchor bin 27-43 and starved the far faller) -- anchors the
+        # arm + the cube query on the RIGHT body. Falls back to the aggregate when no cluster
+        # qualifies (a body fragmented below the 4-pt component floor).
         below = wz < FLOOR_Z
-        if int(below.sum()) >= FALL_LEG_MIN_PTS:
-            bx = float(_np.median(px[below])); by = float(_np.median(py[below]))  # radar-frame
+        _cand = [c for c in clusters if c["n"] >= FALL_CLUSTER_MIN_N
+                 and c["floor_frac"] >= FALL_LEG_FRAC and c["med_wz"] < FALL_LEG_ZMED]
+        fall_cl = max(_cand, key=lambda c: (c["floor_frac"], c["n"])) if _cand else None
+        _fall_anchor[0] = fall_cl["wy_med"] if fall_cl is not None else None
+        if fall_cl is not None:
+            bx, by = fall_cl["cx"], fall_cl["cy"]                 # the faller cluster centroid
+        elif int(below.sum()) >= FALL_LEG_MIN_PTS:
+            bx = float(_np.median(px[below])); by = float(_np.median(py[below]))  # aggregate fallback
+        else:
+            bx = by = None
+        if bx is not None:
             _last_low_xy[0] = (bx, by)           # where the body is while low (30 s-cancel anchor)
             near = ((px - bx) ** 2 + (py - by) ** 2) < FALL_REGION_M ** 2
             reg_below = int((near & below).sum()); reg_tot = int(near.sum())
             reg_med_z = float(_np.median(wz[near])) if reg_tot else 1.0   # local mass height
+            _reg_min = FALL_CLUSTER_MIN_N if fall_cl is not None else FALL_LEG_MIN_PTS
             # VETO: a LIVE GTRACK track in the region that is UPRIGHT (world height above the
             # fall band) = a person standing / getting up here, not a fallen body.
             veto_up = any(((t["x"] - bx) ** 2 + (t["y"] - by) ** 2 < FALL_REGION_M ** 2)
@@ -634,7 +700,7 @@ def _scene():
                           > FALL_UPRIGHT_M for t in tg)
             if veto_up:
                 _fall_region["since"] = 0.0        # someone is upright here -> drop it now
-            elif (reg_below >= FALL_LEG_MIN_PTS and reg_below >= FALL_LEG_FRAC * reg_tot
+            elif (reg_below >= _reg_min and reg_below >= FALL_LEG_FRAC * reg_tot
                     and reg_med_z < FALL_LEG_ZMED):
                 # a substantial, floor-DOMINATED blob. Arm ONLY if a person went DOWN here: a
                 # GTRACK track died nearby recently (a still body drops off GTRACK). NOT on a
@@ -707,14 +773,17 @@ def _scene():
         _fall_region["since"] = 0.0
     floor_fall = _fall_region["since"] > 0.0
     down = bool((w_down and real_person) or floor_fall)     # gated trigger (+ track-free leg)
+    if down and _cube_episode_t0[0] == 0.0:                 # mark the episode trigger (3001-first clock)
+        _cube_episode_t0[0] = now
 
-    # server-triggered cube fetch: only on a REAL down, rate-limited (50% duty refresh) — not
-    # every scene call. Range from the cloud GROUND wy (_fall_range_bin). GATED on: sensor is
-    # FRESH (never flood a wedged firmware) AND under the per-episode HARD burst cap
-    # (MAX_CUBE_BURSTS: grab cube a few times to verify person-vs-object, then STOP -- an
-    # unbounded refresh floods 320 for the whole fall and WEDGES the EVM).
+    # server-triggered cube fetch: HELD CUBE_DELAY_S after the trigger (3001-first tiering) then
+    # rate-limited (50% duty refresh) — not every scene call. Range from the cloud GROUND wy
+    # (_fall_range_bin, now the per-cluster fall anchor). GATED on: sensor is FRESH (never flood a
+    # wedged firmware) AND under the per-episode HARD burst cap (MAX_CUBE_BURSTS). During 0-18 s
+    # the living gate is the 3001 below-floor cloud (floor_fall) + sustained-down -> red needs no cube.
     fresh = (now - sc.get("t", now)) < STALE_GATE_S
-    if (down and not _cube_busy[0] and fresh
+    cube_delay_ok = _cube_episode_t0[0] > 0.0 and (now - _cube_episode_t0[0]) >= CUBE_DELAY_S
+    if (down and cube_delay_ok and not _cube_busy[0] and fresh
             and (now - _last_query_t[0]) > QUERY_REFRESH_S
             and _cube_episode[0] < MAX_CUBE_BURSTS):
         rb = _fall_range_bin(sc)
