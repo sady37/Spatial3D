@@ -189,9 +189,18 @@ _down_clear_since = [0.0]    # wall time raw `down` has been continuously clear 
 # high. This RESOLVES the far-SIT trap (track wz reads +0.09 = looks lying via elevation bias, but
 # the 3001 z1 stays ~1.7 = upright) -> use the CLOUD height, NOT track-Z, NOT RR (RR is flat across
 # lie/upright + dies on prone/perpendicular). Furniture-robust because 3001 is the micro-motion cloud.
-LYING_TOP_Z = 0.5            # box top-of-body (z1, 95th-pct world-z) below this = on the floor
-LYING_FFRAC = 0.7           # AND this fraction of the box cloud below the floor band
-LYING_MIN_N = 10            # AND a real body (enough 3001 points)
+# ⭐ AGGREGATE (per-CLUSTER, not per-box) + RANGE-AWARE (2026-07-19): the box-based version was
+# structurally BLIND to far falls -- a far lying body GTRACK drops forms NO box (231000: boxes=[]
+# for 47 s of a confirmed red), so lying_state=0 (all 92 type-2 conflicts). But it DOES form a
+# CLUSTER (connected component), which carries floor_frac + a top-of-body z90. Distance matters:
+# far bodies collapse to FEWER points (231500 n=9) -> range-aware min-n; and the elevation bias
+# can lift a far lying body's apparent top -> loosen the top-z threshold with range.
+LYING_FFRAC = 0.7           # cluster fraction below the floor band
+LYING_TOP_Z = 0.4           # cluster top-of-body (z90, 90th-pct world-z) below this = whole body on
+                            # the floor (a far SIT keeps z90~1.7 -> rejected; a far LIE z90<0 -> kept)
+LYING_TOP_RANGE_K = 0.12    # loosen LYING_TOP_Z by this per metre of range beyond 2 m (elevation bias)
+LYING_MIN_N = 6             # min cluster points (range-robust; a far lie collapses to <10 pts).
+                            # floor_frac + z90 keep it precise at this low count.
 FALL_LEG_MIN_PTS = 12        # min below-floor points to call it a body (rejects standing feet)
 FALL_CLUSTER_MIN_N = 8       # per-cluster path: a floor-DOMINATED cluster this small still counts
                              # (a FAR faller collapses to <12 pts but is ~100% below floor). The
@@ -544,9 +553,15 @@ def _scene():
                 continue
             cx = float(px[m].mean()); cy = float(py[m].mean())   # radar-frame centroid
             _cbelow = int((wz[m] < FLOOR_Z).sum()); _ctot = int(m.sum())
-            clusters.append({"cx": cx, "cy": cy, "wy_med": float(_np.median(wy[m])),
-                             "n": _ctot, "floor_frac": _cbelow / max(_ctot, 1),
-                             "med_wz": float(_np.median(wz[m]))})
+            _cwy = float(_np.median(wy[m])); _cff = _cbelow / max(_ctot, 1)
+            _cz90 = float(_np.percentile(wz[m], 90))              # cluster top-of-body (robust)
+            # ⭐ AGGREGATE + RANGE-AWARE lying: floor-dominated AND the top of the body is on the
+            # floor (threshold loosened with range for the elevation bias) AND a real body.
+            _clying = bool(_cff >= LYING_FFRAC and _ctot >= LYING_MIN_N
+                           and _cz90 < LYING_TOP_Z + LYING_TOP_RANGE_K * max(0.0, _cwy - 2.0))
+            clusters.append({"cx": cx, "cy": cy, "wy_med": _cwy, "n": _ctot,
+                             "floor_frac": _cff, "med_wz": float(_np.median(wz[m])),
+                             "z90": round(_cz90, 3), "lying": _clying})
             d2 = (tx - cx) ** 2 + (ty - cy) ** 2
             ti = int(d2.argmin()) if len(tx) else -1
             if ti < 0 or float(d2[ti]) > 0.8 ** 2:        # cluster not near any GTRACK track
@@ -582,10 +597,6 @@ def _scene():
         for b in bytid.values():                          # per TRACK (merged whole body)
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
             b["floor_frac"] = round(b.pop("_below") / max(b["n"], 1), 2)   # 3001 cloud floor-band fraction
-            # ⭐ ExtraMLP STATE classifier: person LYING here = cloud top-of-body (z1) low AND
-            # floor-dominated AND a real body. Cloud-height based (robust to the track-Z far bias).
-            b["lying"] = bool(b["z1"] < LYING_TOP_Z and b["floor_frac"] >= LYING_FFRAC
-                              and b["n"] >= LYING_MIN_N)
             boxes.append(b)
 
         # ---- FloorTracker: a fallen body GTRACK dropped keeps a CONTINUOUS id ----------
@@ -624,8 +635,6 @@ def _scene():
                       "y0": o["y0"], "y1": o["y1"], "z0": o["z0"], "z1": o["z1"], "n": o["n"],
                       "floor_frac": round(o["below"] / max(o["n"], 1), 2), "floor_src": ftk.source}
                 fb["pose"] = _pose_of(fb["x0"], fb["x1"], fb["y0"], fb["y1"], fb["z0"], fb["z1"])
-                fb["lying"] = bool(fb["z1"] < LYING_TOP_Z and fb["floor_frac"] >= LYING_FFRAC
-                                   and fb["n"] >= LYING_MIN_N)          # state classifier (floor box)
                 boxes.append(fb)
                 boxed.add(ftk.id)
 
@@ -750,10 +759,11 @@ def _scene():
         (max(boxes, key=lambda b: b["n"]) if boxes else None)
     primary_pose = prim["pose"] if prim else None
     prim_ffrac = float(prim.get("floor_frac", 0.0)) if prim else 0.0
-    # ⭐ ExtraMLP STATE classifier verdict: is ANY real in-room body LYING on the floor (cloud-height)?
-    lying_box = next((b for b in boxes if b.get("lying")
-                      and abs((b["x0"] + b["x1"]) / 2.0) < 3.5 and b.get("y1", 9) < 5.5), None)
-    lying_state = lying_box is not None
+    # ⭐ ExtraMLP STATE classifier verdict: is ANY real in-room CLUSTER lying on the floor? Uses the
+    # per-CLUSTER aggregate (robust to the far-fall no-box blind spot the per-box version had).
+    lying_cluster = next((c for c in clusters if c.get("lying")
+                          and abs(c["cx"]) < 3.5 and 0.0 <= c["wy_med"] < 5.5), None)
+    lying_state = lying_cluster is not None
 
     # rolling floor calibration H_g(x,y) from the scene cloud (world x, wy, wz)
     if pc_pts:
