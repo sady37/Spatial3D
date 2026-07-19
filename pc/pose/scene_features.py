@@ -38,11 +38,14 @@ FALLEN_SUSTAIN = 5    # frames the height must stay below FALLEN_Z to label the 
 
 # The 6-feature-class vector we expose per frame (order fixed; see module docstring).
 FEAT_COLS = ["f_mlp", "f_energy", "f_height", "f_win", "down_dur", "f_rr",
-             "rr_absent", "f_geom", "floor_fall", "real", "prim_n", "cube_bursts"]
+             "rr_absent", "f_geom", "floor_fall", "real", "prim_n", "cube_bursts",
+             "micro", "measured"]
 # Features fed to the fusion model. f_energy / f_height are EXCLUDED (they derive from the same
 # cloud as the height label -> leakage); the model must predict "fallen" from the independent
-# legs: MLP, window+duration, RR/absence, geometry, floor-fall.
-MODEL_COLS = ["f_mlp", "f_win", "down_dur", "f_rr", "rr_absent", "f_geom", "floor_fall"]
+# legs: the now-ALIVE on-chip MLP (f_mlp -- was 0 pre point-centroid firmware, weight ~0), the
+# window+duration, RR/micro-motion (cube), geometry, floor-fall.
+MODEL_COLS = ["f_mlp", "f_win", "down_dur", "f_rr", "rr_absent", "f_geom", "floor_fall",
+              "micro", "measured"]
 
 
 def extract_one(path, mount=2.0, tilt=25.0):
@@ -78,6 +81,8 @@ def extract_one(path, mount=2.0, tilt=25.0):
             "real": float(bool(ev.get("real"))),
             "prim_n": float(ev.get("prim_n") or 0),
             "cube_bursts": float(ev.get("cube_bursts") or 0),
+            "micro": float(bool(ev.get("micro"))),       # cube micro-motion (living, float-immune)
+            "measured": float(bool(ev.get("measured"))), # cube returned usable data this episode
             "fall_state": out["fall_state"],
             "collapse": int(bool(out.get("collapse_suspect"))),
             "event": int(out.get("fall_event") or 0),
