@@ -25,29 +25,35 @@ from falldet.clean import Cleaner
 from falldet.floor_track import FloorTracker
 
 
-# --- audible fall tier (verification aid): 1 beep on SUSPECTED, 3 beeps on a CONFIRMED fall.
+# --- audible fall tier (verification aid): 1 chirp on SUSPECTED, rapid ALARM burst on CONFIRMED.
 # Toggle with FALL_BEEP=0. Runs in a daemon thread so the sequential playback never stalls
 # _scene(). macOS `afplay` (short Tink so N beeps stay countable); terminal-bell fallback over
 # SSH / Linux.
 _FALL_BEEP = os.environ.get("FALL_BEEP", "1") != "0"
-_BEEP_SND = "/System/Library/Sounds/Tink.aiff"
+_BEEP_SND = "/System/Library/Sounds/Sosumi.aiff"
+_BEEP_VOL = os.environ.get("FALL_BEEP_VOL", "4")   # afplay -v amplifier (>1 boosts)
 
 
-def _beep(n=1):
+def _beep(n=1, gap=0.12, overlap=False):
+    # overlap=False: sequential single chirps (SUSPECTED heads-up). overlap=True: fire the
+    # next play before the previous finishes -> a fast, stacked ALARM burst (CONFIRMED fall).
     if not _FALL_BEEP:
         return
     def _run():
         for _ in range(n):
             try:
-                subprocess.run(["afplay", _BEEP_SND],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                cmd = ["afplay", "-v", _BEEP_VOL, _BEEP_SND]
+                if overlap:
+                    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 try:
                     sys.stdout.write("\a")
                     sys.stdout.flush()
                 except Exception:
                     pass
-            time.sleep(0.12)                       # gap so the beeps are countable
+            time.sleep(gap)
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -984,7 +990,7 @@ def _scene():
     if red_trigger and _fall_onset_armed[0]:
         _fall_event_n[0] += 1
         _fall_onset_armed[0] = False
-        _beep(3)                                  # ⭐ CONFIRMED fall -> 3 beeps, once per distinct fall
+        _beep(6, gap=0.18, overlap=True)          # ⭐ CONFIRMED fall -> rapid ALARM burst, once per distinct fall
     # SUSPECTED (pre-confirm) -> 1 beep on the rising edge only (not every frame). A suspected that
     # escalates to a confirmed fall gives 1 beep then 3 -- the audible escalation is intentional.
     if fall_state == "suspected" and _beep_last_state[0] != "suspected":
