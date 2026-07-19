@@ -43,6 +43,10 @@ extern const float gPoseB3[POSE_NUM_CLASSES];
 /* Drop a track's buffer after this many frames without an update (stale tid). */
 #define POSE_STALE_FRAMES    15
 
+/* Frame rate for the point-centroid kinematics (velZ = d(centroid)/frame * POSE_FPS). 10 fps,
+ * matching pc/pose/train_6844.py FPS so train == on-chip. */
+#define POSE_FPS             10.0f
+
 /* Pin pose .bss (~6.3 KB) to TCMB. It must NOT land in TCMA: after the cubeQuery
  * patch TCMA has only ~5.8 KB free, and the general .bss spills
  * ">> TCMA_RAM | TCMB_RAM", so an unpinned 6.3 KB could tip TCMA and brick boot
@@ -66,6 +70,9 @@ typedef struct PoseSlot_t
     uint8_t  winHiRun;   /* consecutive high frames (for clear) */
     uint8_t  winDown;    /* latched down-state */
     uint8_t  pad2;
+    /* previous frame's point-CENTROID kinematics, for the ring-diff velZ/accZ (the fall signal
+     * the tracker smooths away). Reset to 0 when the slot is (re)claimed. */
+    float    prevCz, prevCy, prevVz, prevVy;
     float    feat[POSE_NUM_FRAMES][POSE_NUM_FEATURES];
 } PoseSlot;
 
@@ -136,9 +143,12 @@ static void poseInfer(void)
     int c;
     float mx, sum;
 
+    /* pose_model_6844.c is a scikit-learn MLP (ReLU after EVERY hidden layer) with the input
+     * StandardScaler folded into layer 0 -> firmware feeds RAW point-centroid features. Layer 2
+     * (16-unit) therefore has ReLU too (the old torch export skipped it). See pc/pose/train_6844.py. */
     poseDense(&gPoseW0[0][0], gPoseB0, gPoseIn, gPoseH0, 64, POSE_INPUT_SIZE, 1);
     poseDense(&gPoseW1[0][0], gPoseB1, gPoseH0, gPoseH1, 32, 64, 1);
-    poseDense(&gPoseW2[0][0], gPoseB2, gPoseH1, gPoseH2, 16, 32, 0); /* no relu */
+    poseDense(&gPoseW2[0][0], gPoseB2, gPoseH1, gPoseH2, 16, 32, 1); /* relu (sklearn: all hidden) */
     poseDense(&gPoseW3[0][0], gPoseB3, gPoseH2, gPoseOut, POSE_NUM_CLASSES, 16, 0);
 
     mx = gPoseOut[0];
@@ -240,17 +250,28 @@ static int poseBuildFrame(const PoseTrackKin *k, const void *ptsCtx,
         return 0;
     }
 
-    dst[0] = k->posZ + gPoseZOffset;   /* height, remapped to TI reference */
-    dst[1] = k->velY;
-    dst[2] = k->velZ;
-    dst[3] = k->accY;
-    dst[4] = k->accZ;
+    /* ⭐ POINT-CENTROID kinematics -- NOT the tracker's. Track-Z floats on a still body and the
+     * EKF smooths velZ through a fall, so k->posZ/velZ read ~constant/0 and the MLP only ever
+     * emitted Stood (Lying/Falling dead). The gated POINTS carry the true vertical signal.
+     * dst[0]=centroid Z (mean top-5), dst[1]=centroid Y (TEMP: the caller converts dst[1..4] into
+     * velY/velZ/accY/accZ from the previous frame's centroid in the slot). snr is zeroed to match
+     * training (the recorded cloud has no per-point snr). See pc/pose/train_6844.py -- train==this. */
+    {
+        float czm = 0.0f, cym = 0.0f;
+        for (i = 0; i < POSE_NUM_POINTS; i++) { czm += topZ[i]; cym += topY[i]; }
+        dst[0] = czm / (float)POSE_NUM_POINTS;   /* centroid Z (replaces track posZ) */
+        dst[1] = cym / (float)POSE_NUM_POINTS;   /* TEMP centroid Y -> caller makes velY */
+        dst[2] = 0.0f;                            /* velZ -- caller fills from the ring */
+        dst[3] = 0.0f;                            /* accY -- caller fills */
+        dst[4] = 0.0f;                            /* accZ -- caller fills */
+    }
     for (i = 0; i < POSE_NUM_POINTS; i++)
     {
         dst[5 + i * 3 + 0] = topY[i];
         dst[5 + i * 3 + 1] = topZ[i];
-        dst[5 + i * 3 + 2] = topS[i];
+        dst[5 + i * 3 + 2] = 0.0f;               /* snr=0 (training used snr=0; npz cloud has none) */
     }
+    (void)topS;
     return 1;
 }
 
@@ -387,6 +408,27 @@ uint32_t PoseMlp_process(const PoseTrackKin *kin, uint32_t numTargets,
         {
             /* Not enough points this frame: keep the buffer, no push. */
             continue;
+        }
+        /* Point-centroid kinematics from the slot's previous centroid (train_6844.py:
+         * vel=(c-cprev)*fps, acc=(vel-vprev)*fps). A freshly-claimed slot (count==0) has no
+         * previous frame -> zeros. frame[0]=cz, frame[1]=cy(temp) came from poseBuildFrame. */
+        {
+            float cz = frame[0], cy = frame[1];
+            if (s->count >= 1)
+            {
+                float vz = (cz - s->prevCz) * POSE_FPS;
+                float vy = (cy - s->prevCy) * POSE_FPS;
+                frame[2] = vz;                           /* velZ */
+                frame[1] = vy;                           /* velY (overwrite the temp centroid Y) */
+                frame[4] = (vz - s->prevVz) * POSE_FPS;  /* accZ */
+                frame[3] = (vy - s->prevVy) * POSE_FPS;  /* accY */
+            }
+            else
+            {
+                frame[1] = frame[2] = frame[3] = frame[4] = 0.0f;
+            }
+            s->prevCz = cz; s->prevCy = cy;
+            s->prevVz = frame[2]; s->prevVy = frame[1];
         }
         posePush(s, frame);
 
