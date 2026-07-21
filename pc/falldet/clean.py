@@ -71,18 +71,23 @@ class Cleaner:
         extra_strong = extra_score >= self.extra_confirm_min   # enough to confirm without a cube
 
         # 2) cube second-check (the strong filter) — a red Fall normally REQUIRES it (rejects a
-        #    dropped object: energy on the floor but NO breathing). Without a cube fetched,
+        #    dropped object: energy on the floor but no LIVING signal). Without a cube fetched,
         #    strong extra evidence can confirm instead (below); else the best we say is 'suspected'.
+        #    ⭐ LIVING signal = RR *OR* micro-motion (user 2026-07-20): RR needs a visible chest and
+        #    FAILS when the person is back-to-radar or occluded, but the floor ENERGY band + body
+        #    micro-motion are still measurable. So energy-on-floor + (RR or micro) confirms a lying
+        #    person; a dropped object has energy but NEITHER RR nor micro.
         cube_ok = None
         if cube is not None:
             rr_ok = cube.get("rr") not in (None, 0)
+            micro_ok = bool(cube.get("micro"))
             energy_ok = float(cube.get("floor_frac", 0.0)) >= self.floor_frac_min
-            cube_ok = bool(rr_ok and energy_ok)
+            cube_ok = bool(energy_ok and (rr_ok or micro_ok))
             if not cube_ok:
                 return {"fall": False, "suspected": False, "confidence": 0.0,
                         "trigger": trigger, "reason": reason,
                         "cleaned": "cube: no living body on floor"}
-            conf = min(0.98, conf + 0.4); reason.append("cube")
+            conf = min(0.98, conf + 0.4); reason.append("cube" if rr_ok else "cube-micro")
         # 2) geometry prior
         if geom is not None and geom.get("at_rest_spot"):
             conf *= 0.4; cleaned = "geom:rest-spot"

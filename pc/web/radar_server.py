@@ -292,6 +292,9 @@ _fall_anchor = [None]        # world GROUND range (wy) of the selected fallen cl
 # flickers that re-acquire, and we must not spend a ~6 s cube burst on those.
 LOST_WAIT_S = 2.0            # a track must stay lost this long (not a flicker) before probing
 LOST_QUERY_REFRESH_S = 12.0 # min seconds between lost-probe cubeQuery bursts per track (50% duty)
+FAR_FORCE_M = 4.5           # beyond this the 3001 cloud collapses/goes specular -> can't classify a
+                            # lying person; a TI lost/fall trigger here FORCES a cubeQuery regardless
+                            # of the 3001 person/veto gate (RR/micro then confirm). Breaks chicken-egg.
 _lost_since = {}            # floor-track id -> wall time it became inherited (lost); cleared on re-acquire
 _lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall time
 # NOTE: the z-DESCENT / windowed-2nd-highest-z signal lives ON-CHIP, not here -- the deployed
@@ -809,6 +812,23 @@ def _scene():
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None)
 
+        # ⭐ FAR-RANGE FORCE (user 2026-07-20): a GTRACK death (lost trigger) beyond FAR_FORCE_M gets a
+        # cubeQuery REGARDLESS of the 3001 person/veto gate. Past ~4.5 m the cloud collapses so 3001
+        # can't confirm a person, and the lost-probe's person-gate (needs inherited tid + RR) blocks
+        # exactly the far lie we must catch. NO 18 s 3001-first wait: 3001 is useless at far range and
+        # the death memory only lives FALL_DEATH_S (8 s). RR/micro on the returned cube then confirm.
+        _far_death = next(((dt, dx, dy) for (dt, dx, dy) in reversed(_fall_deaths)
+                           if math.hypot(dx, dy) > FAR_FORCE_M and _now - dt >= LOST_WAIT_S), None)
+        if (_far_death is not None and not _cube_busy[0]
+                and (_now - sc.get("t", _now)) < STALE_GATE_S
+                and _now - _last_query_t[0] > QUERY_REFRESH_S
+                and _cube_episode[0] < MAX_CUBE_BURSTS):
+            if _cube_episode_t0[0] == 0.0:
+                _cube_episode_t0[0] = _now
+            rb = int(round(math.hypot(_far_death[1], _far_death[2]) / RANGE_STEP))
+            _cube_busy[0] = True; _last_query_t[0] = _now; _cube_episode[0] += 1
+            threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60), daemon=True).start()
+
         # ---- floor-fall leg: pick the FALLEN cluster by PER-CLUSTER floor-band ratio --------
         # Multi-person: a dense SEATED 2nd person has MORE points but a LOW floor_frac; the
         # faller's cluster is floor-DOMINATED (frac ~1.0) even far/sparse. Selecting the
@@ -959,7 +979,8 @@ def _scene():
         # Tier-2 floor evidence = the BETTER of the sparse 3001 floor_frac and the cube's OWN
         # MUSIC power-weighted band (the latter sees a far/specular lying body where 3001 collapsed).
         _ff_use = max(float(_cube_result["floor_frac"] or 0.0), float(_cube_result.get("cube_ff") or 0.0))
-        cube_ev = {"rr": _cube_result["rr"], "floor_frac": _ff_use}
+        # micro = living micro-motion (confirms a person when RR can't lock: back-to-radar/occluded)
+        cube_ev = {"rr": _cube_result["rr"], "floor_frac": _ff_use, "micro": _cube_result.get("micro")}
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
