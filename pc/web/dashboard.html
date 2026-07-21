@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -38,7 +38,7 @@
   <span style="display:inline-flex;align-items:center;gap:6px">
     <span class="src" id="src">—</span>
     <span class="src" id="clock"></span>
-    <button id="recbtn" title="打开=按 5 分钟滚动落盘；关闭=立即中止(以当前为最后一笔)"
+    <button id="recbtn" title="on=roll to disk every 5 min; off=stop now (current is last)"
       style="background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:600;font-size:13px">Write State: off</button>
   </span>
   <span class="src" id="stat"></span>
@@ -48,11 +48,11 @@
   <!-- People_Tracking live scene: radar plane (radar on top) + posture height bar -->
   <div class="card" style="grid-column:1 / -1;display:flex;flex-direction:column">
     <div style="display:flex;align-items:center;gap:10px;margin:0 0 8px;flex-wrap:wrap">
-      <h3 style="margin:0">实时场景 Scene — 俯视 X×D ｜ 侧视 D×Z（倒地形态）｜ Z 高度条</h3>
-      <span style="color:var(--dim);font-size:12px">｜ Bin(HR search)</span>
+      <h3 style="margin:0">Scene — top X×D | side D×Z (fall shape) | Z bar</h3>
+      <span style="color:var(--dim);font-size:12px">| Bin(HR search)</span>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)">lo <span id="blv">—</span><input type="range" id="blo" style="width:90px"></label>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)">hi <span id="bhv">—</span><input type="range" id="bhi" style="width:90px"></label>
-      <button id="reset" style="background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px">自动</button>
+      <button id="reset" style="background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px">auto</button>
     </div>
     <canvas id="scene" width="1040" height="470" style="width:100%;flex:1;min-height:460px"></canvas>
     <div class="muted" id="scenestat" style="margin-top:4px;font-size:12px;height:1.3em;line-height:1.3em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</div>
@@ -60,32 +60,31 @@
 
   <!-- presence -->
   <div class="card">
-    <h3>状态 Presence</h3>
+    <h3>Presence</h3>
     <div style="margin-bottom:12px"><span id="present" class="pill p-dim">—</span></div>
-    <div class="row"><span class="k">占用集中度 conc</span><span id="conc">—</span></div>
-    <div class="row"><span class="k">簇宽 span (m)</span><span id="span">—</span></div>
-    <div class="row"><span class="k">目标距离 D (m)</span><span id="rng">—</span></div>
-    <div class="row"><span class="k">窗口 window</span><span id="win">—</span></div>
+    <div class="row"><span class="k">conc</span><span id="conc">—</span></div>
+    <div class="row"><span class="k">span (m)</span><span id="span">—</span></div>
+    <div class="row"><span class="k">range D (m)</span><span id="rng">—</span></div>
+    <div class="row"><span class="k">window</span><span id="win">—</span></div>
   </div>
 
   <!-- pose (from RR centroid) -->
   <div class="card">
-    <h3>姿态 Pose — RR 质心高度</h3>
+    <h3>Pose — RR centroid Z</h3>
     <div style="display:flex;gap:8px;margin-bottom:10px">
       <span id="pose-stand" class="pill p-dim">STAND</span>
       <span id="pose-sit" class="pill p-dim">SIT</span>
       <span id="pose-fall" class="pill p-dim">Fall</span>
     </div>
-    <div class="row"><span class="k">位置 X / Y / Z (m)</span><span id="posexyz">—</span></div>
-    <div class="row"><span class="k">运动点高度 Z90 (m)</span><span id="posez">—</span></div>
-    <div class="row"><span class="k">地板带能量占比 (≤0.4m)</span><span id="posefrac">—</span></div>
-    <div class="row"><span class="k">跌倒概率 P (融合)</span><span id="fallp">—</span></div>
-    <div class="muted">falldet 管线:<b>持续窗</b>(最高点相对本地地面 H_g,持续 → 倒地)= <b style="color:#f08c00">SuspectedFall</b>(橙,抗 track 冻结)；触发 → <b>抽 cube</b> → <b style="color:#58a6ff">RR + 地板能量</b>复核(活体在地,非掉落物)→ 确认 <b style="color:#f85149">Fall</b>(红)。<b>红必须过 cube</b>(需 320/cubeQuery),否则只到橙。片上 window 见 <a>Phase 3</a>。</div>
+    <div class="row"><span class="k">pos X / Y / Z (m)</span><span id="posexyz">—</span></div>
+    <div class="row"><span class="k">Z90 (m)</span><span id="posez">—</span></div>
+    <div class="row"><span class="k">floor-frac (≤0.4m)</span><span id="posefrac">—</span></div>
+    <div class="row"><span class="k">fall P (fused)</span><span id="fallp">—</span></div>
   </div>
 
   <!-- RR -->
   <div class="card">
-    <h3>呼吸 RR</h3>
+    <h3>RR</h3>
     <div class="big" style="display:flex;align-items:baseline;gap:20px;flex-wrap:wrap">
       <span><span id="rr">—</span> <span class="unit">rpm</span></span>
       <span style="font-size:16px;font-weight:400"><span style="color:var(--dim)">pause</span> <span id="pause" style="font-weight:700">—</span> <span class="unit">s</span></span>
@@ -94,39 +93,39 @@
     </div>
     <canvas id="breathwave" width="560" height="90" style="width:100%;height:90px;margin-top:8px;
       background:#0d1117;border:1px solid #21262d;border-radius:6px"></canvas>
-    <div class="muted" style="margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">最近<span id="wavespan">—</span>s · 竖线=每次呼吸 · 腹端bin <span id="abbin">—</span></div>
+    <div class="muted" style="margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">last<span id="wavespan">—</span>s · bar=one breath · abdomen bin <span id="abbin">—</span></div>
   </div>
 
   <!-- HR + watch -->
   <div class="card">
-    <h3>心率 HR — vs Apple Watch &nbsp;<span id="hrconf" class="pill p-dim">—</span></h3>
+    <h3>HR — vs Apple Watch &nbsp;<span id="hrconf" class="pill p-dim">—</span></h3>
     <div class="cmp">
-      <div><div class="big" style="color:var(--acc)"><span id="hr">—</span></div><div class="d">雷达 radar</div></div>
+      <div><div class="big" style="color:var(--acc)"><span id="hr">—</span></div><div class="d">radar</div></div>
       <div><div class="big"><span id="whr">—</span></div><div class="d">watch</div></div>
       <div><div class="big" style="font-size:26px"><span id="hrdiff">—</span></div><div class="d">Δ bpm</div></div>
     </div>
-    <div class="row" style="margin-top:10px"><span class="k">胸端 bin (选定)</span><span id="chbin">—</span></div>
-    <div class="row"><span class="k">簇 cluster</span><span id="cluster">—</span></div>
-    <div class="row"><span class="k">cardiac-SNR / 周期强度</span><span id="hrq">—</span></div>
+    <div class="row" style="margin-top:10px"><span class="k">chest bin (selected)</span><span id="chbin">—</span></div>
+    <div class="row"><span class="k">cluster</span><span id="cluster">—</span></div>
+    <div class="row"><span class="k">cardiac-SNR / periodicity</span><span id="hrq">—</span></div>
   </div>
 
   <!-- REPLAY: run a recorded npz back through the REAL server fall pipeline -->
   <div class="card" style="grid-column:1 / -1">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <h3 style="margin:0">重放 Replay — 用录制 npz 跑<b>线上 fall 代码</b>(判决即代码,可复现)</h3>
+      <h3 style="margin:0">Replay — run recorded npz through the <b>live fall code</b> (verdict is code, reproducible)</h3>
       <select id="rpfile" style="background:#0d1117;color:var(--fg);border:1px solid var(--line);
         border-radius:6px;padding:4px 8px;font-size:12px;max-width:340px"></select>
       <button id="rpbtn" style="background:#238636;color:#fff;border:0;border-radius:6px;
-        padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">重放</button>
+        padding:5px 14px;cursor:pointer;font-size:12px;font-weight:600">Replay</button>
       <button id="rprefresh" style="background:#21262d;color:var(--fg);border:1px solid var(--line);
-        border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px">刷新列表</button>
-      <span class="muted" id="rpstat" style="font-size:12px">选择一个 case/record 的 npz</span>
+        border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px">Refresh</button>
+      <span class="muted" id="rpstat" style="font-size:12px">pick a case/record npz</span>
     </div>
     <div id="rpeps" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"></div>
     <canvas id="rptl" width="1040" height="86" style="width:100%;height:86px;background:#0d1117;
       border:1px solid #21262d;border-radius:6px"></canvas>
-    <div class="muted" style="margin-top:4px;font-size:11px">时间条:🟥红=Fall(代码判定,含30s latch) · 🟨黄=Suspected · 灰=none；
-      下缘刻度=window down(w) / real-person(r)；折线=cube RR。悬停看该刻状态。</div>
+    <div class="muted" style="margin-top:4px;font-size:11px">timeline: red=Fall (code verdict, incl 30s latch) · yellow=Suspected · grey=none;
+      bottom ticks=window down(w) / real-person(r); line=cube RR. Hover for state at that time.</div>
     <div class="muted" id="rphover" style="font-size:11px;height:1.2em">—</div>
   </div>
 
@@ -197,7 +196,7 @@ async function pollRec(){ try{ paintRec(await (await fetch("/api/rec/status")).j
 async function toggleRec(){
   if(recSaving===null) return;                  // nothing to toggle (not a live source)
   const r=await (await fetch(recSaving?"/api/rec/off":"/api/rec/on")).json();
-  if(r && r.saved) document.getElementById("stat").textContent="已保存 "+r.saved.split("/").pop();
+  if(r && r.saved) document.getElementById("stat").textContent="Saved "+r.saved.split("/").pop();
   pollRec();
 }
 
@@ -243,9 +242,9 @@ function drawSide(st){
   // floor
   g.strokeStyle="#484f58"; g.beginPath(); g.moveTo(pad,Y(0)); g.lineTo(W-pad,Y(0)); g.stroke();
   g.fillStyle="#8b949e"; g.font="11px sans-serif";
-  g.fillText("Z 高度",4,pad-8); g.fillText("floor 0",W-pad+2,Y(0)+4);
+  g.fillText("Z height",4,pad-8); g.fillText("floor 0",W-pad+2,Y(0)+4);
   g.fillText("D "+dr[0],pad,H-pad+14); g.fillText(dr[1]+"m",W-pad-20,H-pad+14);
-  g.fillStyle="#f85149"; g.fillText("倒地区 <0.6m",pad+6,Y(0.3));
+  g.fillStyle="#f85149"; g.fillText("fall zone <0.6m",pad+6,Y(0.3));
   if(st&&st.target){
     const t=st.target, col=st.fall?"#f85149":"#3fb950";
     g.strokeStyle=col; g.beginPath(); g.moveTo(X(t.range_m),Y(0)); g.lineTo(X(t.range_m),Y(t.z)); g.stroke();
@@ -260,7 +259,7 @@ async function tick(){
   if(binLo!=null&&binHi!=null) url+=`?bin_lo=${Math.min(binLo,binHi)}&bin_hi=${Math.max(binLo,binHi)}`;
   let st;
   try{ st=await (await fetch(url)).json(); }
-  catch(e){ document.getElementById("stat").textContent="连接断开…"; return; }
+  catch(e){ document.getElementById("stat").textContent="Disconnected…"; return; }
   document.getElementById("clock").textContent=new Date().toLocaleTimeString();
   if(st.warming){ document.getElementById("stat").textContent=""; return; }
   if(st.error){ document.getElementById("stat").textContent="err: "+st.error; return; }
@@ -268,7 +267,7 @@ async function tick(){
 
   // presence
   const pe=document.getElementById("present");
-  if(st.present){pill(pe,"有人 PRESENT","p-ok")} else {pill(pe,"无人 EMPTY","p-dim")}
+  if(st.present){pill(pe,"PRESENT","p-ok")} else {pill(pe,"EMPTY","p-dim")}
   document.getElementById("conc").textContent=fmt(st.occ_conc,2);
   document.getElementById("span").textContent=fmt(st.occ_span,3);
   document.getElementById("rng").textContent=fmt(st.range_m,2);
@@ -286,8 +285,8 @@ async function tick(){
   document.getElementById("rr").textContent=fmt(st.rr);
   var pel=document.getElementById("pause"), bf=document.getElementById("breathflag");
   pel.textContent = (st.pause_s==null? "—" : st.pause_s.toFixed(1));
-  if(st.breathing==="pause"){ pel.style.color="#f85149"; bf.textContent="⚠ 呼吸中断"; bf.style.color="#f85149"; }
-  else if(st.breathing==="left"){ pel.style.color=""; bf.textContent="已离开"; bf.style.color="#8b949e"; }
+  if(st.breathing==="pause"){ pel.style.color="#f85149"; bf.textContent="⚠ RR pause"; bf.style.color="#f85149"; }
+  else if(st.breathing==="left"){ pel.style.color=""; bf.textContent="left"; bf.style.color="#8b949e"; }
   else { pel.style.color=""; bf.textContent=""; }
   if(st.present){ drawBreath(st.breath_wave, st.breath_marks, st.breath_wave_s); }
   else { drawBreath(null, null, st.breath_wave_s); }   // no person -> blank the curve
@@ -296,9 +295,9 @@ async function tick(){
   const hrEl=document.getElementById("hr"), hc=document.getElementById("hrconf");
   hrEl.textContent=fmt(st.hr,1);
   const lvl=st.hr_level;
-  if(lvl==="ok"){pill(hc,"可信","p-ok"); hrEl.style.color="var(--acc)";}
-  else if(lvl==="harmonic"){pill(hc,"存疑·"+(st.hr_reason||""),"p-warn"); hrEl.style.color="var(--warn)";}
-  else if(lvl==="weak"){pill(hc,"遮蔽·弱周期","p-bad"); hrEl.style.color="var(--dim)";}
+  if(lvl==="ok"){pill(hc,"OK","p-ok"); hrEl.style.color="var(--acc)";}
+  else if(lvl==="harmonic"){pill(hc,"suspect·"+(st.hr_reason||""),"p-warn"); hrEl.style.color="var(--warn)";}
+  else if(lvl==="weak"){pill(hc,"weak","p-bad"); hrEl.style.color="var(--dim)";}
   else{pill(hc,"—","p-dim"); hrEl.style.color="var(--dim)";}
   document.getElementById("whr").textContent=fmt(st.watch_hr,0);
   const hd=document.getElementById("hrdiff");
@@ -315,7 +314,7 @@ async function tick(){
   // top-down + side now live inside the Scene canvas (drawScene); no separate cards.
 }
 // ---- People_Tracking live scene, ONE canvas / three panels side by side:
-// [俯视 TOP-DOWN X×D] | [侧视 SIDE D×Z, fall morphology] | [Z height bar]. 3001 points
+// [TOP-DOWN X×D] | [SIDE D×Z, fall morphology] | [Z height bar]. 3001 points
 // render in BOTH plan views; per-track boxes in both; pose = zspan/max(xspan,yspan). ----
 const SC_XMAX=3, SC_YMAX=5;                        // plane: +-3 m lateral, 0..5 m range
 // Z(cm) bands, world height above floor. Fall energy sits BELOW the floor (world Z<0):
@@ -353,7 +352,7 @@ function drawScene(sc){
   const lfLine=d=> -EK*Math.sqrt(d*d+MT*MT);                    // fall line (x=0) at ground range d
   const lfPt=(x,d,z)=> -EK*Math.sqrt(x*x+d*d+(MT-z)*(MT-z));    // per-point local floor (true slant)
   // === TOP-DOWN (X × D) ===
-  g.fillStyle="#8b949e"; g.fillText("俯视 X 左右(m) × 距离(m,向下)", tL, pT-10);
+  g.fillStyle="#8b949e"; g.fillText("top X lateral(m) × range(m, down)", tL, pT-10);
   for(let x=-SC_XMAX;x<=SC_XMAX;x++){ g.strokeStyle=x===0?"#484f58":"#181d24";
     g.beginPath();g.moveTo(TX(x),pT);g.lineTo(TX(x),pB);g.stroke();
     g.fillStyle="#8b949e"; g.fillText((x>0?"+":"")+x, TX(x)-5, pB+13); }
@@ -364,7 +363,7 @@ function drawScene(sc){
   g.fillStyle="#1971c2"; g.beginPath();g.moveTo(TX(0),TY(0)-9);g.lineTo(TX(0)-7,TY(0)+3);g.lineTo(TX(0)+7,TY(0)+3);g.closePath();g.fill();
   g.fillStyle="#1971c2"; g.fillText("RADAR", TX(0)+10, TY(0)+2);
   // === SIDE (D × Z) — fall morphology ===
-  g.fillStyle="#8b949e"; g.fillText("侧视 距离(m) × Z 高度(m)", sL, pT-10);
+  g.fillStyle="#8b949e"; g.fillText("side range(m) × Z height(m)", sL, pT-10);
   // fall zone = below the LOCAL floor line H=-EK·slant(d): a downward-sloping true-zero, energy
   // under it is unambiguously sub-floor (real Fall). floor0 kept as a flat grey reference.
   const slp=[]; for(let d=0;d<=SC_YMAX+0.01;d+=0.25) slp.push([SX(d),SZ(lfLine(d))]);
@@ -380,7 +379,7 @@ function drawScene(sc){
   g.fillStyle="#8b949e"; g.fillText("floor0", sR-32, SZ(0)-3);
   g.strokeStyle="#f85149"; g.setLineDash([5,3]); g.lineWidth=1.5; g.beginPath(); g.moveTo(slp[0][0],slp[0][1]);
   for(const q of slp) g.lineTo(q[0],q[1]); g.stroke(); g.setLineDash([]); g.lineWidth=1;
-  g.fillStyle="#f85149"; g.fillText("真零点 -½·"+Math.round(ERES)+"°·R", sL+4, SZ(lfLine(0))-4);
+  g.fillStyle="#f85149"; g.fillText("true-zero -½·"+Math.round(ERES)+"°·R", sL+4, SZ(lfLine(0))-4);
   // === Z HEIGHT BAR ===
   g.fillStyle="#8b949e"; g.fillText("Z(cm)", bL-14, pT-10);
   SC_ZONES.forEach(([lo,hi,lbl,col])=>{ g.fillStyle=col+"44";
@@ -409,10 +408,10 @@ function drawScene(sc){
     g.fillStyle=col; g.font="bold 13px sans-serif"; g.fillText(`T${b.tid} ${pose}`, xl+2, TY(b.y0)-4); g.font="12px sans-serif";
     g.strokeStyle=col; g.strokeRect(SX(b.y0), SZ(b.z1), SX(b.y1)-SX(b.y0), SZ(b.z0)-SZ(b.z1));
     sZmax=Math.max(sZmax,b.z1); sDmin=Math.min(sDmin,b.y0); sDmax=Math.max(sDmax,b.y1); sN++; });
-  // side morphology readout: fall = low top(顶Z) + long ground spread(展D) + energy below 真零点
+  // side morphology readout: fall = low top(topZ) + long ground spread(spanD) + energy below true-zero
   if(sN>0){ const flat=(sZmax<0.7)&&((sDmax-sDmin)>0.7);
     g.fillStyle=(fsz==="fall")?"#f85149":((fsz==="suspected")?"#f08c00":"#8b949e"); g.font="bold 12px sans-serif";
-    g.fillText(`顶Z ${sZmax.toFixed(2)}m·展D ${(sDmax-sDmin).toFixed(2)}m${flat?"·摊平":""}${nFall?"·零点下"+nFall+"点":""}`, sL+4, pB-6); g.font="12px sans-serif"; }
+    g.fillText(`topZ ${sZmax.toFixed(2)}m·spanD ${(sDmax-sDmin).toFixed(2)}m${flat?"·flat":""}${nFall?"·below-zero "+nFall+"pt":""}`, sL+4, pB-6); g.font="12px sans-serif"; }
   if(fsz==="fall"||fsz==="suspected"){ g.strokeStyle=(fsz==="fall")?"#f85149":"#f08c00"; g.lineWidth=2;
     g.strokeRect(sL+1,pT+1,sR-sL-2,pB-pT-2); }
   // Z bar marker (primary track world height + label)
@@ -420,7 +419,7 @@ function drawScene(sc){
   if(h!=null){ const zk=zoneOf(h); g.strokeStyle=zk[1]; g.lineWidth=3;
     g.beginPath();g.moveTo(bL-4,HY(h));g.lineTo(bR+4,HY(h));g.stroke();
     g.fillStyle=zk[1]; g.font="bold 13px sans-serif"; g.fillText(`${Math.round(h)}cm ${zk[0]}`, bL-6, HY(h)-6); g.font="12px sans-serif"; }
-  // 连动 pill: fall-trigger -> SuspectedFall(橙) -> Fall(红) -> reset(灰)
+  // linked pill: fall-trigger -> SuspectedFall(orange) -> Fall(red) -> reset(grey)
   const fp=document.getElementById("pose-fall");
   if(fp){ if(fsz==="fall"){ fp.textContent="Fall"; fp.className="pill p-bad"; }
     else if(fsz==="suspected"){ fp.textContent="SuspectedFall"; fp.className="pill p-sfall"; }
@@ -429,7 +428,7 @@ function drawScene(sc){
   // if the vitals RR (#rr) is idle (no still track), fill it with the cube RR too.
   const cr=document.getElementById("cuberr");
   if(cr){ cr.textContent = (sc.cube_rr!=null)
-      ? `cube RR ${sc.cube_rr} rpm (str ${sc.cube_rr_str}, ${sc.cube_rr_age}s前)` : ""; }
+      ? `cube RR ${sc.cube_rr} rpm (str ${sc.cube_rr_str}, ${sc.cube_rr_age}s ago)` : ""; }
   const rrEl=document.getElementById("rr");
   if(rrEl && (rrEl.textContent==="—"||rrEl.textContent==="") && sc.cube_rr!=null)
     rrEl.textContent = sc.cube_rr;
@@ -442,13 +441,13 @@ function drawScene(sc){
   const evs=(ev.reason&&ev.reason.length)?ev.reason.join("+"):(ev.window?"window":"—");
   const fpp=document.getElementById("fallp");
   // fused-P feature breakdown: MLP · window · cloud-height · below-floor energy · geometry · RR
-  const fuse=(ev.P!=null)?` 融合[mlp${ev.f_mlp} win${ev.f_win} z${ev.f_height??"–"} e${ev.f_energy} g${ev.f_geom} rr${ev.f_rr}]`:"";
-  const ff=(ev.h_s!=null?` 顶Z${ev.h_s}m`:"")+(ev.rr!=null?` RR${ev.rr}`:"")
-           +(ev.cube?"·cube":"")+(ev.real===false?"·鬼影":"")+(ev.cleaned?"·"+ev.cleaned:"");
+  const fuse=(ev.P!=null)?` fused[mlp${ev.f_mlp} win${ev.f_win} z${ev.f_height??"–"} e${ev.f_energy} g${ev.f_geom} rr${ev.f_rr}]`:"";
+  const ff=(ev.h_s!=null?` topZ${ev.h_s}m`:"")+(ev.rr!=null?` RR${ev.rr}`:"")
+           +(ev.cube?"·cube":"")+(ev.real===false?"·ghost":"")+(ev.cleaned?"·"+ev.cleaned:"");
   if(fpp) fpp.textContent = (sc.fall_p!=null ? `${sc.fall_p}${fuse} [${evs}]${ff}` : "—");
   const fmark = (fsz==="none"||!fsz)?"":`  ⚠${fsz==="fall"?"FALL":"Suspected"} P=${sc.fall_p} [${evs}]`;
   st.textContent=`tracks:${(sc.boxes||[]).length}  ${poses.join("  ")||"(no track)"}  `+
-    `Z:${h!=null?Math.round(h)+"cm":"—"}${fmark}  (3001点:${(sc.pc||[]).length} mount${sc.mount_cm}cm age${sc.age_s}s)`;
+    `Z:${h!=null?Math.round(h)+"cm":"—"}${fmark}  (3001pts:${(sc.pc||[]).length} mount${sc.mount_cm}cm age${sc.age_s}s)`;
 }
 // Side view in scene mode: project the per-track cloud onto D(range) × Z(height) so a
 // fallen body reads as a LOW, horizontally-spread blob. Emphasis kicks in on fall_state.
@@ -464,10 +463,10 @@ function drawSceneSide(sc){
   g.strokeStyle="#30363d"; g.strokeRect(pad,pad,W-2*pad,H-2*pad);
   g.strokeStyle="#484f58"; g.beginPath(); g.moveTo(pad,Y(0)); g.lineTo(W-pad,Y(0)); g.stroke();
   g.fillStyle="#8b949e"; g.font="11px sans-serif";
-  g.fillText("Z 高度(m)",4,pad-8); g.fillText("floor 0",W-pad+2,Y(0)+4);
+  g.fillText("Z height(m)",4,pad-8); g.fillText("floor 0",W-pad+2,Y(0)+4);
   g.fillText("D "+dr[0],pad,H-pad+14); g.fillText(dr[1]+"m",W-pad-20,H-pad+14);
   [0.5,1,1.5].forEach(z=>{ g.fillStyle="#8b949e"; g.fillText(z, pad-22, Y(z)+3); });
-  g.fillStyle="#f85149"; g.fillText("倒地区 <0.5m",pad+6,Y(0.25));
+  g.fillStyle="#f85149"; g.fillText("fall zone <0.5m",pad+6,Y(0.25));
   const PAL=["#4dabf7","#f08c00","#2f9e44","#e64980","#f7b731","#a55eea"];
   const pc=sc.pc||[]; let zmin=9,zmax=-9,dmin=9,dmax=-9,n=0;
   pc.forEach(p=>{ const d=p[1], z=p[2]; if(d>dr[1]) return;   // p=[x, range, height, ti]
@@ -477,7 +476,7 @@ function drawSceneSide(sc){
   if(n>0){ const flat=(zmax<0.7)&&((dmax-dmin)>0.7);
     g.fillStyle=(fsz==="fall")?"#f85149":((fsz==="suspected")?"#f08c00":"#8b949e");
     g.font="bold 12px sans-serif";
-    g.fillText(`顶Z ${zmax.toFixed(2)}m · 展D ${(dmax-dmin).toFixed(2)}m${flat?" · 摊平":""}`, pad+6, pad+14); }
+    g.fillText(`topZ ${zmax.toFixed(2)}m · spanD ${(dmax-dmin).toFixed(2)}m${flat?" · flat":""}`, pad+6, pad+14); }
   if(fsz==="fall"||fsz==="suspected"){ g.strokeStyle=(fsz==="fall")?"#f85149":"#f08c00";
     g.lineWidth=2; g.strokeRect(pad+1,pad+1,W-2*pad-2,H-2*pad-2); }
 }
@@ -500,23 +499,23 @@ async function loadReplayList(){
       sel.appendChild(o);
     });
     if(keep) sel.value=keep;
-    document.getElementById("rpstat").textContent=`${(r.files||[]).length} 个 npz`;
-  }catch(e){ document.getElementById("rpstat").textContent="列表加载失败"; }
+    document.getElementById("rpstat").textContent=`${(r.files||[]).length} npz`;
+  }catch(e){ document.getElementById("rpstat").textContent="list load failed"; }
 }
 async function runReplay(){
   const sel=document.getElementById("rpfile"); const file=sel.value;
   if(!file) return;
   const stat=document.getElementById("rpstat"), btn=document.getElementById("rpbtn");
-  stat.textContent="重放中…（跑线上 _scene，可能几秒）"; btn.disabled=true;
+  stat.textContent="replaying… (running live _scene, may take seconds)"; btn.disabled=true;
   document.getElementById("rpeps").innerHTML="";
   try{
     const d=await (await fetch("/api/replay?file="+encodeURIComponent(file))).json();
-    if(d.error){ stat.textContent="错误: "+d.error+(d.stderr?" · "+d.stderr.slice(-200):""); btn.disabled=false; return; }
+    if(d.error){ stat.textContent="error: "+d.error+(d.stderr?" · "+d.stderr.slice(-200):""); btn.disabled=false; return; }
     RP=d;
     const eps=d.episodes||[];
-    stat.textContent=`${d.file} · ${d.frames}帧 ${Math.round(d.dur)}s · 代码判定 FALL ${eps.length} 段`;
+    stat.textContent=`${d.file} · ${d.frames}frames ${Math.round(d.dur)}s · code verdict FALL ${eps.length} eps`;
     const box=document.getElementById("rpeps");
-    if(!eps.length){ box.innerHTML='<span class="pill p-dim">代码判定 0 段</span>'; }
+    if(!eps.length){ box.innerHTML='<span class="pill p-dim">code verdict 0 eps</span>'; }
     eps.forEach((e,i)=>{
       const s=document.createElement("span");
       s.className="pill"; s.style.background="#5a1a1a"; s.style.color="#ffb3b3";
@@ -524,7 +523,7 @@ async function runReplay(){
       box.appendChild(s);
     });
     drawReplay(d);
-  }catch(e){ stat.textContent="请求失败: "+e; }
+  }catch(e){ stat.textContent="request failed: "+e; }
   btn.disabled=false;
 }
 function drawReplay(d){

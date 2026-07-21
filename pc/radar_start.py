@@ -23,6 +23,8 @@ CFG_DIR = "/Users/sady3721/project/TI/Tiinstall"
 # only bursts 320 on fall candidates -> vitals blank while seated; use it to test falls.
 CFGS = {
     "pose":      "sbr_3dpt_5m_pose.cfg",         # Phase2+3 firmware: MLP + window fall legs (TLV 321)
+    "pose65":    "sbr_3dpt_6p5m_pose.cfg",       # pose cfg -> 6.5 m, 160 samp (dR 0.085); VERIFY on flash
+    "pose65s":   "sbr_3dpt_6p5m_pose_128.cfg",   # 6.5 m FALLBACK: 128 samp (dR 0.106, same bufs as 5m)
     "trackcube": "sbr_3dpt_5m_trackcube.cfg",   # scene + vitals always on
     "fall":      "sbr_3dpt_5m_fall.cfg",         # fall ARM/CONFIRM/BURST state machine
     "5m":        "sbr_3dpt_5m.cfg",              # tracking only (no 320 -> no vitals)

@@ -22,6 +22,7 @@ import radar_pipeline as pipe
 from radar_source import make_source
 from falldet.window import FloorMap, WindowDetector
 from falldet.clean import Cleaner
+from falldet.extramlp import ExtraMLP
 from falldet.floor_track import FloorTracker
 
 
@@ -30,19 +31,25 @@ from falldet.floor_track import FloorTracker
 # _scene(). macOS `afplay` (short Tink so N beeps stay countable); terminal-bell fallback over
 # SSH / Linux.
 _FALL_BEEP = os.environ.get("FALL_BEEP", "1") != "0"
-_BEEP_SND = "/System/Library/Sounds/Sosumi.aiff"
+# ⭐ DISTINCT TIMBRE per tier so they're tellable apart by EAR, not by counting beeps (user
+# 2026-07-20: frequent TI triggers made the 1-beep SUSPECTED indistinguishable from the CONFIRMED
+# burst when both were the same sound). SUSPECTED = light Tink click; CONFIRMED = heavy Sosumi alarm.
+_BEEP_SND_CONFIRM = os.environ.get("FALL_BEEP_SND", "/System/Library/Sounds/Sosumi.aiff")  # red
+_BEEP_SND_SUSPECT = os.environ.get("FALL_BEEP_SND_SUSPECT", "/System/Library/Sounds/Tink.aiff")  # orange
 _BEEP_VOL = os.environ.get("FALL_BEEP_VOL", "4")   # afplay -v amplifier (>1 boosts)
 
 
-def _beep(n=1, gap=0.12, overlap=False):
+def _beep(n=1, gap=0.12, overlap=False, snd=None):
     # overlap=False: sequential single chirps (SUSPECTED heads-up). overlap=True: fire the
     # next play before the previous finishes -> a fast, stacked ALARM burst (CONFIRMED fall).
+    # snd: sound file (defaults to the CONFIRMED alarm) -- pass the SUSPECT click for the heads-up.
     if not _FALL_BEEP:
         return
+    _snd = snd or _BEEP_SND_CONFIRM
     def _run():
         for _ in range(n):
             try:
-                cmd = ["afplay", "-v", _BEEP_VOL, _BEEP_SND]
+                cmd = ["afplay", "-v", _BEEP_VOL, _snd]
                 if overlap:
                     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 else:
@@ -58,6 +65,12 @@ def _beep(n=1, gap=0.12, overlap=False):
 
 
 _beep_last_state = [""]      # last fall_state we sounded on (rising-edge detect for SUSPECTED)
+# ⭐ WALL-CLOCK beep debounce (2026-07-20): the audible alarm is DECOUPLED from the fall_state /
+# event-onset logic, which re-fires on cloud fragmentation (prim flickers low<->gone<->standing ->
+# cloud_up flips -> onset re-arms -> the 6-beep replays = 狂响). These caps mean each tier sounds at
+# most once per interval no matter how the state flickers; the dashboard/event count is untouched.
+_suspect_beep_t = [0.0]; SUSPECT_BEEP_MIN_S = 12.0
+_confirm_beep_t = [0.0]; CONFIRM_BEEP_MIN_S = 20.0
 
 WIN_S = 20.0            # analysis window (user 2026-07-14, per sleepad validation 20-30s) —
                         # shorter window = faster real-time response to holds / person leaving
@@ -106,11 +119,22 @@ _cache = {"t": 0.0, "key": None, "state": None}
 _lock = threading.Lock()
 
 # ---- live falldet pipeline (server-side reference; mirrors the on-chip Phase-3 window) ----
-RANGE_STEP = 0.085          # m per range bin (probe: bin36 = 3.07 m)
+RANGE_STEP = float(os.environ.get("RANGE_STEP", "0.085"))  # m per range bin; MUST match the flashed
+                            # cfg's dR (5m/pose/pose65=0.085; the 128-samp pose65s=0.106). Set via env
+                            # per cfg so the cubeQuery bin mapping stays aligned with the firmware bins.
 _floor = FloorMap(cell=0.5)                                   # rolling floor map H_g(x,y)
 _floor_pts = []                                              # recent world points for calibration
 _window = WindowDetector(_floor, margin=0.45, sustain=3, clear=3)  # sustain in SCENE-calls (~3/s)
 _cleaner = Cleaner(mlp_trig=0.5, persist=2, floor_frac_min=0.7)
+# ⭐ ExtraMLP: the always-on 3001-height "is a person LYING on the floor here" classifier
+# (trained logistic, pose/extramlp_train.py). It OWNS the lie-vs-stand verdict; RR (cube) is a
+# separate person-vs-furniture gate applied on the fetched cube, NOT a lying feature. Falls back
+# to the geometric rule if the weights file is missing.
+_extramlp = ExtraMLP()
+EXTRAMLP_LIE_THR = 0.5          # P(lying) above this -> the cluster is a body on the floor
+# kill-switch / A-B toggle: EXTRAMLP=0 reverts to the geometric lying rule AND drops the
+# lying_confirmed->red promotion, reproducing the pre-ExtraMLP behavior for baseline comparison.
+_EXTRAMLP_ON = os.environ.get("EXTRAMLP", "1") != "0"
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
 QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. A 60-frame
@@ -277,6 +301,7 @@ _lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall t
 
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None,
+                "cube_ff": None,                     # cube's OWN MUSIC power-weighted floor band
                 "micro": False, "measured": False}  # latest cube 2nd-check (+micro-motion/measured)
 # FloorTracker: gives a GTRACK-dropped STILL body (fallen OR just sitting motionless) a
 # continuous track_id from its point cloud (inherits the lost tid; furniture rejected via
@@ -338,6 +363,34 @@ def _rr_from_cube(entries, fps=10.0):
     return (round(rr, 1) if strength > 0.2 else None), round(strength, 2), micro, True
 
 
+def _cube_floor_energy(entries, fps=10.0):
+    """⭐ Tier-2 cube 'floor energy band' -- the CFAR-free MUSIC power-weighted floor fraction from
+    the 320 burst itself (NOT the sparse 3001 floor_frac passed in). Reuses radar_pipeline's
+    _pose_from_motion: per bin bandpass slow-time to the motion band, covariance of the residual
+    (static clutter rejected) -> MUSIC DOA -> power-weighted Z -> fraction of MOTION energy in the
+    floor band. This is what sees a FAR/specular lying body where the 3001 cloud collapsed to 0.
+    Returns floor_frac in [0,1], or None if no motion / MUSIC failed."""
+    import numpy as _np
+    from collections import defaultdict
+    from spatial3d.range_music import DR_M
+    if not entries:
+        return None
+    byb = defaultdict(list)
+    for e in entries:
+        byb[int(e.range_bin)].append(_np.asarray(e.vec, complex))
+    bins = [b for b, s in byb.items() if len(s) >= 12]
+    if not bins:
+        return None
+    T = min(len(byb[b]) for b in bins)
+    cube_win = [_np.stack(byb[b][:T]) for b in bins]          # [i] = (T, nAnt), == _pose_from_motion's
+    dr = float((_meta or {}).get("source", {}).get("dr") or DR_M)
+    try:
+        mp = pipe._pose_from_motion(cube_win, _np.asarray(bins), dr, fps, TILT, MOUNT)
+    except Exception:
+        return None
+    return None if not mp else float(mp.get("floor_frac", 0.0))
+
+
 def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
     """Background: burst 320 at range_bin, then compute RR from it (the cube second-check).
     n_frames sets the integration window: 60 (~6s, ~2 breaths) for a quick fall confirm;
@@ -349,8 +402,10 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
             ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=3,
                                      timeout=n_frames / 10.0 + 3.0)
             rr, strength, micro, measured = _rr_from_cube(ents)
+            cube_ff = _cube_floor_energy(ents)          # MUSIC power-weighted floor band (or None)
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
                                 floor_frac=round(float(floor_frac), 2), bin=int(range_bin),
+                                cube_ff=(None if cube_ff is None else round(cube_ff, 2)),
                                 micro=micro, measured=measured)
     except Exception:
         pass
@@ -386,11 +441,15 @@ def _fall_range_bin(sc):
     return int(round(float(_np.median(wy[sel])) / RANGE_STEP))
 
 
-def _pose_of(x0, x1, y0, y1, z0, z1):
+def _pose_of(x0, x1, y0, y1, z0, z1, ez=None):
     """Pose from the two projections' extents of a per-track MERGED box:
     L = horizontal footprint (XY, longest side), Zv = vertical extent (XZ/YZ).
     A fallen body lies FLAT -> L long + Zv small (平铺). Ratio is scale-free (robust
-    to the ~1 m track-Z drift, since it compares extents not absolute height)."""
+    to the ~1 m track-Z drift, since it compares extents not absolute height).
+    ez = energy-center world-z (point-weighted mean height of the 3001 cloud, NOT the
+    drifting track-Z -> reliable). Server has no on-chip resource limit, so we add it as an
+    extra factor to arbitrate the SIT/STAND boundary the ratio alone gets wrong: a standing
+    body's mass sits high (~>=0.85 m), a seated one low (~<=0.55 m)."""
     L = max(x1 - x0, y1 - y0)
     Zv = z1 - z0
     if L >= 0.9 and Zv < 0.6:
@@ -398,7 +457,13 @@ def _pose_of(x0, x1, y0, y1, z0, z1):
     if Zv >= 1.0:
         return "STAND"                 # clearly tall column
     asp = Zv / max(L, 0.05)
-    return "STAND" if asp > 1.5 else ("LIE" if asp < 0.7 else "SIT")
+    base = "STAND" if asp > 1.5 else ("LIE" if asp < 0.7 else "SIT")
+    if ez is not None and base in ("SIT", "STAND"):   # energy-center height arbitrates SIT vs STAND
+        if ez >= 0.85:
+            return "STAND"
+        if ez <= 0.55:
+            return "SIT"
+    return base
 
 
 def _flatness(x0, x1, y0, y1, z0, z1):
@@ -590,14 +655,22 @@ def _scene():
             cx = float(px[m].mean()); cy = float(py[m].mean())   # radar-frame centroid
             _cbelow = int((wz[m] < FLOOR_Z).sum()); _ctot = int(m.sum())
             _cwy = float(_np.median(wy[m])); _cff = _cbelow / max(_ctot, 1)
-            _cz90 = float(_np.percentile(wz[m], 90))              # cluster top-of-body (robust)
-            # ⭐ AGGREGATE + RANGE-AWARE lying: floor-dominated AND the top of the body is on the
-            # floor (threshold loosened with range for the elevation bias) AND a real body.
-            _clying = bool(_cff >= LYING_FFRAC and _ctot >= LYING_MIN_N
-                           and _cz90 < LYING_TOP_Z + LYING_TOP_RANGE_K * max(0.0, _cwy - 2.0))
+            _cz90 = float(_np.percentile(wz[m], 90))              # cluster top-of-body (robust) == hi2
+            _cyspan = float(wy[m].max() - wy[m].min())            # ground-range extent (lie=elongated)
+            # ⭐ ExtraMLP lying verdict: the trained 3001-height logistic (hi2/floorfrac/yspan/n3001)
+            # OWNS lie-vs-stand. micro imputes to 0 (per-cluster temporal micro not tracked at runtime
+            # yet; weight is small). A body-size floor gate (LYING_MIN_N) still guards against furniture
+            # fragments; RR person-vs-furniture is applied later on the fetched cube.
+            _cplie = _extramlp.p_lie({"hi2": _cz90, "floorfrac": _cff, "yspan": _cyspan,
+                                      "n3001": _ctot, "micro": 0.0})
+            _clying_geom = bool(_cff >= LYING_FFRAC and _ctot >= LYING_MIN_N
+                                and _cz90 < LYING_TOP_Z + LYING_TOP_RANGE_K * max(0.0, _cwy - 2.0))
+            _clying = (bool(_ctot >= LYING_MIN_N and _cplie is not None and _cplie >= EXTRAMLP_LIE_THR)
+                       if (_extramlp.ok and _EXTRAMLP_ON) else _clying_geom)
             clusters.append({"cx": cx, "cy": cy, "wy_med": _cwy, "n": _ctot,
                              "floor_frac": _cff, "med_wz": float(_np.median(wz[m])),
-                             "z90": round(_cz90, 3), "lying": _clying})
+                             "z90": round(_cz90, 3), "lying": _clying,
+                             "lying_geom": _clying_geom, "p_lie": round(_cplie or 0.0, 3)})
             d2 = (tx - cx) ** 2 + (ty - cy) ** 2
             ti = int(d2.argmin()) if len(tx) else -1
             if ti < 0 or float(d2[ti]) > 0.8 ** 2:        # cluster not near any GTRACK track
@@ -620,18 +693,21 @@ def _scene():
             b = bytid.get(ti)
             if b is None:
                 bytid[ti] = {"tid": int(tg[ti]["tid"]), "ti": ti, "x0": x0, "x1": x1,
-                             "y0": y0, "y1": y1, "z0": z0, "z1": z1, "n": tot, "_below": below}
+                             "y0": y0, "y1": y1, "z0": z0, "z1": z1, "n": tot, "_below": below,
+                             "_zsum": float(wz[m].sum())}   # sum world-z -> energy-center height
             else:                                         # MERGE same-track fragments: a body
                 b["x0"] = min(b["x0"], x0); b["x1"] = max(b["x1"], x1)   # split by an EPS gap
                 b["y0"] = min(b["y0"], y0); b["y1"] = max(b["y1"], y1)   # (torso vs legs) is
                 b["z0"] = min(b["z0"], z0); b["z1"] = max(b["z1"], z1)   # rejoined -> pose sees
                 b["n"] += tot; b["_below"] += below                     # the WHOLE person
+                b["_zsum"] += float(wz[m].sum())
             idx = _np.where(m)[0]
             for i in idx[::max(1, len(idx) // 150)]:
                 pc_pts.append([round(float(px[i]), 2), round(float(wy[i]), 2),
                                round(float(wz[i]), 2), ti])
         for b in bytid.values():                          # per TRACK (merged whole body)
-            b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"])
+            b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"],
+                                 ez=b.pop("_zsum") / max(b["n"], 1))   # energy-center world-z
             b["floor_frac"] = round(b.pop("_below") / max(b["n"], 1), 2)   # 3001 cloud floor-band fraction
             boxes.append(b)
 
@@ -798,7 +874,7 @@ def _scene():
     # ⭐ ExtraMLP STATE classifier verdict: is ANY real in-room CLUSTER lying on the floor? Uses the
     # per-CLUSTER aggregate (robust to the far-fall no-box blind spot the per-box version had).
     lying_cluster = next((c for c in clusters if c.get("lying")
-                          and abs(c["cx"]) < 3.5 and 0.0 <= c["wy_med"] < 5.5), None)
+                          and abs(c["cx"]) < 3.5 and 0.0 <= c["wy_med"] < 6.5), None)  # range->6.5m (front wall 6.2m)
     lying_state = lying_cluster is not None
 
     # rolling floor calibration H_g(x,y) from the scene cloud (world x, wy, wz)
@@ -831,7 +907,7 @@ def _scene():
     # only need real-person to ARM; hold it for REAL_GRACE_S through the n dips.
     real_inst = bool(prim and prim.get("n", 0) >= 12
                      and abs((prim["x0"] + prim["x1"]) / 2.0) < 3.5
-                     and prim["y1"] < 5.5)
+                     and prim["y1"] < 6.5)                   # range->6.5m (front wall 6.2m)
     if real_inst:
         _real_since[0] = now
     real_person = (now - _real_since[0]) < REAL_GRACE_S     # debounced
@@ -853,7 +929,17 @@ def _scene():
     # the living gate is the 3001 below-floor cloud (floor_fall) + sustained-down -> red needs no cube.
     fresh = (now - sc.get("t", now)) < STALE_GATE_S
     cube_delay_ok = _cube_episode_t0[0] > 0.0 and (now - _cube_episode_t0[0]) >= CUBE_DELAY_S
-    if (down and cube_delay_ok and not _cube_busy[0] and fresh
+    # ⭐ VETO model (user 2026-07-20): on a TI alarm, the 3001 ExtraMLP posture can VETO -- but ONLY
+    # when it says WALK/STAND (primary_pose=="STAND"; _pose_of has no WALK, walking = a moving STAND)
+    # AND nothing is lying. If 3001 does NOT veto -- lying, OR SIT (ambiguous), OR a collapsed/absent
+    # far body, OR empty -- the cubeQuery proceeds normally. This preserves the far-lying-collapse
+    # case (no STAND box -> no veto -> cube STILL queries -> RR/MUSIC can confirm).
+    veto = bool((not lying_state) and primary_pose == "STAND")
+    # CUBE fires BROADLY: on a TI alarm, unless 3001 vetoes a STAND. Keeps the far-lying-collapse
+    # rescue (no STAND box -> cube still queries). This is SEPARATE from the suspected declaration
+    # below -- querying a cube is cheap-to-be-wrong; declaring "suspect fall" to the user is not.
+    cube_gate = bool(cube_delay_ok and not veto)
+    if (cube_gate and not _cube_busy[0] and fresh
             and (now - _last_query_t[0]) > QUERY_REFRESH_S
             and _cube_episode[0] < MAX_CUBE_BURSTS):
         rb = _fall_range_bin(sc)
@@ -870,14 +956,23 @@ def _scene():
     # re-query keeps it refreshed while down.
     cube_ev = None
     if now - _cube_result["t"] < 12.0:
-        cube_ev = {"rr": _cube_result["rr"], "floor_frac": _cube_result["floor_frac"]}
+        # Tier-2 floor evidence = the BETTER of the sparse 3001 floor_frac and the cube's OWN
+        # MUSIC power-weighted band (the latter sees a far/specular lying body where 3001 collapsed).
+        _ff_use = max(float(_cube_result["floor_frac"] or 0.0), float(_cube_result.get("cube_ff") or 0.0))
+        cube_ev = {"rr": _cube_result["rr"], "floor_frac": _ff_use}
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
     mlp_out = ({"pose": fw.label, "falling_p": fw.falling_prob}
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
-    fall_state = "fall" if dec["fall"] else ("suspected" if (dec["suspected"] or dec["trigger"]) else "none")
+    # ⭐ Suspected DECLARATION is TIGHTER than the cube gate: it needs an ACTUAL ExtraMLP lying
+    # candidate (lying_state), NOT merely "not a STAND" (user 2026-07-20: web 频报 suspect). Without
+    # this, empty-room floor_fall noise or a sitting/moving person that trips a TI trigger reads as
+    # Suspected every 18 s. The cube still queries broadly (cube_gate) to confirm/rescue; only a real
+    # ExtraMLP lying candidate (surviving the 18 s gate) goes orange + beeps.
+    susp_gate = bool(cube_delay_ok and lying_state)
+    fall_state = "fall" if dec["fall"] else ("suspected" if susp_gate else "none")
 
     # SUSTAINED-DOWN escalation: track how long the person has continuously been down
     # (bridging brief DOWN_GAP_S flicker gaps). If down that long AND a real person, call it
@@ -899,10 +994,10 @@ def _scene():
     sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S
                           and (real_person or floor_fall)
                           and (prim_ffrac >= FALL_FFRAC_MIN or floor_fall))
-    # ExtraMLP STATE classifier lying sustain (computed for inspection/output; NOT a standalone red
-    # path -- per-frame lying_state is too noisy on DYNAMIC recordings [fragmentation flicker] to red
-    # on its own; it blew up the event count. It will land as a CONFIRMATION of an existing trigger /
-    # a drop-in for the floor_fall med_wz gate, once the ambiguity sweep informs the gating.)
+    # ⭐ ExtraMLP lying sustain -> STANDALONE red (user 2026-07-20: ExtraMLP is the primary verdict).
+    # Per-frame lying_state flickers on DYNAMIC recordings [fragmentation], so we require it SUSTAINED
+    # (LYING_SUSTAIN_S, gap-bridged) AND a real_person -- that persistence is the flicker mitigation.
+    # cube RR is no longer a hard gate (user), but real_person still rejects ghosts/furniture.
     if lying_state:
         if _lying_since[0] == 0.0:
             _lying_since[0] = now
@@ -910,6 +1005,10 @@ def _scene():
     elif _lying_since[0] and (now - _lying_last[0]) > LYING_GAP_S:
         _lying_since[0] = 0.0
     lying_confirmed = bool(_lying_since[0] and (now - _lying_since[0]) >= LYING_SUSTAIN_S)
+    # ExtraMLP (Tier-1, 3001) NO LONGER reds on its own: the per-frame lying flicker re-armed the
+    # onset and blew up the event count ~15-19x (A/B 2026-07-20). It only produces the orange
+    # candidate above; RED requires Tier-2 cube confirmation (MUSIC floor-energy + RR) via dec["fall"],
+    # or the track-free sustained-down leg below. lying_confirmed stays computed as a STATE output.
     if sustained_fall and not dec["fall"]:
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
@@ -990,11 +1089,16 @@ def _scene():
     if red_trigger and _fall_onset_armed[0]:
         _fall_event_n[0] += 1
         _fall_onset_armed[0] = False
-        _beep(6, gap=0.18, overlap=True)          # ⭐ CONFIRMED fall -> rapid ALARM burst, once per distinct fall
-    # SUSPECTED (pre-confirm) -> 1 beep on the rising edge only (not every frame). A suspected that
-    # escalates to a confirmed fall gives 1 beep then 3 -- the audible escalation is intentional.
-    if fall_state == "suspected" and _beep_last_state[0] != "suspected":
-        _beep(1)
+        if now - _confirm_beep_t[0] >= CONFIRM_BEEP_MIN_S:   # debounce: onset can re-arm on flicker
+            _beep(3, gap=0.18, overlap=True, snd=_BEEP_SND_CONFIRM)   # ⭐ CONFIRMED fall -> ALARM burst
+            _confirm_beep_t[0] = now
+    # SUSPECTED (pre-confirm) -> a single LIGHT click (distinct timbre from the CONFIRMED alarm), on
+    # the rising edge. No debounce needed: susp_gate already fires once per episode (the 18 s 3001
+    # noise gate subsumes it), so a bare edge-detect gives exactly one click when ExtraMLP declares.
+    if (fall_state == "suspected" and _beep_last_state[0] != "suspected"
+            and now - _suspect_beep_t[0] >= SUSPECT_BEEP_MIN_S):
+        _beep(1, snd=_BEEP_SND_SUSPECT)
+        _suspect_beep_t[0] = now
     _beep_last_state[0] = fall_state
     if down:
         _down_clear_since[0] = 0.0
@@ -1061,8 +1165,12 @@ def _scene():
             # cube RR (breathing from the fall cube second-check, SAME estimator as the
             # vitals RR: bcg_vitals demod_channels + estimate_rr). Surfaced top-level so the
             # dashboard shows it even when the vitals /api/state RR is idle (no still track).
-            "cube_rr": _cube_result["rr"], "cube_rr_str": _cube_result["strength"],
-            "cube_rr_age": (round(time.time() - _cube_result["t"], 1) if _cube_result["t"] else None),
+            # ⭐ gate the displayed cube RR on freshness (12 s, == cube_ev/_cube_fresh): once the
+            # person is up and the 18 s burst is spent, the stale RR must CLEAR, not linger (user
+            # 2026-07-20: showed "23.7 s ago" after the person got up).
+            "cube_rr": (_cube_result["rr"] if _cube_fresh else None),
+            "cube_rr_str": (_cube_result["strength"] if _cube_fresh else 0.0),
+            "cube_rr_age": (round(time.time() - _cube_result["t"], 1) if (_cube_fresh and _cube_result["t"]) else None),
             "age_s": round(time.time() - sc.get("t", 0), 1)}
 
 

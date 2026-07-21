@@ -1,0 +1,44 @@
+{
+  "feats": [
+    "hi2",
+    "floorfrac",
+    "micro",
+    "yspan",
+    "log_n3001"
+  ],
+  "use_cube": false,
+  "mean": [
+    0.6200000000000001,
+    0.5624705882352941,
+    6.565294117647059,
+    0.4970000000000001,
+    6.103751424492684
+  ],
+  "scale": [
+    0.7666800084090608,
+    0.47229989446475495,
+    5.018890336280765,
+    0.33467701726045207,
+    2.1752012345999066
+  ],
+  "coef": [
+    -0.9829643762248325,
+    1.0161303869375549,
+    0.2009435855096036,
+    0.5890826781478072,
+    -0.35882379443416196
+  ],
+  "intercept": 0.5370608839809906,
+  "impute": {
+    "hi2": 2.0,
+    "floorfrac": 0.0,
+    "micro": 0.0,
+    "yspan": 0.0,
+    "n3001": 0.0,
+    "rr": 0.0,
+    "rr_str": 0.0,
+    "ncube": 0.0,
+    "cube_var": 0.0
+  },
+  "note": "LYING model is 3001-only: RR = person-vs-furniture, NOT lie-vs-stand (user 2026-07-20, brief \u00a731); rr is band-center-pinned (~28/min) across labels here anyway. Height (hi2/floorfrac/yspan) says on-the-floor. cube is applied by the CALLER as a separate person-gate + far-lying rescue (3001 absent + cube micro-motion/RR), not a lying feature."
+}

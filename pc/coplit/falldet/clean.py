@@ -18,10 +18,16 @@ precision.
 
 
 class Cleaner:
-    def __init__(self, mlp_trig=0.5, persist=10, floor_frac_min=0.7):
+    def __init__(self, mlp_trig=0.5, persist=10, floor_frac_min=0.7,
+                 extra_confirm_min=0.45):
         self.mlp_trig = mlp_trig          # MLP falling/lying prob that counts as a trigger
         self.persist = persist            # frames the trigger must hold for a confirmed fall
         self.floor_frac_min = floor_frac_min
+        # server-side 3001/floor/geom evidence strong enough (summed extra_score) to
+        # CONFIRM a fall when NO cube was fetched. Needs ~3 independent signals to reach
+        # this (e.g. floor_fall 0.25 + lying 0.15 + low_cloud 0.1), so a single transient
+        # signal can't escalate. Never overrides an explicit cube rejection.
+        self.extra_confirm_min = extra_confirm_min
         self.run = 0
 
     def decide(self, window_out, mlp_out, cube=None, geom=None, extra=None):
@@ -60,6 +66,10 @@ class Cleaner:
             if float(extra.get("prim_ffrac", 0.0)) >= self.floor_frac_min:
                 extra_score += 0.05; reason.append("track_floor")
             conf = min(0.98, conf + extra_score)
+        else:
+            extra_score = 0.0
+        # extra evidence strong enough to CONFIRM without a cube (see __init__).
+        extra_strong = extra_score >= self.extra_confirm_min
 
         # 2) cube second-check (the strong filter) — a red Fall REQUIRES it (rejects a
         #    dropped object: energy on the floor but NO breathing). Without a cube fetched,
@@ -77,8 +87,15 @@ class Cleaner:
         # 2) geometry prior
         if geom is not None and geom.get("at_rest_spot"):
             conf *= 0.4; cleaned = "geom:rest-spot"
-        # 3) persistence + cube confirmation -> confirmed fall (else at most suspected)
-        fall = bool(trigger and self.run >= self.persist and cube_ok is True and conf >= 0.5)
+        # 3) persistence + confirmation -> confirmed fall (else at most suspected).
+        #    Confirmation comes from EITHER the cube second-check OR, when no cube was
+        #    fetched, strong server-side extra evidence (floor_fall + lying + low_cloud...).
+        #    An explicit cube REJECTION (cube_ok is False) already returned above, so extra
+        #    can never override the cube -- it only fills the gap when the cube is absent.
+        confirmed = (cube_ok is True) or (cube_ok is None and extra_strong)
+        if confirmed and cube_ok is None:
+            reason.append("extra-confirm")
+        fall = bool(trigger and self.run >= self.persist and confirmed and conf >= 0.5)
         suspected = bool(trigger and not fall)
         return {"fall": fall, "suspected": suspected, "confidence": round(conf, 2),
                 "trigger": trigger, "reason": reason, "cleaned": cleaned}

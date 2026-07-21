@@ -22,6 +22,7 @@ import radar_pipeline as pipe
 from radar_source import make_source
 from falldet.window import FloorMap, WindowDetector
 from falldet.clean import Cleaner
+from falldet.extramlp import ExtraMLP
 from falldet.floor_track import FloorTracker
 
 
@@ -111,6 +112,12 @@ _floor = FloorMap(cell=0.5)                                   # rolling floor ma
 _floor_pts = []                                              # recent world points for calibration
 _window = WindowDetector(_floor, margin=0.45, sustain=3, clear=3)  # sustain in SCENE-calls (~3/s)
 _cleaner = Cleaner(mlp_trig=0.5, persist=2, floor_frac_min=0.7)
+# ⭐ ExtraMLP: the always-on 3001-height "is a person LYING on the floor here" classifier
+# (trained logistic, pose/extramlp_train.py). It OWNS the lie-vs-stand verdict; RR (cube) is a
+# separate person-vs-furniture gate applied on the fetched cube, NOT a lying feature. Falls back
+# to the geometric rule if the weights file is missing.
+_extramlp = ExtraMLP()
+EXTRAMLP_LIE_THR = 0.5          # P(lying) above this -> the cluster is a body on the floor
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
 QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. A 60-frame
@@ -597,14 +604,22 @@ def _scene():
             cx = float(px[m].mean()); cy = float(py[m].mean())   # radar-frame centroid
             _cbelow = int((wz[m] < FLOOR_Z).sum()); _ctot = int(m.sum())
             _cwy = float(_np.median(wy[m])); _cff = _cbelow / max(_ctot, 1)
-            _cz90 = float(_np.percentile(wz[m], 90))              # cluster top-of-body (robust)
-            # ⭐ AGGREGATE + RANGE-AWARE lying: floor-dominated AND the top of the body is on the
-            # floor (threshold loosened with range for the elevation bias) AND a real body.
-            _clying = bool(_cff >= LYING_FFRAC and _ctot >= LYING_MIN_N
-                           and _cz90 < LYING_TOP_Z + LYING_TOP_RANGE_K * max(0.0, _cwy - 2.0))
+            _cz90 = float(_np.percentile(wz[m], 90))              # cluster top-of-body (robust) == hi2
+            _cyspan = float(wy[m].max() - wy[m].min())            # ground-range extent (lie=elongated)
+            # ⭐ ExtraMLP lying verdict: the trained 3001-height logistic (hi2/floorfrac/yspan/n3001)
+            # OWNS lie-vs-stand. micro imputes to 0 (per-cluster temporal micro not tracked at runtime
+            # yet; weight is small). A body-size floor gate (LYING_MIN_N) still guards against furniture
+            # fragments; RR person-vs-furniture is applied later on the fetched cube.
+            _cplie = _extramlp.p_lie({"hi2": _cz90, "floorfrac": _cff, "yspan": _cyspan,
+                                      "n3001": _ctot, "micro": 0.0})
+            _clying_geom = bool(_cff >= LYING_FFRAC and _ctot >= LYING_MIN_N
+                                and _cz90 < LYING_TOP_Z + LYING_TOP_RANGE_K * max(0.0, _cwy - 2.0))
+            _clying = (bool(_ctot >= LYING_MIN_N and _cplie is not None and _cplie >= EXTRAMLP_LIE_THR)
+                       if _extramlp.ok else _clying_geom)
             clusters.append({"cx": cx, "cy": cy, "wy_med": _cwy, "n": _ctot,
                              "floor_frac": _cff, "med_wz": float(_np.median(wz[m])),
-                             "z90": round(_cz90, 3), "lying": _clying})
+                             "z90": round(_cz90, 3), "lying": _clying,
+                             "lying_geom": _clying_geom, "p_lie": round(_cplie or 0.0, 3)})
             d2 = (tx - cx) ** 2 + (ty - cy) ** 2
             ti = int(d2.argmin()) if len(tx) else -1
             if ti < 0 or float(d2[ti]) > 0.8 ** 2:        # cluster not near any GTRACK track
@@ -919,10 +934,10 @@ def _scene():
     sustained_fall = bool(_down_since[0] and down_dur >= FALL_SUSTAIN_S
                           and (real_person or floor_fall)
                           and (prim_ffrac >= FALL_FFRAC_MIN or floor_fall))
-    # ExtraMLP STATE classifier lying sustain (computed for inspection/output; NOT a standalone red
-    # path -- per-frame lying_state is too noisy on DYNAMIC recordings [fragmentation flicker] to red
-    # on its own; it blew up the event count. It will land as a CONFIRMATION of an existing trigger /
-    # a drop-in for the floor_fall med_wz gate, once the ambiguity sweep informs the gating.)
+    # ⭐ ExtraMLP lying sustain -> STANDALONE red (user 2026-07-20: ExtraMLP is the primary verdict).
+    # Per-frame lying_state flickers on DYNAMIC recordings [fragmentation], so we require it SUSTAINED
+    # (LYING_SUSTAIN_S, gap-bridged) AND a real_person -- that persistence is the flicker mitigation.
+    # cube RR is no longer a hard gate (user), but real_person still rejects ghosts/furniture.
     if lying_state:
         if _lying_since[0] == 0.0:
             _lying_since[0] = now
@@ -930,9 +945,10 @@ def _scene():
     elif _lying_since[0] and (now - _lying_last[0]) > LYING_GAP_S:
         _lying_since[0] = 0.0
     lying_confirmed = bool(_lying_since[0] and (now - _lying_since[0]) >= LYING_SUSTAIN_S)
-    if sustained_fall and not dec["fall"]:
+    if (sustained_fall or (lying_confirmed and real_person)) and not dec["fall"]:
         fall_state = "fall"
-        dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
+        why = f"sustained{int(down_dur)}s" if sustained_fall else "extramlp-lying"
+        dec["reason"] = list(dec.get("reason") or []) + [why]
 
     # LATCH a confirmed red Fall so it stays visible on the dashboard for FALL_HOLD_S even
     # after the person stirs/gets up (a ~6 s red that clears the instant they move is easy
