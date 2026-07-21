@@ -13,7 +13,7 @@ fall descent happened, only whether a body is on the floor now.
 import os, json, math
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT = os.path.join(_HERE, "..", "record", "extramlp_weights.json")
+_DEFAULT = os.path.join(_HERE, "extramlp_weights.json")   # weights live WITH the loader (falldet/)
 
 
 class ExtraMLP:

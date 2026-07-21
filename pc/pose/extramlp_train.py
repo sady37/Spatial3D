@@ -13,8 +13,8 @@ import os, json, math
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__)); REC = os.path.join(HERE, "..", "record")
-DS = os.path.join(REC, "extramlp_dataset.npz")
-OUT = os.path.join(REC, "extramlp_weights.json")
+DS = os.path.join(REC, "extramlp_dataset.npz")               # dataset stays in record/ (gitignored data)
+OUT = os.path.join(HERE, "..", "falldet", "extramlp_weights.json")  # weights ship WITH the loader
 
 # imputation for absent 3001 (n3001=0 -> upright-like, no body on floor) and absent cube.
 IMPUTE = {"hi2": 2.0, "floorfrac": 0.0, "micro": 0.0, "yspan": 0.0, "n3001": 0.0,
