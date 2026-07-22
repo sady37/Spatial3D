@@ -36,9 +36,9 @@ flowchart TD
 
     PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 · ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["确认后按住红 · 已实现 3449523<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连续2次阴性<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
+    R --> T["确认后按住红(报警已完成)<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连2次阴性 → 复位 fall + 3次预算<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
 
-    F -.->|"无资源 / 空返回"| RT["30s 节奏重查(60→30 救 fall2)<br/>确认后仍每 30s 刷新(无硬帽 · 无停查)<br/>固件 cubeGuard 才是防挂主力:每 300s 窗只放 30s(5发×6s=10%)<br/>server 超问部分固件直接拒发 · 不灌 UART"]:::done
+    F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(确认@+18s → +60s → +60s)后停<br/>报警已完成 —— 红色由确认按住,不再刷新<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止<br/>人恢复(cloud_up)/ cube 连2次空 → 撤销 fall + 复位 3 次预算"]:::done
     RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -69,7 +69,7 @@ flowchart TD
 
 - **cube_ff = `0.5`**:≥0.5 用 cube_ff 判 lying;<0.5 转 z40。(躺好信号 0.55-0.92 vs 远/静止 0.00,双峰空档)
 - **z40 = `0.4`(现有,不动)**:down 已成立,只判躺(~28)vs 空(~0);站/走上游点云 Z 已排,不用抬。
-- **重试节奏 = `30s`(60→30 救 fall2)**:60s 网格把落在前一次冷却影里的第二次跌倒饿死;防挂靠固件 cubeGuard(10% 占空硬闸,超预算固件拒发),server 节奏只摊预算。无 cubeGuard 固件则 ≥20s。
+- **每次跌倒 ≤ `3` 次 query(报警完成模型)**:确认@+18s → +60s → +60s,然后停 —— cube 的活是"确认这次跌倒 + 刷两次呼吸",报警一响就完事,不无限刷。红色由确认按住,**人恢复(cloud_up)即撤销 fall 并复位 3 次预算** → 下一次真跌倒重新拿 3 次。3×6s=18s/次 ≪ 固件预算,不 wedge、自终止(避免无限 query 卡死/恢复漏检卡红)。
 - **cube 校验 = (A)位置 `10 bin`(1bin≈10.8cm → ~1m)+ (B)归属 `query-epoch`**:发起查询即 +1,回包打戳,判决只认 `epoch == 当前` → 发新查询立刻作废旧包(fall1 的 cube 永远确认不了 fall2,bin 距离判不了返回时间)。
 - ⚠️ cube 波束宽 → 分不了姿态/家具;姿态=点云 Z,排家具=z40+一次性空房基线。
 
@@ -82,7 +82,8 @@ flowchart TD
 | eaafa5f | 重试刷新去停查自锁(确认后仍刷新) |
 | 8e0cfdd | cube 校验 (A)位置 10 bin |
 | 0722d | (B)归属改 **query-epoch** 时序绑定(替换 resp_bin ±10):只认本次主动查询回包 |
-| 52e1f21 | 重试节奏 60→30s(救 fall2 时序饥饿;固件 cubeGuard 防挂) |
+| 52e1f21 | 重试节奏 60→30s(临时;已被 0722e 覆盖) |
+| 0722e | **报警完成模型**:每次跌倒 ≤3 query(@+18/+60/+60s)后停;回 60s;恢复(cloud_up)撤销 fall + 复位预算 |
 
 | TODO(未实现) | 内容 |
 |---|---|

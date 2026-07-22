@@ -185,36 +185,23 @@ QUERY_REFRESH_S = 12.0       # DEPRECATED (TODO#3 replaced it with the global CU
 STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the sensor is
                              # wedged/stalled, so 320 bursts hit a DEAD firmware -- useless,
                              # and they can keep it from recovering. Gate every probe on this.
-# ⭐ TODO#3 STARVATION FIX (user 2026-07-22, FROZEN): the old MAX_CUBE_BURSTS=3 HARD per-episode cap
-# STARVED a 2nd fall in the same episode (live 110000 Fall2: 段1 spent all 3 bursts, episode never
-# reset because the 段1->段2 gap 2s < CUBE_RESET_S=5s -> a textbook 37s lying got ZERO bursts -> stuck
-# suspected). FIX (user 0722): NO per-episode hard cap -- a single FIXED CUBE_RETRY_S=60 s cadence,
-# always on while a fall trigger persists. fail -> wait 60 s -> retry (3-4 retries span the firmware
-# cubeGuard budget window, cubeGuardCfg: 300 s / 300 frames / 10% duty, so a persistent fall confirms
-# within one window); and AFTER a confirm it KEEPS refreshing at 60 s (1 burst/60 s = 10% duty = safe)
-# so RR/living/collapse stay fresh and a repeated/2nd fall (fall3) still gets queried.
-# ⚠️ NO stop-on-confirm (user 0722-b): the first cut stopped querying on confirm, which self-locked
-# (confirm -> red hold -> fall_state=fall bumps _cube_last_active -> episode never resets -> stop never
-# lifts) and froze the cube 211 s stale on a long/repeated fall -- the opposite of what a long-down
-# (more urgent) case needs. A plain fixed cadence is both safe AND keeps monitoring live.
-# ⭐ CADENCE SHORTENED 60 -> 30 s (user 2026-07-22c): the 60 s grid STARVED fall2 -- live 165000 replay:
-# bursts locked to 23/83/143 s (rigid 60 s grid); a 2nd fall at ~100-126 s fell inside fall1's 60 s
-# shadow -> ZERO fresh cube -> reused fall1's stale bin -> cube_res age climbed 17->19 s. This is NOT
-# an AB-provenance bug (AB's 10-bin gate is deliberate; a nearby 2nd fall at a close bin legitimately
-# passes A and B) -- it is pure time-starvation, so the fix is a shorter cadence, NOT touching AB.
-# WEDGE-SAFE: the real wedge protection is the FIRMWARE cubeGuard (cubeGuardCfg 300 300 3000 = 30 s
-# single-query cap + 30 s cube / 300 s rolling = 10% duty, HARD-enforced on-chip; over-budget queries
-# are REFUSED at the CLI parser -- "budget exhausted this window", return without arming -> no 320
-# stream -> no UART flood). The SERVER cadence only shapes HOW the 30 s budget spreads across the 300 s
-# window: 30 s cadence over a single ~150 s event = 5 bursts x 6 s = 30 s = exactly the budget (all
-# served, none refused). Below the firmware duty it CANNOT wedge -- excess is declined, not flooded.
-# TRADE-OFF (accepted, user 0722c): a shorter cadence front-loads the budget, so a VERY long single
-# fall may lose late-stage RR refresh once the 300 s budget is spent (acceptable -- already confirmed
-# red; late refresh is vitals-only), and the residual starvation moves from the 60 s server grid to
-# the firmware 300 s budget (milder). PREREQ: assumes the flashed firmware carries cubeGuard (git
-# ae0ae80 + 9805114 hw-validation); without it, the server cadence is the ONLY guard -- keep it >= 20 s.
-CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "30.0"))  # fixed s between cube bursts (always on
-                             # while a fall trigger persists; spreads the firmware 30 s/300 s budget)
+# ⭐ ALARM-DONE MODEL (user 2026-07-22e — SUPERSEDES the 0722/0722c unlimited-cadence design): the cube's
+# JOB is to CONFIRM the fall (raise the alarm) + refresh vitals a couple of times -- NOT to poll forever.
+# Once the alarm has fired, THIS alarm is DONE. So a fall episode fires at most MAX_CUBE_BURSTS cube
+# queries: query1 @ trigger+18 s (confirm -> red), query2 @ +CUBE_RETRY_S (refresh RR), query3 @
+# +CUBE_RETRY_S (refresh RR), then STOP querying. The red HOLDS on the confirmation (no more cube needed);
+# it is CLEARED by RECOVERY (person got up: cloud_up sustained) -- see the recovery block in _scene.
+# WHY the hard cap is back (it was removed 0722, re-added here): unlimited "keep querying until cloud_up
+# / 2x-empty" can WEDGE (never-ending 320) and never terminate if recovery-detection misses -> stuck red.
+# Bounding to 3 makes total cube = 3 x 6 s = 18 s/fall (<< firmware budget) -> can't wedge, and the alarm
+# is self-terminating (fire, hold, clear-on-recovery). The OLD 3-cap starved fall2 because the episode
+# only reset on 5 s QUIET (CUBE_RESET_S); the FIX is that RECOVERY (cloud_up) now ALSO resets the query
+# budget (_cube_episode -> 0) -> a genuinely NEW fall (person got up, then fell again) re-arms its own
+# fresh 3 queries. Two falls with NO recovery between = the SAME fall (alarm already fired) -> 3 is enough.
+MAX_CUBE_BURSTS = 3          # ⭐ hard cap: cube queries PER fall episode (confirm + 2 vitals refreshes).
+                             # Reset to 0 on RECOVERY (cloud_up) or CUBE_RESET_S quiet -> next fall re-arms.
+CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "60.0"))  # s between the (<=3) cube bursts of a fall
+                             # (query1 @ +18 s, then +60 s, +60 s); spreads the 3 confirmations over ~2 min
 _last_cube_burst_t = [0.0]   # wall time of the LAST cube burst from EITHER probe (retry timer)
 _cube_query_epoch = [0]      # ⭐ (B) PROVENANCE (user 0722d): +1 on every ISSUED query; a held result is
                              # accepted ONLY if its stamped epoch == this value -> issuing a new query
@@ -222,15 +209,10 @@ _cube_query_epoch = [0]      # ⭐ (B) PROVENANCE (user 0722d): +1 on every ISSU
 FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
                              # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
                              # NOT latch a permanent fall (that was the 22-minute false latch).
-_cube_episode = [0]          # cube bursts fired in the CURRENT physical fall episode (diagnostic
-                             # counter only now -- NO LONGER a hard cap; the rate limit bounds duty)
-FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
-                             # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
-                             # NOT latch a permanent fall (that was the 22-minute false latch).
-_cube_episode = [0]          # cube bursts fired in the CURRENT physical fall episode, UNIFIED
-                             # across down-probe + lost-probe. NOT per floor-track id -- those
-                             # CHURN with fragmentation, so a per-id cap leaked (each new id got
-                             # a fresh 3-burst budget -> dozens of bursts -> re-wedge). Hard cap.
+_cube_episode = [0]          # cube bursts fired in the CURRENT fall episode -> HARD-capped at
+                             # MAX_CUBE_BURSTS. UNIFIED across down-probe + lost-probe. NOT per
+                             # floor-track id (those CHURN -> a per-id cap leaked a fresh budget each
+                             # new id -> re-wedge). Reset on recovery / CUBE_RESET_S quiet.
 _cube_last_active = [0.0]    # last wall time a fall was active (down / floor-fall / latched)
 CUBE_RESET_S = 5.0           # after this long with NO active fall (person up & gone), the cube
                              # episode budget resets -> the next distinct fall gets its own bursts
@@ -935,11 +917,12 @@ def _scene():
                 # NO reset-on-RR here: a breathing body returns RR every burst, and resetting
                 # the counter kept it probing forever -> 320 flood -> WEDGE. Rate-limited instead.
                 # GATED: 3001-first DELAY elapsed (18 s of 3001 before the cube) AND sensor FRESH
-                # (never flood a wedged firmware) AND fixed CUBE_RETRY_S (TODO#3: shared retry timer
-                # across both probes; keeps refreshing vitals even after a confirm, no hard stop).
+                # (never flood a wedged firmware) AND CUBE_RETRY_S spacing AND the MAX_CUBE_BURSTS
+                # alarm-done cap (shared across both probes) -- <=3 queries/fall, then the alarm is done.
                 if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
                         and (_now - _cube_episode_t0[0]) >= CUBE_DELAY_S
                         and not _cube_busy[0]
+                        and _cube_episode[0] < MAX_CUBE_BURSTS      # alarm-done: <=3 queries/fall
                         and (_now - sc.get("t", _now)) < STALE_GATE_S
                         and (_now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
                     # WHERE to query (Q: lost坐标记录了吗/查的是它吗/考虑地板能量吗):
@@ -1108,12 +1091,11 @@ def _scene():
     # rescue (no STAND box -> cube still queries). This is SEPARATE from the suspected declaration
     # below -- querying a cube is cheap-to-be-wrong; declaring "suspect fall" to the user is not.
     cube_gate = bool(cube_delay_ok and not veto)
-    # ⭐ TODO#3 (FROZEN, user 0722-b): fixed CUBE_RETRY_S cadence, NO hard stop-on-confirm. Keep
-    # querying every CUBE_RETRY_S even AFTER a confirm -- 1 burst/60s = firmware 10% duty (safe, no
-    # wedge) -- so RR/living/collapse stay FRESH and a repeated/2nd fall (fall3) still gets queried.
-    # (The earlier stop-on-confirm self-locked: confirm -> red hold -> fall_state=fall bumps
-    # _cube_last_active -> episode never resets -> stop never lifts -> cube froze 211 s stale.)
+    # ⭐ ALARM-DONE (user 0722e): at most MAX_CUBE_BURSTS queries per fall (confirm @ +18s, then +60s,
+    # +60s), then STOP -- the alarm has fired, the red HOLDS on the confirmation, and RECOVERY clears it.
+    # The cap makes total cube 3x6s=18s/fall (can't wedge) and self-terminating (no query-forever).
     if (cube_gate and not _cube_busy[0] and fresh
+            and _cube_episode[0] < MAX_CUBE_BURSTS
             and (now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
         rb = _fall_range_bin(sc)
         if rb is not None:
@@ -1267,6 +1249,13 @@ def _scene():
             _fall_latch_until[0] = 0.0
             _cube_confirmed_episode[0] = False     # got up -> episode over -> drop the confirmation hold
             _last_low_xy[0] = None                 # episode discarded -> forget the fall spot
+            # ⭐ ALARM-DONE (user 0722e): recovery ENDS the episode -> reset the cube query budget NOW
+            # (don't wait for the 5 s-quiet CUBE_RESET_S) so a genuinely NEW fall re-arms its own 3
+            # queries. This is what makes the MAX_CUBE_BURSTS cap safe (the old cap starved fall2 because
+            # only 5 s-quiet reset it; recovery is the correct, immediate episode boundary).
+            _cube_episode[0] = 0
+            _cube_episode_t0[0] = 0.0
+            _cube_neg_run[0] = 0
     else:
         _recover_since[0] = 0.0
     if now < _fall_latch_until[0]:

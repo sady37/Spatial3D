@@ -114,9 +114,9 @@ flowchart TD
 
     PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 &nbsp; · &nbsp; ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["确认后按住红 · 已实现 3449523<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连续2次阴性<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
+    R --> T["确认后按住红(报警已完成)<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连2次阴性 → 复位 fall + 3次预算<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
 
-    F -.->|"无资源 / 空返回"| RT["30s 节奏重查(60→30 救 fall2)<br/>确认后仍每 30s 刷新(无硬帽 · 无停查)<br/>固件 cubeGuard 才是防挂主力:每 300s 窗只放 30s(5发×6s=10%)<br/>server 超问部分固件直接拒发 · 不灌 UART"]:::done
+    F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(确认@+18s → +60s → +60s)后停<br/>报警已完成 —— 红色由确认按住,不再刷新<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止<br/>人恢复(cloud_up)/ cube 连2次空 → 撤销 fall + 复位 3 次预算"]:::done
     RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -148,7 +148,7 @@ flowchart TD
         <li>lying 单独定 fall;Living_state 只贴标签("?"≠崩溃)</li>
         <li><b>cube 是权威</b>:进 cube-query = down 已不可信 → down 不再排/撤 cube</li>
         <li>确认后按住红,起身(cloud_up)或 cube 连2阴性 才撤</li>
-        <li>cube 校验:(A)位置 10bin +(B)归属 <b>query-epoch</b>(只认本次查询回包,发新查询即作废旧包),失败作废 → 30s 重查</li>
+        <li>cube 校验:(A)位置 10bin +(B)归属 <b>query-epoch</b>(只认本次查询回包,发新查询即作废旧包),失败作废 → 下次 query 重查</li>
       </ul>
     </div>
     <div class="card note">
@@ -156,7 +156,7 @@ flowchart TD
       <ul>
         <li>cube_ff 强/弱 = <code>0.5</code>(躺 0.55–0.92 vs 远/静 0.00)</li>
         <li>z40 lying = <code>0.4</code>(躺 ~28 ≫ 空 ~0)</li>
-        <li>重试 X = <code>30s</code>(60→30 救 fall2;固件 300帧/300s/10% 才是硬闸)</li>
+        <li>每次跌倒 ≤ <code>3</code> query(@+18/+60/+60s),报警完成即停;<b>人恢复→撤销 fall</b></li>
         <li>校验门限 = <code>10 bin</code>(1bin≈10.8cm → ~1m)</li>
       </ul>
     </div>
