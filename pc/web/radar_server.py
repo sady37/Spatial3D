@@ -172,19 +172,21 @@ STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the
 # ⭐ TODO#3 STARVATION FIX (user 2026-07-22, FROZEN): the old MAX_CUBE_BURSTS=3 HARD per-episode cap
 # STARVED a 2nd fall in the same episode (live 110000 Fall2: 段1 spent all 3 bursts, episode never
 # reset because the 段1->段2 gap 2s < CUBE_RESET_S=5s -> a textbook 37s lying got ZERO bursts -> stuck
-# suspected). FIX (user 0722): NO per-episode hard cap. Two rules instead:
-#   (1) STOP-ON-CONFIRM -- once the cube CONFIRMED a fall this episode (_cube_confirmed_episode), STOP
-#       re-querying (the red is held by TODO#1). This naturally bounds bursts to ~2-3 per fall (the
-#       confirm ends it), so a breathing body no longer keeps the cube flooding the UART -> no wedge,
-#       and a 2nd fall (new episode) gets a fresh budget instead of being starved.
-#   (2) FIXED CUBE_RETRY_S retry while NOT yet confirmed -- fail -> wait 60 s -> retry -> ... By the
-#       3rd-4th retry (180-240 s) the firmware cubeGuard budget (cubeGuardCfg: 300 s window / 300-frame
-#       budget / 10% duty) has refilled, so a persistent fall is confirmed within one budget window.
+# suspected). FIX (user 0722): NO per-episode hard cap -- a single FIXED CUBE_RETRY_S=60 s cadence,
+# always on while a fall trigger persists. fail -> wait 60 s -> retry (3-4 retries span the firmware
+# cubeGuard budget window, cubeGuardCfg: 300 s / 300 frames / 10% duty, so a persistent fall confirms
+# within one window); and AFTER a confirm it KEEPS refreshing at 60 s (1 burst/60 s = 10% duty = safe)
+# so RR/living/collapse stay fresh and a repeated/2nd fall (fall3) still gets queried.
+# ⚠️ NO stop-on-confirm (user 0722-b): the first cut stopped querying on confirm, which self-locked
+# (confirm -> red hold -> fall_state=fall bumps _cube_last_active -> episode never resets -> stop never
+# lifts) and froze the cube 211 s stale on a long/repeated fall -- the opposite of what a long-down
+# (more urgent) case needs. The 60 s cadence is the wedge protection now (the old wedge was a 12 s /
+# 50%-duty flood; 60 s is safe), so a plain fixed cadence is both safe AND keeps monitoring live.
 # CAVEAT (accepted, user 0722): a ~19 s SHORT fall whose FIRST burst mis-times/empties (222000: 首发
 # bin35 空, the confirming burst was +12 s at bin36) is MISSED -- the 2nd try is +60 s, by when the
 # body is up. That is a first-burst TARGETING issue to fix separately, NOT a reason to fast-poll.
-CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "60.0"))  # fixed s between cube bursts while a
-                             # fall is NOT yet confirmed; 3-4 retries span one firmware budget window
+CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "60.0"))  # fixed s between cube bursts (always on
+                             # while a fall trigger persists; 3-4 retries span one firmware budget window)
 _last_cube_burst_t = [0.0]   # wall time of the LAST cube burst from EITHER probe (retry timer)
 FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
                              # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
@@ -895,11 +897,11 @@ def _scene():
                 # NO reset-on-RR here: a breathing body returns RR every burst, and resetting
                 # the counter kept it probing forever -> 320 flood -> WEDGE. Rate-limited instead.
                 # GATED: 3001-first DELAY elapsed (18 s of 3001 before the cube) AND sensor FRESH
-                # (never flood a wedged firmware) AND STOP-ON-CONFIRM + fixed CUBE_RETRY_S (TODO#3:
-                # shared retry timer across both probes; stop once the fall is confirmed).
+                # (never flood a wedged firmware) AND fixed CUBE_RETRY_S (TODO#3: shared retry timer
+                # across both probes; keeps refreshing vitals even after a confirm, no hard stop).
                 if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
                         and (_now - _cube_episode_t0[0]) >= CUBE_DELAY_S
-                        and not _cube_busy[0] and not _cube_confirmed_episode[0]
+                        and not _cube_busy[0]
                         and (_now - sc.get("t", _now)) < STALE_GATE_S
                         and (_now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
                     # WHERE to query (Q: lost坐标记录了吗/查的是它吗/考虑地板能量吗):
@@ -1067,11 +1069,12 @@ def _scene():
     # rescue (no STAND box -> cube still queries). This is SEPARATE from the suspected declaration
     # below -- querying a cube is cheap-to-be-wrong; declaring "suspect fall" to the user is not.
     cube_gate = bool(cube_delay_ok and not veto)
-    # ⭐ TODO#3 (FROZEN): STOP-ON-CONFIRM + fixed CUBE_RETRY_S. Once the cube confirmed a fall this
-    # episode, STOP re-querying (`not _cube_confirmed_episode`) -- the red is held by TODO#1, so a
-    # breathing body no longer keeps the cube flooding the UART. While NOT yet confirmed, retry every
-    # CUBE_RETRY_S; 3-4 retries span one firmware budget window. Shared timer across both probes.
-    if (cube_gate and not _cube_busy[0] and fresh and not _cube_confirmed_episode[0]
+    # ⭐ TODO#3 (FROZEN, user 0722-b): fixed CUBE_RETRY_S cadence, NO hard stop-on-confirm. Keep
+    # querying every CUBE_RETRY_S even AFTER a confirm -- 1 burst/60s = firmware 10% duty (safe, no
+    # wedge) -- so RR/living/collapse stay FRESH and a repeated/2nd fall (fall3) still gets queried.
+    # (The earlier stop-on-confirm self-locked: confirm -> red hold -> fall_state=fall bumps
+    # _cube_last_active -> episode never resets -> stop never lifts -> cube froze 211 s stale.)
+    if (cube_gate and not _cube_busy[0] and fresh
             and (now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
         rb = _fall_range_bin(sc)
         if rb is not None:
