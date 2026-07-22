@@ -104,7 +104,7 @@ def _reset_state():
     srv._down_last[0] = 0.0
     srv._lying_since[0] = 0.0; srv._lying_last[0] = 0.0
     srv._fall_latch_until[0] = 0.0
-    srv._cube_result.update(rr=None, strength=0.0, t=0.0, floor_frac=0.0, bin=None)
+    srv._cube_result.update(rr=None, strength=0.0, t=0.0, floor_frac=0.0, bin=None, resp_bin=None)
     srv._floor_pts = []
     srv._lost_since.clear(); srv._lost_query_t.clear()
     srv._cube_episode[0] = 0; srv._cube_last_active[0] = 0.0; srv._cube_episode_t0[0] = 0.0

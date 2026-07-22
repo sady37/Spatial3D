@@ -160,6 +160,15 @@ _Z40_PRESENCE = os.environ.get("Z40_PRESENCE", "1") != "0"
 # ~28-97 >> empty ~0; `down` already excluded stand/walk upstream so 0.4 only clears empty-noise).
 CUBE_FF_THR = 0.5
 Z40_LYING_THR = 0.4
+# ⭐ PROVENANCE/LOCATION gate (user 2026-07-22, FROZEN): a cube result used in the fall decision MUST
+# be THIS fall's OWN query AT THIS location, else it is a stale/foreign result reused as a false
+# confirm (Q2 live 154000: an upright-time bin-35 cube reused 10 s later for a window blip -> 假红).
+# Two checks, both in RANGE BINS (the cube's only resolved axis): (A) the queried bin is within
+# CUBE_LOC_MAX_BIN of the CURRENT fall/lost below-floor location; (B) the RESPONSE's range matches the
+# queried bin (it is the answer to this query, not a leftover). Fail either -> discard -> 作废 (no
+# return) -> the 60 s retry re-queries. Fixed 10-BIN gate (NOT 1m/RANGE_STEP): 1 bin ≈ 10.8 cm (65 ps)
+# so 10 bin ≈ 1.08 m ≈ 1 m, and a fixed bin count avoids depending on RANGE_STEP (=0.085, possibly skew).
+CUBE_LOC_MAX_BIN = 10
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
 QUERY_REFRESH_S = 12.0       # DEPRECATED (TODO#3 replaced it with the global CUBE_RETRY_S rate
@@ -356,6 +365,7 @@ _lost_query_t = {}          # floor-track id -> last lost-probe cubeQuery wall t
 
 _cube_result = {"rr": None, "strength": 0.0, "t": 0.0, "floor_frac": 0.0, "bin": None,
                 "cube_ff": None,                     # cube's OWN MUSIC power-weighted floor band
+                "resp_bin": None,                    # RESPONSE median range bin (provenance check B)
                 "micro": False, "measured": False}  # latest cube 2nd-check (+micro-motion/measured)
 # FloorTracker: gives a GTRACK-dropped STILL body (fallen OR just sitting motionless) a
 # continuous track_id from its point cloud (inherits the lost tid; furniture rejected via
@@ -455,6 +465,10 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
         if hasattr(_src, "request_cube"):
             ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=3,
                                      timeout=n_frames / 10.0 + 3.0)
+            # ⭐ (B) provenance: the RESPONSE's own range (median entry bin) -- checked against the
+            # requested bin at decision time so a leftover/foreign burst is discarded (作废).
+            _rbs = sorted(int(e.range_bin) for e in ents) if ents else []
+            resp_bin = _rbs[len(_rbs) // 2] if _rbs else None
             rr, strength, micro, measured = _rr_from_cube(ents)
             cube_ff = _cube_floor_energy(ents)          # MUSIC power-weighted floor band (or None)
             z40 = None
@@ -480,6 +494,7 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
                     z40 = None
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
                                 floor_frac=round(float(floor_frac), 2), bin=int(range_bin),
+                                resp_bin=resp_bin,
                                 cube_ff=(None if cube_ff is None else round(cube_ff, 2)),
                                 micro=micro, measured=measured, z40=z40)
     except Exception:
@@ -1099,6 +1114,22 @@ def _scene():
     cube_living_state = None     # "Living" (rr|micro) / "?" (body but unmeasurable) / None (no fresh cube)
     if now - _cube_result["t"] < 12.0:
         cube_lying = _cube_lying_verdict(_cube_result)
+        # ⭐ (A) LOCATION + (B) PROVENANCE gate (FROZEN 0722, fixed 10-bin CUBE_LOC_MAX_BIN): the held
+        # cube must be THIS fall's OWN query AT THIS location, else it is a stale/foreign result reused
+        # as a false confirm (Q2 live 154000: an upright-time bin-35 cube reused 10 s later for a window
+        # blip -> 假红). (A) the queried bin is within 10 bins of the CURRENT fall/lost below-floor
+        # location; (B) the RESPONSE's range matches the queried bin (this query's own answer). Fail
+        # either -> discard -> 作废 (cube_lying=None, no confirm, no veto) -> the 60 s retry re-queries.
+        if cube_lying is not None:
+            _qbin = _cube_result.get("bin")
+            _rbin = _cube_result.get("resp_bin")
+            _curbin = _cube_target_bin(sc)               # current fall/lost location (None -> no mass)
+            _loc_ok = (_curbin is not None and _qbin is not None
+                       and abs(_qbin - _curbin) <= CUBE_LOC_MAX_BIN)     # (A)
+            _own_ok = (_rbin is not None and _qbin is not None
+                       and abs(_rbin - _qbin) <= CUBE_LOC_MAX_BIN)       # (B)
+            if not (_loc_ok and _own_ok):
+                cube_lying = None                        # not this fall's own query here -> 作废
         if cube_lying is not None:                       # a real assessment (Y or N) -> feed the cleaner
             # micro = living micro-motion (confirms a person when RR can't lock: back-to-radar/occluded)
             cube_ev = {"rr": _cube_result["rr"],
