@@ -174,7 +174,8 @@ _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall 
 QUERY_REFRESH_S = 12.0       # DEPRECATED (TODO#3 replaced it with the global CUBE_RETRY_S rate
                              # limit). Kept only as documentation of the old 50%-duty reasoning:
                              # a 6 s burst back-to-back at ~60% duty accumulates and WEDGES the
-                             # DATA UART; the fix is a bigger idle gap, now CUBE_RETRY_S=60s (10%).
+                             # DATA UART; the fix is a bigger idle gap (CUBE_RETRY_S, now 30 s) UNDER
+                             # the firmware cubeGuard 10% duty cap that hard-enforces the real limit.
 STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the sensor is
                              # wedged/stalled, so 320 bursts hit a DEAD firmware -- useless,
                              # and they can keep it from recovering. Gate every probe on this.
@@ -189,13 +190,25 @@ STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the
 # ⚠️ NO stop-on-confirm (user 0722-b): the first cut stopped querying on confirm, which self-locked
 # (confirm -> red hold -> fall_state=fall bumps _cube_last_active -> episode never resets -> stop never
 # lifts) and froze the cube 211 s stale on a long/repeated fall -- the opposite of what a long-down
-# (more urgent) case needs. The 60 s cadence is the wedge protection now (the old wedge was a 12 s /
-# 50%-duty flood; 60 s is safe), so a plain fixed cadence is both safe AND keeps monitoring live.
-# CAVEAT (accepted, user 0722): a ~19 s SHORT fall whose FIRST burst mis-times/empties (222000: 首发
-# bin35 空, the confirming burst was +12 s at bin36) is MISSED -- the 2nd try is +60 s, by when the
-# body is up. That is a first-burst TARGETING issue to fix separately, NOT a reason to fast-poll.
-CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "60.0"))  # fixed s between cube bursts (always on
-                             # while a fall trigger persists; 3-4 retries span one firmware budget window)
+# (more urgent) case needs. A plain fixed cadence is both safe AND keeps monitoring live.
+# ⭐ CADENCE SHORTENED 60 -> 30 s (user 2026-07-22c): the 60 s grid STARVED fall2 -- live 165000 replay:
+# bursts locked to 23/83/143 s (rigid 60 s grid); a 2nd fall at ~100-126 s fell inside fall1's 60 s
+# shadow -> ZERO fresh cube -> reused fall1's stale bin -> cube_res age climbed 17->19 s. This is NOT
+# an AB-provenance bug (AB's 10-bin gate is deliberate; a nearby 2nd fall at a close bin legitimately
+# passes A and B) -- it is pure time-starvation, so the fix is a shorter cadence, NOT touching AB.
+# WEDGE-SAFE: the real wedge protection is the FIRMWARE cubeGuard (cubeGuardCfg 300 300 3000 = 30 s
+# single-query cap + 30 s cube / 300 s rolling = 10% duty, HARD-enforced on-chip; over-budget queries
+# are REFUSED at the CLI parser -- "budget exhausted this window", return without arming -> no 320
+# stream -> no UART flood). The SERVER cadence only shapes HOW the 30 s budget spreads across the 300 s
+# window: 30 s cadence over a single ~150 s event = 5 bursts x 6 s = 30 s = exactly the budget (all
+# served, none refused). Below the firmware duty it CANNOT wedge -- excess is declined, not flooded.
+# TRADE-OFF (accepted, user 0722c): a shorter cadence front-loads the budget, so a VERY long single
+# fall may lose late-stage RR refresh once the 300 s budget is spent (acceptable -- already confirmed
+# red; late refresh is vitals-only), and the residual starvation moves from the 60 s server grid to
+# the firmware 300 s budget (milder). PREREQ: assumes the flashed firmware carries cubeGuard (git
+# ae0ae80 + 9805114 hw-validation); without it, the server cadence is the ONLY guard -- keep it >= 20 s.
+CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "30.0"))  # fixed s between cube bursts (always on
+                             # while a fall trigger persists; spreads the firmware 30 s/300 s budget)
 _last_cube_burst_t = [0.0]   # wall time of the LAST cube burst from EITHER probe (retry timer)
 FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
                              # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
