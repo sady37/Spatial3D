@@ -451,6 +451,26 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
         _cube_busy[0] = False
 
 
+def _cube_target_bin(sc, fallback=None):
+    """Cube-query range bin = the DENSE below-floor cloud's median GROUND range = the fallen body.
+    ⭐ user 2026-07-22: the below-floor cloud is the FULLEST, range-robust locator (差值/基值 z40 must
+    read the covariance AT the body's bin). A FRAGMENTED far track's death/anchor coordinate scatters
+    to 6 m / 1.9 m / even behind the radar (live 042500: 31 queries hit bin 57/18/5/-10, all empty,
+    while 16417 below-floor points sat at bin 46) and must NOT drive the query. `fallback` (a
+    death-coordinate bin) is used ONLY when there is no below-floor mass (cloud fully gone)."""
+    import numpy as _np, math as _m
+    pcx = sc.get("pc_xyz")
+    if pcx is not None and len(pcx):
+        th = _m.radians(TILT or 0.0)
+        py, pz = pcx[:, 1], pcx[:, 2]
+        wy = py * _m.cos(th) + pz * _m.sin(th)                # world GROUND range (matches 320)
+        wz = MOUNT + pz * _m.cos(th) - py * _m.sin(th)        # world height
+        below = wz < (_floor.default + 0.5)
+        if int(below.sum()) >= FALL_LEG_MIN_PTS:              # a real fallen-body mass exists here
+            return int(round(float(_np.median(wy[below])) / RANGE_STEP))
+    return fallback
+
+
 def _fall_range_bin(sc):
     """Range bin to cubeQuery = the fallen body's WORLD GROUND range wy (= py*cos(tilt) +
     pz*sin(tilt)). VERIFIED on 233000: the 320 breathing bins (29-44, median 35) match the
@@ -465,6 +485,12 @@ def _fall_range_bin(sc):
     seated 2nd person with the faller and lands between them (190500), so the cube query missed
     the far faller's bin. The aggregate stays as the fallback when no cluster was selected."""
     import numpy as _np, math as _m
+    # ⭐ below-floor cloud FIRST (user 0722): the dense fallen-body mass is the reliable target, NOT
+    # the drifted per-cluster anchor -- `_fall_anchor`/death scatter on a fragmented far track and
+    # made 31 live queries miss the body. Anchor/full-median only when NO below-floor mass exists.
+    tb = _cube_target_bin(sc)
+    if tb is not None:
+        return tb
     if _fall_anchor[0] is not None:
         return int(round(float(_fall_anchor[0]) / RANGE_STEP))
     pcx = sc.get("pc_xyz")
@@ -473,10 +499,7 @@ def _fall_range_bin(sc):
     th = _m.radians(TILT or 0.0)
     py, pz = pcx[:, 1], pcx[:, 2]
     wy = py * _m.cos(th) + pz * _m.sin(th)                # world GROUND range (matches 320)
-    wz = MOUNT + pz * _m.cos(th) - py * _m.sin(th)        # world height -> pick the fallen body
-    low = wz < (_floor.default + 0.5)
-    sel = low if int(low.sum()) >= 4 else _np.ones(len(pcx), bool)
-    return int(round(float(_np.median(wy[sel])) / RANGE_STEP))
+    return int(round(float(_np.median(wy)) / RANGE_STEP))
 
 
 def _pose_of(x0, x1, y0, y1, z0, z1, ez=None):
@@ -828,13 +851,13 @@ def _scene():
                     # 2) else the DEATH coordinate near this lost track (where a person went DOWN,
                     #    from `_fall_deaths`) -- not the drifted floor position.
                     # 3) else fall back to the floor-track position.
-                    if _fall_anchor[0] is not None:
-                        rb = int(round(float(_fall_anchor[0]) / RANGE_STEP))
-                    else:
-                        _dxy = [(dx, dy) for (dt, dx, dy) in _fall_deaths
-                                if (dx - ftk.x) ** 2 + (dy - ftk.y) ** 2 < FALL_REGION_M ** 2]
-                        _ax, _ay = _dxy[-1] if _dxy else (ftk.x, ftk.y)
-                        rb = int(round(math.hypot(_ax, _ay) / RANGE_STEP))
+                    # ⭐ below-floor cloud FIRST (user 0722): a lost far track's death/anchor coord
+                    # scatters onto empty bins; the PERSISTENT below-floor mass is the real body.
+                    # Death coordinate is only the fallback when the cloud is fully gone.
+                    _dxy = [(dx, dy) for (dt, dx, dy) in _fall_deaths
+                            if (dx - ftk.x) ** 2 + (dy - ftk.y) ** 2 < FALL_REGION_M ** 2]
+                    _ax, _ay = _dxy[-1] if _dxy else (ftk.x, ftk.y)
+                    rb = _cube_target_bin(sc, fallback=int(round(math.hypot(_ax, _ay) / RANGE_STEP)))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
                     _cube_episode[0] += 1
@@ -860,7 +883,9 @@ def _scene():
                 and _cube_episode[0] < MAX_CUBE_BURSTS):
             if _cube_episode_t0[0] == 0.0:
                 _cube_episode_t0[0] = _now
-            rb = int(round(math.hypot(_far_death[1], _far_death[2]) / RANGE_STEP))
+            # ⭐ below-floor cloud FIRST (user 0722): even the FAR-force death coord scatters; aim at
+            # the persistent below-floor mass, fall back to the death coord only if the cloud is gone.
+            rb = _cube_target_bin(sc, fallback=int(round(math.hypot(_far_death[1], _far_death[2]) / RANGE_STEP)))
             _cube_busy[0] = True; _last_query_t[0] = _now; _cube_episode[0] += 1
             threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60), daemon=True).start()
 
