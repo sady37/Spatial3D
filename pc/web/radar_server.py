@@ -192,6 +192,11 @@ _cube_episode_t0 = [0.0]     # wall time the current cube episode's trigger fire
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
+_cube_confirmed_episode = [False]  # the cube CONFIRMED a fallen body this episode -> the red HOLDS
+                             # while the person stays DOWN, even after the confirming cube goes stale
+                             # (>12 s) and the 3-burst cap blocks a refire. A person who stays down
+                             # LONGER is MORE of an emergency and must NOT downgrade fall->suspected
+                             # just because the cube aged out. Cleared when the episode resets.
 FALL_HOLD_S = 30.0           # keep showing red Fall this long after the last confirmation
                              # (a caregiver must SEE it; it must not clear when the person
                              # stirs/gets up). Cleared by /api/fall/reset or a clear recovery.
@@ -613,6 +618,7 @@ def _scene():
     if time.time() - _cube_last_active[0] > CUBE_RESET_S:
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended -> restart the 18 s cube-delay clock next fall
+        _cube_confirmed_episode[0] = False   # episode ended -> the next fall must re-confirm via cube
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
@@ -1043,6 +1049,8 @@ def _scene():
     mlp_out = ({"pose": fw.label, "falling_p": fw.falling_prob}
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
+    if dec["fall"]:
+        _cube_confirmed_episode[0] = True    # cube confirmed a fallen body -> latch holds red while down
     # ⭐ Suspected DECLARATION is TIGHTER than the cube gate: it needs an ACTUAL ExtraMLP lying
     # candidate (lying_state), NOT merely "not a STAND" (user 2026-07-20: web 频报 suspect). Without
     # this, empty-room floor_fall noise or a sitting/moving person that trips a TI trigger reads as
@@ -1101,7 +1109,13 @@ def _scene():
     # thrashes pose/ffrac as a body walks away). Don't RE-LATCH on a stray low fragment while
     # the mass is clearly up -- that was extending the red long after the person got up.
     cloud_up = cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED
-    if (dec["fall"] or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
+    # ⭐ HOLD the red while the person stays DOWN after a cube confirmation this episode (user 0722):
+    # the cube fires only ~3x/episode and goes stale in 12 s, so a genuine sustained fall would else
+    # downgrade fall->suspected once the confirming cube aged out. `_cube_confirmed_episode and down`
+    # re-extends the latch on the sustained-down alone -- but ONLY after the cube actually confirmed
+    # (so cube-free is still closed: no confirmation, no hold). `not cloud_up` still cancels on get-up.
+    if (dec["fall"] or (_cube_confirmed_episode[0] and down)
+            or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
     # RECOVERY / 30 s-CANCEL clears the latch early: the person got up and moved on -- a stumble
     # that self-recovers is not an emergency. Signal = the CLOUD/energy centroid at the fall spot
@@ -1115,6 +1129,7 @@ def _scene():
             _recover_since[0] = now
         if now - _recover_since[0] >= RECOVER_S:
             _fall_latch_until[0] = 0.0
+            _cube_confirmed_episode[0] = False     # got up -> episode over -> drop the confirmation hold
             _last_low_xy[0] = None                 # episode discarded -> forget the fall spot
     else:
         _recover_since[0] = 0.0
@@ -1283,6 +1298,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(_meta))
         if u.path == "/api/fall/reset":              # clear a latched red Fall
             _fall_latch_until[0] = 0.0
+            _cube_confirmed_episode[0] = False       # manual reset -> drop the confirmation hold too
             return self._send(200, json.dumps({"fall_reset": True}))
         if u.path == "/api/scene":
             try:
