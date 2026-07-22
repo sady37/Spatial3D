@@ -221,6 +221,65 @@ def _empty_z40_profile(empty_npz, az_step):
     return _z40_empty_cache[key]
 
 
+def _z40_xy_from_cov(bins, cov, dr, xs, ys, cell, az_step):
+    """Project each range bin's z<=40 window Bartlett power to 10cm XY FLOOR cells (z=0 ground).
+    Shared by z40_cell_map (offline figure) and z40_xy_present_from_cov (server presence)."""
+    arr = real_array()
+    azg = np.deg2rad(np.arange(-50, 50.001, az_step))
+    G = np.zeros((len(ys), len(xs)))
+    for i in range(len(bins)):
+        els = _z40_els(bins[i] * dr)
+        if els is None:
+            continue
+        g = math.sqrt(max((bins[i] * dr) ** 2 - Z40_H ** 2, 0.01)); Rc = cov[i]
+        for az in azg:
+            p = float(np.mean([np.real(np.vdot(a, Rc @ a))
+                               for a in (arr.steering_vector(az, math.radians(e)) for e in els)]))
+            aw = math.radians(AZ_CAL_K * math.degrees(az) + AZ_CAL_OFF)
+            ix = int(round((g * math.sin(aw) - xs[0]) / cell))
+            iy = int(round((g * math.cos(aw) - ys[0]) / cell))
+            if 0 <= ix < len(xs) and 0 <= iy < len(ys):
+                G[iy, ix] += p
+    return G
+
+
+_z40_xy_empty_cache = {}
+
+
+def _empty_z40_xy(empty_npz, cell, xlim, ylim, az_step):
+    """Cached z<=40 XY floor-cell grid of the FIXED install background (computed once)."""
+    key = (empty_npz, cell, xlim, ylim, az_step)
+    if key not in _z40_xy_empty_cache:
+        bE, _, covE, dr = _power(empty_npz)
+        xs = np.arange(-xlim, xlim + cell, cell); ys = np.arange(0.0, ylim + cell, cell)
+        _z40_xy_empty_cache[key] = _z40_xy_from_cov(bE, covE, dr, xs, ys, cell, az_step)
+    return _z40_xy_empty_cache[key]
+
+
+def z40_xy_present_from_cov(live_cov, live_bins, dr, fall_range_m=None, empty_npz=_EMPTY,
+                            near=2.1, wall=5.8, cell=0.10, xlim=3.0, ylim=6.0, az_step=3.0,
+                            radius=0.7):
+    """思路B presence in the X,Y FLOOR PLANE (user 0722: compare in x,y, NOT per range-bin). Projects
+    the LIVE cube's z<=40 window power to 10cm floor cells, 差值/基值 vs the empty XY baseline, and
+    returns the PEAK cell ratio near the fall location (within `radius` m of fall_range_m's GROUND
+    arc, else anywhere in [near,wall]). XY-localised so a wall/ghost at another bearing can't leak in.
+    >= ~0.4 = a real floor body; furniture/empty ~0. Empty XY baseline cached (fixed background)."""
+    xs = np.arange(-xlim, xlim + cell, cell)
+    ys = np.arange(0.0, ylim + cell, cell)
+    GE = _empty_z40_xy(empty_npz, cell, xlim, ylim, az_step)
+    GL = _z40_xy_from_cov(np.asarray(live_bins), list(live_cov), dr, xs, ys, cell, az_step)
+    ratio = (GL - GE) / (GE + 1e-12)
+    YY, XX = np.meshgrid(ys, xs, indexing="ij")
+    RR = np.hypot(XX, YY)
+    mask = (RR >= near) & (RR <= wall) & (GE > 0)
+    if fall_range_m is not None:
+        g = math.sqrt(max(fall_range_m ** 2 - Z40_H ** 2, 0.01))    # slant -> ground arc of the fall
+        mask = mask & (np.abs(RR - g) <= radius)
+    if not mask.any():
+        return 0.0
+    return float(np.max(ratio[mask]))
+
+
 def z40_present_from_cov(live_cov, live_bins, dr, fall_range_m=None, empty_npz=_EMPTY,
                          near=2.1, wall=5.8, az_step=3.0):
     """思路B presence from a LIVE cube's per-bin covariances (list aligned with live_bins) vs the
@@ -252,25 +311,9 @@ def z40_present_from_cov(live_cov, live_bins, dr, fall_range_m=None, empty_npz=_
 def z40_cell_map(npz, cell=0.10, xlim=3.0, ylim=6.0, az_step=2.0):
     """Per-cell z<=40 floor-band intensity map (for the ratio figure). Projects each
     (range, az)'s z<=40-window power to its floor cell (z=0 -> ground g=sqrt(R^2-H^2))."""
-    arr = real_array()
-    azg = np.deg2rad(np.arange(-50, 50.001, az_step))
     b, _, cov, dr = _power(npz)
     xs = np.arange(-xlim, xlim + cell, cell); ys = np.arange(0.0, ylim + cell, cell)
-    G = np.zeros((len(ys), len(xs)))
-    for i in range(len(b)):
-        els = _z40_els(b[i] * dr)
-        if els is None:
-            continue
-        g = math.sqrt(max((b[i] * dr) ** 2 - Z40_H ** 2, 0.01)); Rc = cov[i]
-        for az in azg:
-            p = float(np.mean([np.real(np.vdot(a, Rc @ a))
-                               for a in (arr.steering_vector(az, math.radians(e)) for e in els)]))
-            aw = math.radians(AZ_CAL_K * math.degrees(az) + AZ_CAL_OFF)
-            ix = int(round((g * math.sin(aw) - xs[0]) / cell))
-            iy = int(round((g * math.cos(aw) - ys[0]) / cell))
-            if 0 <= ix < len(xs) and 0 <= iy < len(ys):
-                G[iy, ix] += p
-    return xs, ys, G
+    return xs, ys, _z40_xy_from_cov(b, cov, dr, xs, ys, cell, az_step)
 
 
 def cube_free_gate(points_xyz, floor_at=None, margin=0.45, min_pts=8):

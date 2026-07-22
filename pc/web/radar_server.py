@@ -423,12 +423,11 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
             rr, strength, micro, measured = _rr_from_cube(ents)
             cube_ff = _cube_floor_energy(ents)          # MUSIC power-weighted floor band (or None)
             z40 = None
-            if _Z40_PRESENCE and ents:                  # 思路B presence vs the fixed background
+            if _Z40_PRESENCE and ents:                  # 思路B presence vs the fixed background (XY-cell)
                 try:
                     import numpy as _np2
                     from collections import defaultdict as _dd
-                    from spatial3d.range_music import DR_M as _DRM
-                    from spatial3d.occupancy_ratio import z40_present_from_cov
+                    from spatial3d.occupancy_ratio import z40_xy_present_from_cov
                     byb = _dd(list)
                     for e in ents:
                         byb[int(e.range_bin)].append(_np2.asarray(e.vec, complex))
@@ -436,9 +435,12 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
                     if lbins:
                         lcov = [((_np2.stack(byb[b]).conj().T @ _np2.stack(byb[b])) / len(byb[b]))
                                 for b in lbins]
-                        drr = float((_meta or {}).get("source", {}).get("dr") or _DRM)
-                        z40 = round(z40_present_from_cov(lcov, lbins, drr,
-                                                         fall_range_m=range_bin * drr), 2)
+                        # ⭐ dr = RANGE_STEP (the FLASHED cube range grid; e_range confirms bin*RANGE_STEP
+                        #    = range). The old _DRM (range_music, 0.0234) is a DIFFERENT, finer grid ->
+                        #    z40 read bin 49 as 1.15m not 5.2m, got filtered by near/wall -> ALWAYS 0.
+                        # ⭐ XY-cell comparison (user 0722: compare in x,y, not per range-bin).
+                        z40 = round(z40_xy_present_from_cov(lcov, lbins, RANGE_STEP,
+                                                            fall_range_m=range_bin * RANGE_STEP), 2)
                 except Exception:
                     z40 = None
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
@@ -1176,7 +1178,11 @@ def _scene():
     # far-fall CLOUD COLLAPSE drops `down` while the person is still on the floor (would falsely
     # re-arm -> overcount 231500/000000), but the mass never rises, so cloud_up stays false and
     # the onset does NOT re-arm; two DISTINCT falls have a real stand-up between them (cloud_up).
-    red_trigger = bool(dec["fall"] or sustained_fall)
+    # ⭐ C (user 0722): gate the cube-free sustained-down red by _CUBEFREE_FALL, matching the state
+    # (L1103) and onset (L1114) legs. This was the LEAK: red_trigger/beep fired on sustained_fall
+    # even with cube-free CLOSED -> the "closed" cube-free red still 3-beeped. Now RED = cube-confirmed
+    # dec["fall"] only (unless CUBEFREE_FALL is explicitly on). Far falls red via the cube (z40 XY).
+    red_trigger = bool(dec["fall"] or (_CUBEFREE_FALL and sustained_fall))
     if red_trigger and _fall_onset_armed[0]:
         _fall_event_n[0] += 1
         _fall_onset_armed[0] = False
