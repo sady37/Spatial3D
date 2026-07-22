@@ -253,6 +253,62 @@ def hr_band_search(chans, fps, f0, lo, hi, topk=8, interp=False):
         ac=ac, top=top)
 
 
+def rhythm_regularity(chans, fps, f0, lo=1.0, hi=1.7, topk=8, min_beats=5):
+    """AF / arrhythmia REVERSE-INDICATOR (不怕高怕乱 — memory arrhythmia-reverse-
+    indicator). A healthy cardiac rhythm is REGULAR: high autocorrelation
+    COHERENCE and low beat-interval variability. AF/arrhythmia = cardiac energy
+    PRESENT but the rhythm ERRATIC (low coherence + high interval CV). Reports
+    REGULARITY, NOT the HR value (a wrong HR value is fine; an irregular RHYTHM
+    is the warning). MUST be gated by occupancy() first — an empty room / a
+    non-human vibration fabricates a false 'irregular' (that is exactly the false
+    AF the occupancy gate was built to kill).
+
+    Uses the same SQI-top cardiac bins + RR-harmonic notch as hr_band_search, so
+    it rides on the validated HR front-end. Per bin: autocorr height = coherence;
+    beat-interval coefficient-of-variation (std/mean) = irregularity.
+
+    Returns dict(coherence, interval_cv, n_beats, verdict). Thresholds: the
+    REGULAR (negative) side is anchored on the resting cubes (coherence ~0.5-0.7,
+    CV < 0.15, autocorr 0.73 in memory); the IRREGULAR (positive/AF) side is a
+    PLACEHOLDER pending a real AF recording — framework only, not yet quantified.
+    """
+    hr_sqi = np.array([sqi(bandpass(c, fps, lo, hi, notch_f0=f0), fps, lo, hi)
+                       for c in chans])
+    top = np.argsort(hr_sqi)[::-1][:topk]
+    lo_bpm, hi_bpm = int(round(lo * 60)), int(round(hi * 60))
+    coh, cvs, nbs = [], [], []
+    for i in top:
+        sig = bandpass(chans[i], fps, lo, hi, notch_f0=f0)
+        _, h = autocorr_peak(sig, fps, lo_bpm, hi_bpm)
+        coh.append(h)
+        s = sig / (sig.std() + 1e-9)                    # beat intervals -> CV
+        dist = max(1, int(fps / (hi_bpm / 60)))
+        if _HAVE_SCIPY:
+            pk, _ = find_peaks(s, distance=dist, height=0.25)
+        else:
+            pk = np.array([j for j in range(1, len(s) - 1)
+                           if s[j] > s[j - 1] and s[j] > s[j + 1] and s[j] > 0.25])
+        if len(pk) >= min_beats:
+            iv = np.diff(pk) / fps
+            cvs.append(float(np.std(iv) / (np.mean(iv) + 1e-9)))
+            nbs.append(len(pk))
+    coherence = float(np.median(coh)) if coh else 0.0
+    interval_cv = float(np.median(cvs)) if cvs else 99.0   # DIAGNOSTIC ONLY (noisy)
+    n_beats = int(np.median(nbs)) if nbs else 0
+    # COHERENCE (whole-signal autocorr periodicity) is the reliable axis; radar
+    # beat-to-beat intervals at 4m are too noisy to gate on (CV 0.25-0.6 even for
+    # a regular heart), so interval_cv is kept diagnostic only -- same pattern as
+    # occupancy's rr_spread. Regular hearts sit ~0.5-0.7 coherence (memory 0.73).
+    if coherence >= 0.45:
+        verdict = "REGULAR"
+    elif coherence < 0.30 and n_beats >= min_beats:
+        verdict = "IRREGULAR (AF/arrhythmia suspect)"      # placeholder threshold
+    else:
+        verdict = "indeterminate (low coherence, weak signal)"
+    return dict(coherence=coherence, interval_cv=interval_cv,
+                n_beats=n_beats, verdict=verdict)
+
+
 def hr_region_vote(chans, fps, f0, lo, split, hi, topk=8):
     """Region classifier for tachycardia. Runs autocorr over the FULL [lo,hi]
     band (single consistent filter) per SQI-top bin and asks: does the cardiac
@@ -446,6 +502,12 @@ def main():
               f"{rg['median'] and round(rg['median'])}bpm frac>{HR_PHYS_HI}Hz={rg['frac_above']:.0%} "
               f"-> {res['band']} band" + (f" (FFT {res['hr']:.0f}bpm)" if res['high'] else ""))
     print(f"  -> HR = {res['hr']:.0f} bpm  [{res['band']}]")
+
+    # --- RHYTHM REGULARITY (AF / stroke reverse-indicator) — occupancy-gated ---
+    # 不怕高怕乱: the HR VALUE can be wrong; an irregular RHYTHM is the warning.
+    reg = rhythm_regularity(chans, a.fps, f0, HR_PHYS_LO, HR_PHYS_HI, a.topk)
+    print(f"rhythm: coherence={reg['coherence']:.2f} interval_CV={reg['interval_cv']:.2f} "
+          f"({reg['n_beats']} beats) -> {reg['verdict']}")
 
 
 if __name__ == "__main__":

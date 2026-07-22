@@ -1,0 +1,310 @@
+{
+  "frame": {
+    "origin": "radar",
+    "x": "+right",
+    "y": "+depth",
+    "z": "+up",
+    "units": "m",
+    "view": "user/photo (chairR on right)",
+    "radar_height_m": 2.0,
+    "tilt_deg": 25.0
+  },
+  "walls": [
+    {
+      "id": "front",
+      "y": 6.253999926149845,
+      "confidence": "radar",
+      "note": "range peak; trim width / draw sides & doors by hand (FOV-limited)"
+    }
+  ],
+  "floor": {
+    "model": "plane z=0",
+    "falloff_dB_per_decade": 1.0
+  },
+  "objects": [
+    {
+      "id": "obj1",
+      "center": [
+        -0.1,
+        1.05
+      ],
+      "size": [
+        1.79,
+        1.8
+      ],
+      "range_m": 1.05,
+      "energy": 99.04,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "corner-anchored",
+      "support": {
+        "corners": [
+          [
+            -0.36,
+            0.8
+          ],
+          [
+            0.42,
+            1.7
+          ]
+        ],
+        "anchors": [],
+        "verified": true,
+        "verdict": "corner-anchored"
+      }
+    },
+    {
+      "id": "obj2",
+      "center": [
+        2.2,
+        2.92
+      ],
+      "size": [
+        1.57,
+        1.08
+      ],
+      "range_m": 3.66,
+      "energy": 43.83,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "radar-only",
+      "support": {
+        "corners": [],
+        "anchors": [],
+        "verified": false,
+        "verdict": "radar-only"
+      }
+    },
+    {
+      "id": "obj3",
+      "center": [
+        -0.98,
+        5.61
+      ],
+      "size": [
+        3.18,
+        0.78
+      ],
+      "range_m": 5.69,
+      "energy": 36.72,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "corner-anchored",
+      "support": {
+        "corners": [
+          [
+            -0.29,
+            5.37
+          ],
+          [
+            -1.35,
+            5.99
+          ]
+        ],
+        "anchors": [],
+        "verified": true,
+        "verdict": "corner-anchored"
+      }
+    },
+    {
+      "id": "obj4",
+      "center": [
+        0.78,
+        4.55
+      ],
+      "size": [
+        1.38,
+        0.36
+      ],
+      "range_m": 4.62,
+      "energy": 28.42,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "corner-anchored",
+      "support": {
+        "corners": [
+          [
+            0.88,
+            4.42
+          ]
+        ],
+        "anchors": [
+          "standR"
+        ],
+        "verified": true,
+        "verdict": "corner-anchored"
+      }
+    },
+    {
+      "id": "obj5",
+      "center": [
+        -1.63,
+        4.04
+      ],
+      "size": [
+        1.29,
+        0.19
+      ],
+      "range_m": 4.36,
+      "energy": 15.45,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "anchor-only",
+      "support": {
+        "corners": [],
+        "anchors": [
+          "ChairL"
+        ],
+        "verified": true,
+        "verdict": "anchor-only"
+      }
+    },
+    {
+      "id": "obj6",
+      "center": [
+        0.75,
+        6.45
+      ],
+      "size": [
+        2.04,
+        0.31
+      ],
+      "range_m": 6.49,
+      "energy": 14.64,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "radar-only",
+      "support": {
+        "corners": [],
+        "anchors": [],
+        "verified": false,
+        "verdict": "radar-only"
+      }
+    },
+    {
+      "id": "obj7",
+      "center": [
+        1.79,
+        2.04
+      ],
+      "size": [
+        0.88,
+        0.11
+      ],
+      "range_m": 2.71,
+      "energy": 8.66,
+      "height_band_m": [
+        0.0,
+        1.2
+      ],
+      "confidence": "radar-only",
+      "support": {
+        "corners": [],
+        "anchors": [],
+        "verified": false,
+        "verdict": "radar-only"
+      }
+    }
+  ],
+  "corners": [
+    {
+      "x": -0.36,
+      "y": 0.8,
+      "power_db": -8.3
+    },
+    {
+      "x": 0.42,
+      "y": 1.7,
+      "power_db": -15.3
+    },
+    {
+      "x": 0.88,
+      "y": 4.42,
+      "power_db": -18.1
+    },
+    {
+      "x": -0.29,
+      "y": 5.37,
+      "power_db": -18.9
+    },
+    {
+      "x": -1.35,
+      "y": 5.99,
+      "power_db": -10.7
+    }
+  ],
+  "edges": [
+    {
+      "x": 0.85,
+      "y": 2.82,
+      "range_m": 3.18,
+      "disc": 0.55,
+      "power_db": 47.5
+    },
+    {
+      "x": -1.58,
+      "y": 3.99,
+      "range_m": 4.45,
+      "disc": 0.45,
+      "power_db": 44.0
+    },
+    {
+      "x": 1.79,
+      "y": 1.89,
+      "range_m": 2.86,
+      "disc": 0.4,
+      "power_db": 43.9
+    },
+    {
+      "x": 0.21,
+      "y": 0.22,
+      "range_m": 0.95,
+      "disc": 0.37,
+      "power_db": 44.1
+    },
+    {
+      "x": -0.13,
+      "y": 0.27,
+      "range_m": 1.17,
+      "disc": 0.31,
+      "power_db": 46.0
+    }
+  ],
+  "motion_anchors": [
+    {
+      "id": "ChairR",
+      "x": 0.18,
+      "y": 3.28,
+      "z": -0.23
+    },
+    {
+      "id": "ChairL",
+      "x": -0.7,
+      "y": 4.14,
+      "z": 0.11
+    },
+    {
+      "id": "standR",
+      "x": 1.8,
+      "y": 4.1,
+      "z": 0.18
+    }
+  ],
+  "todo_user": [
+    "draw side/back walls (FOV-limited)",
+    "draw doors",
+    "verify object positions (static azimuth is coarse)"
+  ]
+}

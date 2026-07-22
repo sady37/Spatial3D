@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="648" height="720" viewBox="0 0 648 720" font-family="sans-serif">
+<rect width="648" height="720" fill="#0d1117"/>
+<line x1="54.0" y1="0" x2="54.0" y2="720" stroke="#243040"/>
+<text x="56.0" y="716" fill="#4a5a6a" font-size="10">-3m</text>
+<line x1="144.0" y1="0" x2="144.0" y2="720" stroke="#243040"/>
+<text x="146.0" y="716" fill="#4a5a6a" font-size="10">-2m</text>
+<line x1="234.0" y1="0" x2="234.0" y2="720" stroke="#243040"/>
+<text x="236.0" y="716" fill="#4a5a6a" font-size="10">-1m</text>
+<line x1="324.0" y1="0" x2="324.0" y2="720" stroke="#243040"/>
+<text x="326.0" y="716" fill="#4a5a6a" font-size="10">0m</text>
+<line x1="414.0" y1="0" x2="414.0" y2="720" stroke="#243040"/>
+<text x="416.0" y="716" fill="#4a5a6a" font-size="10">1m</text>
+<line x1="504.0" y1="0" x2="504.0" y2="720" stroke="#243040"/>
+<text x="506.0" y="716" fill="#4a5a6a" font-size="10">2m</text>
+<line x1="594.0" y1="0" x2="594.0" y2="720" stroke="#243040"/>
+<text x="596.0" y="716" fill="#4a5a6a" font-size="10">3m</text>
+<line x1="0" y1="72.0" x2="648" y2="72.0" stroke="#243040"/>
+<text x="3" y="69.0" fill="#4a5a6a" font-size="10">0m</text>
+<line x1="0" y1="162.0" x2="648" y2="162.0" stroke="#243040"/>
+<text x="3" y="159.0" fill="#4a5a6a" font-size="10">1m</text>
+<line x1="0" y1="252.0" x2="648" y2="252.0" stroke="#243040"/>
+<text x="3" y="249.0" fill="#4a5a6a" font-size="10">2m</text>
+<line x1="0" y1="342.0" x2="648" y2="342.0" stroke="#243040"/>
+<text x="3" y="339.0" fill="#4a5a6a" font-size="10">3m</text>
+<line x1="0" y1="432.0" x2="648" y2="432.0" stroke="#243040"/>
+<text x="3" y="429.0" fill="#4a5a6a" font-size="10">4m</text>
+<line x1="0" y1="522.0" x2="648" y2="522.0" stroke="#243040"/>
+<text x="3" y="519.0" fill="#4a5a6a" font-size="10">5m</text>
+<line x1="0" y1="612.0" x2="648" y2="612.0" stroke="#243040"/>
+<text x="3" y="609.0" fill="#4a5a6a" font-size="10">6m</text>
+<line x1="0" y1="702.0" x2="648" y2="702.0" stroke="#243040"/>
+<text x="3" y="699.0" fill="#4a5a6a" font-size="10">7m</text>
+<g id="radar">
+<line x1="324.0" y1="72.0" x2="-221.6" y2="387.0" stroke="#c0392b" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>
+<line x1="324.0" y1="72.0" x2="869.6" y2="387.0" stroke="#c0392b" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>
+<polygon points="324.0,81.0 316.0,66.0 332.0,66.0" fill="#e74c3c"/>
+<text x="336.0" y="78.0" fill="#e74c3c" font-size="12">Radar (0,0) H2.0 tilt25</text></g>
+<g id="walls">
+<line x1="54.0" y1="634.5" x2="594.0" y2="634.5" stroke="#2ecc71" stroke-width="4"/>
+<text x="54.0" y="628.5" fill="#2ecc71" font-size="12">front wall 6.25m (confirmed depth; trim width)</text></g>
+<g id="objects">
+<rect x="218.7" y="136.4" width="162.0" height="148.5" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="218.7" y="133.4" fill="#f1c40f" font-size="10">R2-1 [LEFT 1.56m]</text>
+<rect x="181.8" y="505.8" width="189.0" height="162.0" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="181.8" y="502.8" fill="#f1c40f" font-size="10">R2-2 [CENTER 5.74m]</text>
+<rect x="477.0" y="250.2" width="81.0" height="162.0" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="477.0" y="247.2" fill="#f1c40f" font-size="10">R2-3 [RIGHT 3.59m]</text>
+<rect x="130.5" y="423.0" width="54.0" height="54.0" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="130.5" y="420.0" fill="#f1c40f" font-size="10">R2-4 [LEFT 4.59m]</text>
+<rect x="76.5" y="591.8" width="27.0" height="40.5" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="76.5" y="588.8" fill="#f1c40f" font-size="10">R2-5 [LEFT 6.54m]</text>
+<rect x="312.8" y="375.8" width="40.5" height="40.5" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="312.8" y="372.8" fill="#f1c40f" font-size="10">R2-6 [CENTER 3.6m]</text>
+<rect x="447.7" y="483.8" width="40.5" height="40.5" fill="none" stroke="#f1c40f" stroke-width="1.6" stroke-dasharray="0"/>
+<text x="447.7" y="480.8" fill="#f1c40f" font-size="10">R2-7 [RIGHT 5.06m]</text>
+</g>
+<text x="474.0" y="513.0" fill="#e67e22" font-size="11">&#9660; draw door(s) here</text>
+</svg>

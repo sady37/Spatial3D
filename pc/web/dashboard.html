@@ -316,7 +316,20 @@ async function tick(){
 // ---- People_Tracking live scene, ONE canvas / three panels side by side:
 // [TOP-DOWN X×D] | [SIDE D×Z, fall morphology] | [Z height bar]. 3001 points
 // render in BOTH plan views; per-track boxes in both; pose = zspan/max(xspan,yspan). ----
-const SC_XMAX=3, SC_YMAX=5;                        // plane: +-3 m lateral, 0..5 m range
+const SC_XMAX=3.5, SC_YMAX=7;                      // plane: +-3.5 m lateral (7m wide), 0..7 m depth
+// Static scene model (from spatial3d/scene_model_20260721.json) drawn as the
+// top-down BASE MAP under the live cloud. Coords are USER-VIEW (x=right); the
+// canvas is firmware-frame (+x->left via TX), so draw at TX(-x). conf: c=corner,
+// a=anchor, r=radar-only. Regenerate this block from the model when it changes.
+const STATIC_SCENE={ wall_y:6.25,
+  objects:[{id:"obj1",cx:-0.1,cy:1.05,w:1.79,h:1.8,conf:"c"},
+    {id:"obj2",cx:2.2,cy:2.92,w:1.57,h:1.08,conf:"r"},
+    {id:"obj3",cx:-0.98,cy:5.61,w:3.18,h:0.78,conf:"c"},
+    {id:"obj4",cx:0.78,cy:4.55,w:1.38,h:0.36,conf:"c"},
+    {id:"obj5",cx:-1.63,cy:4.04,w:1.29,h:0.19,conf:"a"},
+    {id:"obj6",cx:0.75,cy:6.45,w:2.04,h:0.31,conf:"r"},
+    {id:"obj7",cx:1.79,cy:2.04,w:0.88,h:0.11,conf:"r"}],
+  edges:[[0.85,2.82],[-1.58,3.99],[1.79,1.89],[0.21,0.22],[-0.13,0.27]] };
 // Z(cm) bands, world height above floor. Fall energy sits BELOW the floor (world Z<0):
 // validated on the 3 recent fall cases the point cloud is ~91% below -40 cm, mean -81 cm.
 // Fall = below -40 cm | Sit = 0..80 cm | Stand = 80..200 cm | -40..0 = transition (no band).
@@ -353,7 +366,7 @@ function drawScene(sc){
   const lfPt=(x,d,z)=> -EK*Math.sqrt(x*x+d*d+(MT-z)*(MT-z));    // per-point local floor (true slant)
   // === TOP-DOWN (X × D) ===
   g.fillStyle="#8b949e"; g.fillText("top X lateral(m) × range(m, down)", tL, pT-10);
-  for(let x=-SC_XMAX;x<=SC_XMAX;x++){ g.strokeStyle=x===0?"#484f58":"#181d24";
+  for(let x=Math.ceil(-SC_XMAX);x<=SC_XMAX;x++){ g.strokeStyle=x===0?"#484f58":"#181d24";
     g.beginPath();g.moveTo(TX(x),pT);g.lineTo(TX(x),pB);g.stroke();
     g.fillStyle="#8b949e"; g.fillText((x>0?"+":"")+x, TX(x)-5, pB+13); }
   for(let y=1;y<=SC_YMAX;y++){ g.strokeStyle="#181d24";
@@ -362,6 +375,24 @@ function drawScene(sc){
   g.strokeStyle="#30363d"; g.strokeRect(tL,pT,tR-tL,pB-pT);
   g.fillStyle="#1971c2"; g.beginPath();g.moveTo(TX(0),TY(0)-9);g.lineTo(TX(0)-7,TY(0)+3);g.lineTo(TX(0)+7,TY(0)+3);g.closePath();g.fill();
   g.fillStyle="#1971c2"; g.fillText("RADAR", TX(0)+10, TY(0)+2);
+  // ---- STATIC SCENE base map: walls + object boxes + edges (user-view -> TX(-x)) ----
+  (function(){ const MX=x=>TX(-x), S=STATIC_SCENE;
+    const COL={c:"#f39c12",a:"#e67e22",r:"#7f8c9a"};
+    g.strokeStyle="#2f9e44"; g.lineWidth=2; g.setLineDash([]);   // front wall
+    g.beginPath(); g.moveTo(tL,TY(S.wall_y)); g.lineTo(tR,TY(S.wall_y)); g.stroke();
+    g.fillStyle="#2f9e44"; g.fillText("wall "+S.wall_y.toFixed(1)+"m", tL+4, TY(S.wall_y)-3);
+    g.font="11px sans-serif";
+    S.objects.forEach(o=>{ const col=COL[o.conf]||"#7f8c9a";
+      const x0=MX(o.cx-o.w/2), x1=MX(o.cx+o.w/2), xl=Math.min(x0,x1), xw=Math.abs(x1-x0);
+      const y0=TY(o.cy-o.h/2), yh=TY(o.cy+o.h/2)-y0;
+      g.strokeStyle=col; g.lineWidth=1.6; g.setLineDash(o.conf==="r"?[4,3]:[]);
+      g.strokeRect(xl,y0,xw,yh);
+      g.fillStyle=col; g.fillText(o.id, xl+2, y0+11); });
+    g.setLineDash([]); g.strokeStyle="#a55eea"; g.lineWidth=1.6;   // edges = X
+    S.edges.forEach(e=>{ const px=MX(e[0]),py=TY(e[1]);
+      g.beginPath();g.moveTo(px-4,py-4);g.lineTo(px+4,py+4);g.moveTo(px+4,py-4);g.lineTo(px-4,py+4);g.stroke(); });
+    g.font="12px sans-serif"; g.lineWidth=1;
+  })();
   // === SIDE (D × Z) — fall morphology ===
   g.fillStyle="#8b949e"; g.fillText("side range(m) × Z height(m)", sL, pT-10);
   // fall zone = below the LOCAL floor line H=-EK·slant(d): a downward-sloping true-zero, energy

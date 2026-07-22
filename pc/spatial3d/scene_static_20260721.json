@@ -1,0 +1,331 @@
+{
+  "frame": {
+    "origin": "radar",
+    "units": "m",
+    "x": "lateral,+right",
+    "y": "depth,+into-room",
+    "radar_height_m": 2.0,
+    "tilt_deg": 25.0,
+    "note": "rotate whole group to world; radar stays (0,0)"
+  },
+  "radar": {
+    "pos": [
+      0.0,
+      0.0
+    ],
+    "look_deg": 0.0,
+    "fov_deg": [
+      -60,
+      60
+    ]
+  },
+  "walls": [
+    {
+      "id": "front",
+      "confidence": "high",
+      "source": "radar",
+      "pts": [
+        [
+          -3.0,
+          6.25
+        ],
+        [
+          3.0,
+          6.25
+        ]
+      ],
+      "note": "depth radar-confirmed 6.25m (range peak); trim width"
+    }
+  ],
+  "objects_round1": [
+    {
+      "id": "R1-1",
+      "confidence": "radar",
+      "level": "R1",
+      "center": [
+        0.7,
+        2.25
+      ],
+      "size": [
+        3.3,
+        1.95
+      ],
+      "range_m": 2.36,
+      "side": "RIGHT",
+      "energy": 1944.11
+    },
+    {
+      "id": "R1-2",
+      "confidence": "radar",
+      "level": "R1",
+      "center": [
+        -1.25,
+        5.85
+      ],
+      "size": [
+        2.7,
+        1.05
+      ],
+      "range_m": 5.98,
+      "side": "LEFT",
+      "energy": 694.61
+    },
+    {
+      "id": "R1-3",
+      "confidence": "radar",
+      "level": "R1",
+      "center": [
+        -1.85,
+        4.2
+      ],
+      "size": [
+        0.6,
+        0.75
+      ],
+      "range_m": 4.59,
+      "side": "LEFT",
+      "energy": 342.79
+    }
+  ],
+  "objects_round2": [
+    {
+      "id": "R2-1",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -0.27,
+        1.54
+      ],
+      "size": [
+        1.8,
+        1.65
+      ],
+      "range_m": 1.56,
+      "side": "LEFT",
+      "energy": 983.36
+    },
+    {
+      "id": "R2-2",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -0.53,
+        5.72
+      ],
+      "size": [
+        2.1,
+        1.8
+      ],
+      "range_m": 5.74,
+      "side": "CENTER",
+      "energy": 946.04
+    },
+    {
+      "id": "R2-3",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        2.15,
+        2.88
+      ],
+      "size": [
+        0.9,
+        1.8
+      ],
+      "range_m": 3.59,
+      "side": "RIGHT",
+      "energy": 853.64
+    },
+    {
+      "id": "R2-4",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -1.85,
+        4.2
+      ],
+      "size": [
+        0.6,
+        0.6
+      ],
+      "range_m": 4.59,
+      "side": "LEFT",
+      "energy": 316.08
+    },
+    {
+      "id": "R2-5",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -2.6,
+        6.0
+      ],
+      "size": [
+        0.3,
+        0.45
+      ],
+      "range_m": 6.54,
+      "side": "LEFT",
+      "energy": 159.06
+    },
+    {
+      "id": "R2-6",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        0.1,
+        3.6
+      ],
+      "size": [
+        0.45,
+        0.45
+      ],
+      "range_m": 3.6,
+      "side": "CENTER",
+      "energy": 50.46
+    },
+    {
+      "id": "R2-7",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        1.6,
+        4.8
+      ],
+      "size": [
+        0.45,
+        0.45
+      ],
+      "range_m": 5.06,
+      "side": "RIGHT",
+      "energy": 25.41
+    }
+  ],
+  "notes": {
+    "floor": "empty plane = walkable; not drawn as object",
+    "side_walls": "radar cannot see side walls (specular-away) -> user draws",
+    "doors": "user draws",
+    "z": "dropped (rank-1); boxes are X/Y footprints",
+    "method": "coarse-to-fine 70%-energy (15-85% marginal) boxes on antisym-object X/Y map; peak-bearing per bin"
+  },
+  "todo_user": [
+    "set front-wall width",
+    "draw side/back walls",
+    "draw door(s)",
+    "rotate group to world frame"
+  ],
+  "objects": [
+    {
+      "id": "R2-1",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -0.27,
+        1.54
+      ],
+      "size": [
+        1.8,
+        1.65
+      ],
+      "range_m": 1.56,
+      "side": "LEFT",
+      "energy": 983.36
+    },
+    {
+      "id": "R2-2",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -0.53,
+        5.72
+      ],
+      "size": [
+        2.1,
+        1.8
+      ],
+      "range_m": 5.74,
+      "side": "CENTER",
+      "energy": 946.04
+    },
+    {
+      "id": "R2-3",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        2.15,
+        2.88
+      ],
+      "size": [
+        0.9,
+        1.8
+      ],
+      "range_m": 3.59,
+      "side": "RIGHT",
+      "energy": 853.64
+    },
+    {
+      "id": "R2-4",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -1.85,
+        4.2
+      ],
+      "size": [
+        0.6,
+        0.6
+      ],
+      "range_m": 4.59,
+      "side": "LEFT",
+      "energy": 316.08
+    },
+    {
+      "id": "R2-5",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        -2.6,
+        6.0
+      ],
+      "size": [
+        0.3,
+        0.45
+      ],
+      "range_m": 6.54,
+      "side": "LEFT",
+      "energy": 159.06
+    },
+    {
+      "id": "R2-6",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        0.1,
+        3.6
+      ],
+      "size": [
+        0.45,
+        0.45
+      ],
+      "range_m": 3.6,
+      "side": "CENTER",
+      "energy": 50.46
+    },
+    {
+      "id": "R2-7",
+      "confidence": "radar",
+      "level": "R2",
+      "center": [
+        1.6,
+        4.8
+      ],
+      "size": [
+        0.45,
+        0.45
+      ],
+      "range_m": 5.06,
+      "side": "RIGHT",
+      "energy": 25.41
+    }
+  ]
+}
