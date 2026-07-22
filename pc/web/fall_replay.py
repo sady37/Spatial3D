@@ -108,6 +108,8 @@ def _reset_state():
     srv._floor_pts = []
     srv._lost_since.clear(); srv._lost_query_t.clear()
     srv._cube_episode[0] = 0; srv._cube_last_active[0] = 0.0; srv._cube_episode_t0[0] = 0.0
+    srv._last_cube_burst_t[0] = 0.0
+    srv._cube_neg_run[0] = 0; srv._cube_eval_t[0] = 0.0
     srv._recover_since[0] = 0.0; srv._last_low_xy[0] = None
     srv._gtrack_prev = {}; srv._fall_deaths = []
     srv._fall_region.update(since=0.0, last=0.0, x=0.0, y=0.0)

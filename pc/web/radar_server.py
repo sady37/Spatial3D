@@ -151,26 +151,46 @@ _cleaner.require_cube = not _CUBEFREE_FALL   # closes the cleaner's cube-free (e
 # Set Z40_PRESENCE=0 to revert to MUSIC floor_frac. CAVEAT: relies on empty_20260721 being the valid
 # background -- rearranging furniture would need a fresh install background. See fall-cube-free-gate.
 _Z40_PRESENCE = os.environ.get("Z40_PRESENCE", "1") != "0"
+# ⭐ PRESENCE verdict thresholds (user 2026-07-22, FROZEN design [[todo-cube-fall-judgment]]):
+# cube_ff is PRIMARY, z40 is the FALLBACK -- CORRECTS the A+B override where z40 wrongly won
+# whenever present. cube_ff >= CUBE_FF_THR = a reliable self-contained floor-body positive
+# (near/breathing body: MUSIC floor-band motion energy, calibrated bimodal good 0.55-0.92 vs
+# far/still 0.00). cube_ff weak/0/uncomputable/多簇 -> fall back to z40 (差值/基值 vs the fixed
+# empty baseline): z40 >= Z40_LYING_THR = a lying body vs empty (far/occluded workhorse, body
+# ~28-97 >> empty ~0; `down` already excluded stand/walk upstream so 0.4 only clears empty-noise).
+CUBE_FF_THR = 0.5
+Z40_LYING_THR = 0.4
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
-QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. A 60-frame
-                             # burst is ~6 s -> 6 s on + 6 s idle = 50% DATA-UART duty. The
-                             # firmware wedges when 320 floods the DATA UART for MINUTES; a
-                             # single 6 s burst is safe, but back-to-back 6 s bursts at ~60%
-                             # duty accumulate and wedge it. The fix is a BIGGER idle gap
-                             # (>=burst), NOT a tiny 0.4 s micro-gap (that raises duty ->
-                             # worse). See [[fall-detection-design]] / the wedge in fall log.
+QUERY_REFRESH_S = 12.0       # DEPRECATED (TODO#3 replaced it with the global CUBE_RETRY_S rate
+                             # limit). Kept only as documentation of the old 50%-duty reasoning:
+                             # a 6 s burst back-to-back at ~60% duty accumulates and WEDGES the
+                             # DATA UART; the fix is a bigger idle gap, now CUBE_RETRY_S=60s (10%).
 STALE_GATE_S = 3.0           # NEVER cubeQuery when the scene is this stale: the sensor is
                              # wedged/stalled, so 320 bursts hit a DEAD firmware -- useless,
                              # and they can keep it from recovering. Gate every probe on this.
-MAX_CUBE_BURSTS = 3          # HARD cap on cubeQuery bursts PER fall/lost episode -- NOT reset by
-                             # finding RR. A fall grabs cube a FEW times to verify person-vs-
-                             # object (RR + the fused MLP), then STOPS. The old "reset on RR"
-                             # was the wedge cause: a breathing body returns RR every burst ->
-                             # counter never advances -> 320 floods the DATA UART for the whole
-                             # (100 s+) fall -> firmware WEDGES. Strictly bounded now: <=3 bursts
-                             # (~18 s of cube) per episode, then silent; the fall stays latched
-                             # via the window / floor-fall / sustained legs, no more cube needed.
+# ⭐ TODO#3 STARVATION FIX (user 2026-07-22, FROZEN): the old MAX_CUBE_BURSTS=3 HARD per-episode cap
+# STARVED a 2nd fall in the same episode (live 110000 Fall2: 段1 spent all 3 bursts, episode never
+# reset because the 段1->段2 gap 2s < CUBE_RESET_S=5s -> a textbook 37s lying got ZERO bursts -> stuck
+# suspected). FIX (user 0722): NO per-episode hard cap. Two rules instead:
+#   (1) STOP-ON-CONFIRM -- once the cube CONFIRMED a fall this episode (_cube_confirmed_episode), STOP
+#       re-querying (the red is held by TODO#1). This naturally bounds bursts to ~2-3 per fall (the
+#       confirm ends it), so a breathing body no longer keeps the cube flooding the UART -> no wedge,
+#       and a 2nd fall (new episode) gets a fresh budget instead of being starved.
+#   (2) FIXED CUBE_RETRY_S retry while NOT yet confirmed -- fail -> wait 60 s -> retry -> ... By the
+#       3rd-4th retry (180-240 s) the firmware cubeGuard budget (cubeGuardCfg: 300 s window / 300-frame
+#       budget / 10% duty) has refilled, so a persistent fall is confirmed within one budget window.
+# CAVEAT (accepted, user 0722): a ~19 s SHORT fall whose FIRST burst mis-times/empties (222000: 首发
+# bin35 空, the confirming burst was +12 s at bin36) is MISSED -- the 2nd try is +60 s, by when the
+# body is up. That is a first-burst TARGETING issue to fix separately, NOT a reason to fast-poll.
+CUBE_RETRY_S = float(os.environ.get("CUBE_RETRY_S", "60.0"))  # fixed s between cube bursts while a
+                             # fall is NOT yet confirmed; 3-4 retries span one firmware budget window
+_last_cube_burst_t = [0.0]   # wall time of the LAST cube burst from EITHER probe (retry timer)
+FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
+                             # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
+                             # NOT latch a permanent fall (that was the 22-minute false latch).
+_cube_episode = [0]          # cube bursts fired in the CURRENT physical fall episode (diagnostic
+                             # counter only now -- NO LONGER a hard cap; the rate limit bounds duty)
 FALL_FFRAC_MIN = 0.15        # sustained-down -> red Fall ONLY if the cloud is really below the
                              # floor line. A ~0.45 m furniture cluster (floor_frac~0.02) must
                              # NOT latch a permanent fall (that was the 22-minute false latch).
@@ -194,9 +214,17 @@ REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
 _cube_confirmed_episode = [False]  # the cube CONFIRMED a fallen body this episode -> the red HOLDS
                              # while the person stays DOWN, even after the confirming cube goes stale
-                             # (>12 s) and the 3-burst cap blocks a refire. A person who stays down
-                             # LONGER is MORE of an emergency and must NOT downgrade fall->suspected
-                             # just because the cube aged out. Cleared when the episode resets.
+                             # (>12 s) and a refire is rate-limited. A person who stays down LONGER
+                             # is MORE of an emergency and must NOT downgrade fall->suspected just
+                             # because the cube aged out. Cleared when the episode resets.
+# ⭐ TODO#1 (user 2026-07-22, FROZEN): a flickering `down`/trigger CANNOT retract a cube-confirmed
+# fall (`down` is 胡猜 for an occluded/far body -- floor_fall ~60% occluded=0, w_down flickers). Only
+# a genuine RECOVERY (cloud_up) OR the CUBE itself going NEGATIVE 2x consecutively may cancel; the
+# trigger may not. _cube_neg_run counts consecutive cube-NEGATIVE fires (lying=N); 作废(None) does NOT
+# count (unmeasured != absent). _cube_eval_t = the cube-result timestamp last counted (count once/fire).
+_cube_neg_run = [0]          # consecutive cube fires that returned lying=N (2 -> cancel the hold)
+_cube_eval_t = [0.0]         # _cube_result["t"] of the last fire we counted (dedup per burst)
+CUBE_CANCEL_NEG = 2          # this many consecutive cube negatives cancels the confirmation hold
 FALL_HOLD_S = 30.0           # keep showing red Fall this long after the last confirmation
                              # (a caregiver must SEE it; it must not clear when the person
                              # stirs/gets up). Cleared by /api/fall/reset or a clear recovery.
@@ -312,7 +340,7 @@ _fall_anchor = [None]        # world GROUND range (wy) of the selected fallen cl
 # the RR for a sitting/fallen still person. WAIT 2 s first: most track losses are brief
 # flickers that re-acquire, and we must not spend a ~6 s cube burst on those.
 LOST_WAIT_S = 2.0            # a track must stay lost this long (not a flicker) before probing
-LOST_QUERY_REFRESH_S = 12.0 # min seconds between lost-probe cubeQuery bursts per track (50% duty)
+LOST_QUERY_REFRESH_S = 12.0 # DEPRECATED (TODO#3): the lost-probe now shares the global CUBE_RETRY_S
 FAR_FORCE_M = 4.5           # beyond this the 3001 cloud collapses/goes specular -> can't classify a
                             # lying person; a TI lost/fall trigger here FORCES a cubeQuery regardless
                             # of the 3001 person/veto gate (RR/micro then confirm). Breaks chicken-egg.
@@ -456,6 +484,26 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
         pass
     finally:
         _cube_busy[0] = False
+
+
+def _cube_lying_verdict(cres):
+    """⭐ PRESENCE verdict (user 2026-07-22, FROZEN): cube_ff PRIMARY / z40 FALLBACK.
+    Returns True (a body is on the floor -> lying Y), False (empty/ghost -> lying N), or
+    None (作废 -- no cube data to assess; the caller must NOT veto on this).
+      * cube_ff >= CUBE_FF_THR -> reliable self-contained positive (near/breathing body).
+      * cube_ff weak (<thr) / 0 / uncomputable / 多簇 -> fall back to z40 (差值/基值 vs empty):
+        z40 >= Z40_LYING_THR -> body present, else empty/ghost.
+      * both absent (0-entry cube: same covariance -> cube_ff None AND z40 None) -> 作废.
+    CORRECTS the A+B z40-primary override (z40 wrongly won whenever present)."""
+    ff = cres.get("cube_ff")            # None or float (MUSIC floor-band MOTION fraction)
+    z40 = cres.get("z40")               # None or float (差值/基值 XY presence vs empty)
+    if ff is not None and ff >= CUBE_FF_THR:
+        return True                     # cube_ff PRIMARY: strong self-contained positive
+    if _Z40_PRESENCE and z40 is not None:
+        return z40 >= Z40_LYING_THR     # z40 FALLBACK: the far/occluded/多簇 workhorse
+    if ff is not None:
+        return False                    # cube_ff computed but weak AND no z40 fallback -> N
+    return None                         # both absent -> 作废 / no assessment (do not veto)
 
 
 def _cube_target_bin(sc, fallback=None):
@@ -613,12 +661,15 @@ def _scene():
         return {"live": False}
     import math, numpy as _np
     sc = _src.scene()
-    # UNIFIED cube budget: reset the per-episode burst count once the scene has been quiet
-    # (no active fall) for CUBE_RESET_S -> the next distinct fall gets its own MAX_CUBE_BURSTS.
+    # UNIFIED cube episode: reset the per-episode state once the scene has been quiet (no active
+    # fall) for CUBE_RESET_S -> the next distinct fall re-confirms from scratch. (The old hard
+    # burst cap is gone -- TODO#3 rate limit -- but the episode boundary still gates the confirm/
+    # vitals/negative state.)
     if time.time() - _cube_last_active[0] > CUBE_RESET_S:
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended -> restart the 18 s cube-delay clock next fall
         _cube_confirmed_episode[0] = False   # episode ended -> the next fall must re-confirm via cube
+        _cube_neg_run[0] = 0          # TODO#1: reset the consecutive-negative cancel counter
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
@@ -842,15 +893,15 @@ def _scene():
                 if _cube_episode_t0[0] == 0.0:               # start the 3001-first clock on this trigger
                     _cube_episode_t0[0] = _now
                 # NO reset-on-RR here: a breathing body returns RR every burst, and resetting
-                # the counter kept it probing forever -> 320 flood -> WEDGE. Hard cap instead.
+                # the counter kept it probing forever -> 320 flood -> WEDGE. Rate-limited instead.
                 # GATED: 3001-first DELAY elapsed (18 s of 3001 before the cube) AND sensor FRESH
-                # (never flood a wedged firmware) AND under the per-episode HARD burst cap.
+                # (never flood a wedged firmware) AND STOP-ON-CONFIRM + fixed CUBE_RETRY_S (TODO#3:
+                # shared retry timer across both probes; stop once the fall is confirmed).
                 if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
                         and (_now - _cube_episode_t0[0]) >= CUBE_DELAY_S
-                        and _now - _lost_query_t.get(ftk.id, 0) > LOST_QUERY_REFRESH_S
-                        and not _cube_busy[0]
+                        and not _cube_busy[0] and not _cube_confirmed_episode[0]
                         and (_now - sc.get("t", _now)) < STALE_GATE_S
-                        and _cube_episode[0] < MAX_CUBE_BURSTS):
+                        and (_now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
                     # WHERE to query (Q: lost坐标记录了吗/查的是它吗/考虑地板能量吗):
                     # 1) PREFER the floor-band ENERGY cluster (`_fall_anchor`, max floor_frac) --
                     #    a still/fallen body IS the floor energy; the FloorTracker position
@@ -868,6 +919,7 @@ def _scene():
                     rb = _cube_target_bin(sc, fallback=int(round(math.hypot(_ax, _ay) / RANGE_STEP)))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
+                    _last_cube_burst_t[0] = _now
                     _cube_episode[0] += 1
                     # 60 frames (~6s): a single LONG cubeQuery (150/~15s) WEDGES the firmware
                     # -- the sustained 320 flood over DATA UART kills it ([NO-Done] + no frames).
@@ -999,10 +1051,10 @@ def _scene():
         _cube_episode_t0[0] = now
 
     # server-triggered cube fetch: HELD CUBE_DELAY_S after the trigger (3001-first tiering) then
-    # rate-limited (50% duty refresh) — not every scene call. Range from the cloud GROUND wy
-    # (_fall_range_bin, now the per-cluster fall anchor). GATED on: sensor is FRESH (never flood a
-    # wedged firmware) AND under the per-episode HARD burst cap (MAX_CUBE_BURSTS). During 0-18 s
-    # the living gate is the 3001 below-floor cloud (floor_fall) + sustained-down -> red needs no cube.
+    # rate-limited to one burst / CUBE_RETRY_S (TODO#3: firmware 10% duty) — not every scene call.
+    # Range from the cloud GROUND wy (_fall_range_bin, per-cluster fall anchor). GATED on: sensor is
+    # FRESH (never flood a wedged firmware) AND the global CUBE_RETRY_S rate limit. During 0-18 s the
+    # living gate is the 3001 below-floor cloud (floor_fall) + sustained-down -> red needs no cube.
     fresh = (now - sc.get("t", now)) < STALE_GATE_S
     cube_delay_ok = _cube_episode_t0[0] > 0.0 and (now - _cube_episode_t0[0]) >= CUBE_DELAY_S
     # ⭐ VETO model (user 2026-07-20): on a TI alarm, the 3001 ExtraMLP posture can VETO -- but ONLY
@@ -1015,13 +1067,17 @@ def _scene():
     # rescue (no STAND box -> cube still queries). This is SEPARATE from the suspected declaration
     # below -- querying a cube is cheap-to-be-wrong; declaring "suspect fall" to the user is not.
     cube_gate = bool(cube_delay_ok and not veto)
-    if (cube_gate and not _cube_busy[0] and fresh
-            and (now - _last_query_t[0]) > QUERY_REFRESH_S
-            and _cube_episode[0] < MAX_CUBE_BURSTS):
+    # ⭐ TODO#3 (FROZEN): STOP-ON-CONFIRM + fixed CUBE_RETRY_S. Once the cube confirmed a fall this
+    # episode, STOP re-querying (`not _cube_confirmed_episode`) -- the red is held by TODO#1, so a
+    # breathing body no longer keeps the cube flooding the UART. While NOT yet confirmed, retry every
+    # CUBE_RETRY_S; 3-4 retries span one firmware budget window. Shared timer across both probes.
+    if (cube_gate and not _cube_busy[0] and fresh and not _cube_confirmed_episode[0]
+            and (now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
         rb = _fall_range_bin(sc)
         if rb is not None:
             _cube_busy[0] = True
             _last_query_t[0] = now
+            _last_cube_burst_t[0] = now
             _cube_episode[0] += 1
             threading.Thread(target=_fetch_cube_bg, args=(rb, prim_ffrac), daemon=True).start()
 
@@ -1030,19 +1086,37 @@ def _scene():
     # object does not -> no red). A confirmed RR is HELD 12 s (the person stays down and
     # breathing; a single 3 s burst is < 1 breath cycle, so bridge the gaps) — the ~4 s
     # re-query keeps it refreshed while down.
+    # ⭐ PRESENCE verdict (FROZEN 2026-07-22): cube_ff PRIMARY / z40 FALLBACK -- the cube fire's
+    # `lying` dimension. cube_ff >= 0.5 (near/breathing body's MUSIC floor-band motion) trusts itself;
+    # weak/0/uncomputable/多簇 -> z40 (差值/基值 vs empty) arbitrates; both absent -> 作废 (None) -> no
+    # cube confirmation this frame and NO veto (an unassessed cube must not assert OR deny a body).
+    # This REPLACES the A+B z40-primary override (z40 wrongly won whenever present -- BACKWARDS).
     cube_ev = None
+    cube_lying = None            # cube presence verdict: True=body / False=empty / None=作废
+    cube_living_state = None     # "Living" (rr|micro) / "?" (body but unmeasurable) / None (no fresh cube)
     if now - _cube_result["t"] < 12.0:
-        # Tier-2 floor evidence = the BETTER of the sparse 3001 floor_frac and the cube's OWN
-        # MUSIC power-weighted band (the latter sees a far/specular lying body where 3001 collapsed).
-        # PRESENCE = the CUBE's OWN floor energy (its MUSIC band), NOT the sparse 3001 floor_frac:
-        # the 3001 floor_frac reads a standing-behind-chair low cluster as floor-dominated (=1.0) and
-        # an UNASSESSED cube (0 ents) then falsely asserts a body -> cube-collapse red. cube_ff is None
-        # when the cube returned nothing -> 0 -> not present -> not a fall (unassessed, correctly).
-        _ff_use = float(_cube_result.get("cube_ff") or 0.0)
-        if _Z40_PRESENCE and _cube_result.get("z40") is not None:   # 思路B (furniture/ghost rejected) wins
-            _ff_use = 1.0 if float(_cube_result["z40"]) >= 0.4 else 0.0
-        # micro = living micro-motion (confirms a person when RR can't lock: back-to-radar/occluded)
-        cube_ev = {"rr": _cube_result["rr"], "floor_frac": _ff_use, "micro": _cube_result.get("micro")}
+        cube_lying = _cube_lying_verdict(_cube_result)
+        if cube_lying is not None:                       # a real assessment (Y or N) -> feed the cleaner
+            # micro = living micro-motion (confirms a person when RR can't lock: back-to-radar/occluded)
+            cube_ev = {"rr": _cube_result["rr"],
+                       "floor_frac": 1.0 if cube_lying else 0.0,   # cleaner: >=0.7 = body present
+                       "micro": _cube_result.get("micro")}
+        # Living_state LABEL (NOT a gate; "?" must NOT escalate to 💔 -- it is unmeasurable, not apnea):
+        if cube_lying:
+            _alive = (_cube_result["rr"] not in (None, 0)) or bool(_cube_result.get("micro"))
+            cube_living_state = "Living" if _alive else "?"
+    # ⭐ TODO#1: count consecutive cube NEGATIVES, ONCE per burst (dedup on _cube_result["t"]). Only a
+    # cube-N (lying=False = a real "empty here" assessment) counts; 作废(None) does NOT (unmeasured !=
+    # absent). CUBE_CANCEL_NEG in a row is the ONLY signal (besides recovery) allowed to cancel a
+    # cube-confirmed fall -- a flickering `down`/trigger may not.
+    if _cube_result["t"] > 0.0 and _cube_result["t"] != _cube_eval_t[0]:
+        _cube_eval_t[0] = _cube_result["t"]
+        _v = _cube_lying_verdict(_cube_result)
+        if _v is True:
+            _cube_neg_run[0] = 0
+        elif _v is False:
+            _cube_neg_run[0] += 1
+    cube_cancelled = _cube_neg_run[0] >= CUBE_CANCEL_NEG
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
@@ -1109,12 +1183,15 @@ def _scene():
     # thrashes pose/ffrac as a body walks away). Don't RE-LATCH on a stray low fragment while
     # the mass is clearly up -- that was extending the red long after the person got up.
     cloud_up = cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED
-    # ⭐ HOLD the red while the person stays DOWN after a cube confirmation this episode (user 0722):
-    # the cube fires only ~3x/episode and goes stale in 12 s, so a genuine sustained fall would else
-    # downgrade fall->suspected once the confirming cube aged out. `_cube_confirmed_episode and down`
-    # re-extends the latch on the sustained-down alone -- but ONLY after the cube actually confirmed
-    # (so cube-free is still closed: no confirmation, no hold). `not cloud_up` still cancels on get-up.
-    if (dec["fall"] or (_cube_confirmed_episode[0] and down)
+    # ⭐ TODO#1 (FROZEN 0722): once the cube CONFIRMED a fallen body this episode, the red HOLDS on the
+    # confirmation ALONE -- a flickering `down`/trigger may NOT retract it. (Was `_cube_confirmed_episode
+    # AND down`: `down` is 胡猜 for an occluded/far body -- floor_fall ~60% occluded=0 + w_down flickers
+    # on the far track -- so requiring it re-veto'd a confirmed fall every other frame -> the 403 fall/
+    # 494 susp/584 none flicker on live 110000.) ONLY a genuine RECOVERY (cloud_up, below) OR the CUBE
+    # going NEGATIVE CUBE_CANCEL_NEG times (cube_cancelled = a real "body gone" assessment) may cancel.
+    if cube_cancelled:
+        _cube_confirmed_episode[0] = False       # cube says the body is GONE (2x N) -> release the hold
+    if (dec["fall"] or _cube_confirmed_episode[0]
             or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
     # RECOVERY / 30 s-CANCEL clears the latch early: the person got up and moved on -- a stumble
@@ -1236,6 +1313,10 @@ def _scene():
             "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
             "fall_p": fall_p, "primary_pose": primary_pose,
             "lying_state": lying_state,          # ⭐ ExtraMLP state classifier: person lying on floor?
+            # ⭐ CUBE fire 2D contract (FROZEN 2026-07-22): lying (Y/N/None=作废, cube_ff-primary/
+            # z40-fallback presence) + living_state ("Living"=rr|micro / "?"=body but unmeasurable /
+            # None=no fresh cube). "?" is a LABEL, NOT collapse -- must never escalate to 💔.
+            "cube_lying": cube_lying, "cube_living_state": cube_living_state,
             # ⭐ cardiac/collapse-suspect (fallen + immobile + no confirmed breathing) and the
             # distinct-event count (latch-blind, separates falls the 30 s hold merges).
             "collapse_suspect": collapse_suspect, "collapse_conf": collapse_conf,
