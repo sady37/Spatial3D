@@ -114,7 +114,7 @@ void PoseMlp_setZOffset(float zOffset);
  * pc/falldet/window.py (margin 0.45 m, sustain/clear 5).
  */
 void PoseMlp_setWindowCfg(float mountM, float tiltRad, float marginM,
-                          uint8_t sustain, uint8_t clear);
+                          uint8_t sustain, uint8_t clear, float elevAccRad);
 
 /*!
  * @brief  Classify every target for this frame.

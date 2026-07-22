@@ -19,7 +19,7 @@ precision.
 
 class Cleaner:
     def __init__(self, mlp_trig=0.5, persist=10, floor_frac_min=0.7,
-                 extra_confirm_min=0.45):
+                 extra_confirm_min=0.45, require_cube=False):
         self.mlp_trig = mlp_trig          # MLP falling/lying prob that counts as a trigger
         self.persist = persist            # frames the trigger must hold for a confirmed fall
         self.floor_frac_min = floor_frac_min
@@ -27,6 +27,11 @@ class Cleaner:
         # when NO cube was fetched. Needs ~3 independent signals to reach this, so a single transient
         # signal can't escalate. Never overrides an explicit cube rejection.
         self.extra_confirm_min = extra_confirm_min
+        # ⛔ require_cube: CLOSE the cube-free confirm. When True, a red Fall REQUIRES a fetched cube
+        # that confirmed a living body on the floor (cube_ok True) -- the extra-evidence "confirm
+        # without a cube" path is disabled. There is no cube-free fall (a real fall's 3001 cloud
+        # collapses; only the cube's energy sees it). See radar_server _CUBEFREE_FALL.
+        self.require_cube = require_cube
         self.run = 0
 
     def decide(self, window_out, mlp_out, cube=None, geom=None, extra=None):
@@ -35,7 +40,9 @@ class Cleaner:
         cube       : {rr, floor_frac}     server 320 second-check (None if not fetched)
         geom       : {at_rest_spot: bool} location prior (None if unknown)
         extra      : server-side extra features (3001 cloud / floor energy / geometry)
-        Returns {fall, suspected, confidence, trigger, reason, cleaned}."""
+        Returns {fall, suspected, collapse_suspect, confidence, trigger, reason, cleaned}.
+        cube evidence is split: floor-energy (floor_frac) = PRESENCE gate (body-shaped floor
+        reflector, breathing-independent); rr/micro = LIVENESS classifier (red vs 💔 collapse)."""
         w_down = bool(window_out and window_out.get("down"))
         m_fall = float(mlp_out.get("falling_p", 0.0)) if mlp_out else 0.0
         m_trig = m_fall >= self.mlp_trig
@@ -78,16 +85,26 @@ class Cleaner:
         #    micro-motion are still measurable. So energy-on-floor + (RR or micro) confirms a lying
         #    person; a dropped object has energy but NEITHER RR nor micro.
         cube_ok = None
+        cube_no_vital = False
         if cube is not None:
             rr_ok = cube.get("rr") not in (None, 0)
             micro_ok = bool(cube.get("micro"))
-            energy_ok = float(cube.get("floor_frac", 0.0)) >= self.floor_frac_min
-            cube_ok = bool(energy_ok and (rr_ok or micro_ok))
-            if not cube_ok:
-                return {"fall": False, "suspected": False, "confidence": 0.0,
-                        "trigger": trigger, "reason": reason,
-                        "cleaned": "cube: no living body on floor"}
-            conf = min(0.98, conf + 0.4); reason.append("cube" if rr_ok else "cube-micro")
+            # ⭐ PRESENCE gate (Z≤40 / MUSIC floor-energy fraction, 思路B): is there a body-shaped
+            # floor reflector? Breathing-INDEPENDENT + ghost/wall-multipath rejected upstream. This
+            # REPLACES the old "energy AND vital" reject: NO floor body -> reject (ghost/empty), but a
+            # floor body that ISN'T breathing is NOT rejected -- that IS the collapse emergency.
+            body_present = float(cube.get("floor_frac", 0.0)) >= self.floor_frac_min
+            if not body_present:
+                return {"fall": False, "suspected": False, "collapse_suspect": False,
+                        "confidence": 0.0, "trigger": trigger, "reason": reason,
+                        "cleaned": "cube: no floor body (ghost/empty)"}
+            cube_ok = True                                  # a real floor body IS present
+            # LIVENESS now CLASSIFIES (red vs collapse), it does NOT gate. alive -> red fall; no vital
+            # -> COLLAPSE-suspect: a tracked person went DOWN here (the trigger), so a no-vital floor
+            # body is that person collapsed, NOT an inert object (the trigger context resolves it).
+            cube_no_vital = not (rr_ok or micro_ok)
+            conf = min(0.98, conf + 0.4)
+            reason.append("cube-collapse" if cube_no_vital else ("cube" if rr_ok else "cube-micro"))
         # 2) geometry prior
         if geom is not None and geom.get("at_rest_spot"):
             conf *= 0.4; cleaned = "geom:rest-spot"
@@ -95,10 +112,15 @@ class Cleaner:
         #    comes from EITHER the cube second-check OR, when no cube was fetched, strong server-side
         #    extra evidence. An explicit cube REJECTION (cube_ok is False) already returned above, so
         #    extra can never override the cube -- it only fills the gap when the cube is absent.
-        confirmed = (cube_ok is True) or (cube_ok is None and extra_strong)
+        # cube_ok True = fetched cube confirmed a living floor body. The cube-free path
+        # (no cube fetched + strong extra evidence) is DISABLED when require_cube is set.
+        confirmed = (cube_ok is True) or (not self.require_cube and cube_ok is None and extra_strong)
         if confirmed and cube_ok is None:
             reason.append("extra-confirm")
         fall = bool(trigger and self.run >= self.persist and confirmed and conf >= 0.5)
+        # 💔 collapse-suspect = a CONFIRMED floor body with NO vital sign (fallen + not breathing =
+        # the emergency). It IS a fall (red), not a reject; the server sustains/escalates it.
+        collapse_suspect = bool(fall and cube_no_vital)
         suspected = bool(trigger and not fall)
-        return {"fall": fall, "suspected": suspected, "confidence": round(conf, 2),
-                "trigger": trigger, "reason": reason, "cleaned": cleaned}
+        return {"fall": fall, "suspected": suspected, "collapse_suspect": collapse_suspect,
+                "confidence": round(conf, 2), "trigger": trigger, "reason": reason, "cleaned": cleaned}

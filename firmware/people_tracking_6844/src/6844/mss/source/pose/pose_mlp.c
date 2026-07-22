@@ -87,6 +87,12 @@ static float   gWinSinTilt = 0.0f;
 static float   gWinMarginM = 0.45f;
 static uint8_t gWinSustain = 5;
 static uint8_t gWinClear   = 5;
+/* Elevation-accuracy floor slope: a point at slant range R has vertical scatter ~R*sin(acc),
+ * which pushes a far LYING body's 2nd-highest UP -> the flat-z=0 window misses it. Compensate
+ * per point by SUBTRACTING half the scatter from its height (h -= gWinHalfElevAcc*R): equivalent
+ * to a range-growing margin (margin_eff = margin + 0.5*rad(acc)*R) -> tight near (keeps sit-vs-lie),
+ * looser far (catches the scattered lying). 0 = disabled (flat z=0). See memory fall-cube-free-gate. */
+static float   gWinHalfElevAcc = 0.0f;   /* = 0.5 * elevAcc(rad) */
 
 /* Scratch, reused per inference. Kept static to stay off the (small) stack. */
 POSE_TCMB static float gPoseIn[POSE_INPUT_SIZE];
@@ -106,7 +112,7 @@ void PoseMlp_setZOffset(float zOffset)
 }
 
 void PoseMlp_setWindowCfg(float mountM, float tiltRad, float marginM,
-                          uint8_t sustain, uint8_t clear)
+                          uint8_t sustain, uint8_t clear, float elevAccRad)
 {
     gWinMountM  = mountM;
     gWinCosTilt = cosf(tiltRad);
@@ -114,6 +120,7 @@ void PoseMlp_setWindowCfg(float mountM, float tiltRad, float marginM,
     gWinMarginM = marginM;
     gWinSustain = (sustain > 0) ? sustain : 1;
     gWinClear   = (clear   > 0) ? clear   : 1;
+    gWinHalfElevAcc = 0.5f * elevAccRad;   /* per-point floor-slope comp (0 = flat z=0) */
 }
 
 /* dst = relu?(W*src + b). W is [outN][inN] row-major. */
@@ -329,8 +336,11 @@ static void poseWindowUpdate(PoseSlot *s, const PoseTrackKin *k,
         {
             continue;
         }
-        /* world height above floor: same transform the server uses */
-        float h = gWinMountM + pz * gWinCosTilt - py * gWinSinTilt;
+        /* world height above floor: same transform the server uses, MINUS the per-point
+         * elevation-accuracy floor slope (0.5*rad(acc)*R) so a far scattered-up lying body's
+         * 2nd-highest still reads "down" (range-growing margin; tight near, looser far). */
+        float Rp = sqrtf(px * px + py * py + pz * pz);   /* slant range from radar */
+        float h = gWinMountM + pz * gWinCosTilt - py * gWinSinTilt - gWinHalfElevAcc * Rp;
         if (h > h1)      { h2 = h1; h1 = h; }
         else if (h > h2) { h2 = h; }
         n++;

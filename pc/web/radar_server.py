@@ -135,6 +135,14 @@ EXTRAMLP_LIE_THR = 0.5          # P(lying) above this -> the cluster is a body o
 # kill-switch / A-B toggle: EXTRAMLP=0 reverts to the geometric lying rule AND drops the
 # lying_confirmed->red promotion, reproducing the pre-ExtraMLP behavior for baseline comparison.
 _EXTRAMLP_ON = os.environ.get("EXTRAMLP", "1") != "0"
+# ⛔ CUBE-FREE fall branch (user 2026-07-22): CLOSED by default. There is NO cube-free fall
+# detection -- a real fall = a still body whose 3001 cloud COLLAPSES, exactly when the cloud is
+# useless, so only the cube's covariance ENERGY (思路B) still sees the floor body. Declaring red
+# on the sustained-down window/floor_fall leg WITHOUT a cube confirm is exactly the walk-by
+# false-fire (residual floor clutter + churning track deaths). RED now REQUIRES dec["fall"] (the
+# cube second-check). Set CUBEFREE_FALL=1 to restore the old sustained-down-without-cube leg (A/B).
+_CUBEFREE_FALL = os.environ.get("CUBEFREE_FALL", "0") != "0"
+_cleaner.require_cube = not _CUBEFREE_FALL   # closes the cleaner's cube-free (extra_strong) confirm too
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
 QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. A 60-frame
@@ -1030,7 +1038,11 @@ def _scene():
     # onset and blew up the event count ~15-19x (A/B 2026-07-20). It only produces the orange
     # candidate above; RED requires Tier-2 cube confirmation (MUSIC floor-energy + RR) via dec["fall"],
     # or the track-free sustained-down leg below. lying_confirmed stays computed as a STATE output.
-    if sustained_fall and not dec["fall"]:
+    # CUBE-FREE red CLOSED by default (see _CUBEFREE_FALL): red requires the cube confirm
+    # (dec["fall"]); the sustained-down leg alone was the walk-by false-fire. A real fall's
+    # collapsed cloud is rescued by the lost-probe FIRING the cube (energy confirm), not by
+    # declaring red without one.
+    if _CUBEFREE_FALL and sustained_fall and not dec["fall"]:
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
 
@@ -1041,7 +1053,7 @@ def _scene():
     # thrashes pose/ffrac as a body walks away). Don't RE-LATCH on a stray low fragment while
     # the mass is clearly up -- that was extending the red long after the person got up.
     cloud_up = cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED
-    if (dec["fall"] or sustained_fall) and not cloud_up:
+    if (dec["fall"] or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
     # RECOVERY / 30 s-CANCEL clears the latch early: the person got up and moved on -- a stumble
     # that self-recovers is not an emergency. Signal = the CLOUD/energy centroid at the fall spot

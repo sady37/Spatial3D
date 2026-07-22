@@ -3180,7 +3180,7 @@ int32_t MmwDemo_CLICubeGuardCfg (int32_t argc, char* argv[])
 }
 
 /**
- * poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain]
+ * poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain] [elevAcc_deg]
  *   enable    : 1 run BOTH per-track fall legs each frame and emit TLV 321, 0 off
  *   zOffset_cm: MLP leg -- height remap (cm) added to posZ so a standing person
  *               reads TI's reference posz (~ +33 cm). Default 0.
@@ -3190,31 +3190,36 @@ int32_t MmwDemo_CLICubeGuardCfg (int32_t argc, char* argv[])
  *   margin_cm : window leg -- "down" when the 2nd-highest point's h <= this (cm).
  *               Default 45.
  *   sustain   : window leg -- frames held low before latching down. Default 5.
+ *   elevAcc_deg: window leg -- elevation ACCURACY (deg). Per point, h -= 0.5*rad(acc)*R
+ *               (slant range R) so a far scattered-up lying body still reads "down"
+ *               (range-growing margin: tight near, looser far). Default 6. 0 = flat z=0.
  * Resets the per-track state, so send before sensorStart (or to re-arm).
  * Set mount/tilt to match the rig (e.g. 200 cm / 25 deg per dashboard-z-calib).
  */
 int32_t MmwDemo_CLIPoseCfg (int32_t argc, char* argv[])
 {
     int32_t enable, sustain = 5;
-    float   zOffCm = 0.0f, mountCm = 100.0f, tiltDeg = 0.0f, marginCm = 45.0f;
+    float   zOffCm = 0.0f, mountCm = 100.0f, tiltDeg = 0.0f, marginCm = 45.0f, elevAccDeg = 6.0f;
     if (argc < 2)
     {
-        CLI_write ("Error: poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain]\n");
+        CLI_write ("Error: poseCfg <enable> [zOffset_cm] [mount_cm] [tilt_deg] [margin_cm] [sustain] [elevAcc_deg]\n");
         return -1;
     }
     enable = atoi (argv[1]);
-    if (argc >= 3) zOffCm   = (float) atof (argv[2]);
-    if (argc >= 4) mountCm  = (float) atof (argv[3]);
-    if (argc >= 5) tiltDeg  = (float) atof (argv[4]);
-    if (argc >= 6) marginCm = (float) atof (argv[5]);
-    if (argc >= 7) sustain  = atoi (argv[6]);
+    if (argc >= 3) zOffCm     = (float) atof (argv[2]);
+    if (argc >= 4) mountCm    = (float) atof (argv[3]);
+    if (argc >= 5) tiltDeg    = (float) atof (argv[4]);
+    if (argc >= 6) marginCm   = (float) atof (argv[5]);
+    if (argc >= 7) sustain    = atoi (argv[6]);
+    if (argc >= 8) elevAccDeg = (float) atof (argv[7]);
 
     PoseMlp_init ();
     PoseMlp_setZOffset (zOffCm * 0.01f);                   /* cm -> m */
     PoseMlp_setWindowCfg (mountCm * 0.01f,                 /* cm -> m */
                           tiltDeg * 0.01745329252f,        /* deg -> rad */
                           marginCm * 0.01f,                /* cm -> m */
-                          (uint8_t) sustain, (uint8_t) sustain);
+                          (uint8_t) sustain, (uint8_t) sustain,
+                          elevAccDeg * 0.01745329252f);    /* deg -> rad; per-point floor-slope comp */
     gMmwMssMCB.poseEnable     = (enable != 0) ? 1 : 0;
     gMmwMssMCB.poseNumResults = 0;
     return 0;

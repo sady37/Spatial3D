@@ -35,12 +35,17 @@ def detect_lying_vs_baseline(base_npz, live_npz, thr_db=5.0, floor_db=2.0):
     (m) + its excess + az-derived (x,y), and a lying_score = span_m * mean_excess.
     """
     b = range_power(base_npz); L = range_power(live_npz)
-    n = min(len(b["range_m"]), len(L["range_m"]))
-    rng = L["range_m"][:n]
-    # normalise each profile to its own noise floor (median) so absolute gain /
-    # AGC differences between captures cancel; the PERSON is a local bump.
-    bp = b["power_db"][:n] - np.median(b["power_db"][:n])
-    lp = L["power_db"][:n] - np.median(L["power_db"][:n])
+    # align by BIN NUMBER, not index: a 32-bin (bins 32-63) sit/stand capture must line
+    # up with the 63-bin (bins 1-63) empty baseline by PHYSICAL RANGE, else [:n] subtracts
+    # different ranges (garbage). Compare only the common bins.
+    common = np.intersect1d(b["bins"], L["bins"])
+    iB = {int(v): i for i, v in enumerate(b["bins"])}; iL = {int(v): i for i, v in enumerate(L["bins"])}
+    baseI = np.array([iB[int(v)] for v in common]); liveI = np.array([iL[int(v)] for v in common])
+    rng = L["range_m"][liveI]
+    # normalise each profile to its OWN full-profile noise floor (median over ALL its bins)
+    # so absolute gain / AGC differences cancel; the PERSON is a local bump.
+    bp = b["power_db"][baseI] - np.median(b["power_db"])
+    lp = L["power_db"][liveI] - np.median(L["power_db"])
     delta = lp - bp
     keep = rng >= NEAR_GATE
     person = keep & (delta > thr_db)
@@ -60,7 +65,7 @@ def detect_lying_vs_baseline(base_npz, live_npz, thr_db=5.0, floor_db=2.0):
         def spec(R):
             return np.array([np.real(a.conj() @ R @ a) for a in
                              (arr.steering_vector(az, 0.0) for az in AZ)])
-        Pd = spec(L["cov"][i0]) - spec(b["cov"][i0])
+        Pd = spec(L["cov"][liveI[i0]]) - spec(b["cov"][baseI[i0]])
         az = AZ[int(np.argmax(Pd))]
         x, y = to_ground(rng[i0], az)
         loc = (round(float(x), 2), round(float(y), 2), round(float(rng[i0]), 2))
@@ -91,7 +96,7 @@ def _motion_profile(npz):
         mot[i] = np.real(np.trace(fl))
         motaz[i] = np.array([max(np.real(a.conj() @ fl @ a), 0.0) for a in
                              (arr.steering_vector(az, 0.0) for az in AZ)])
-    return rng, mot, motaz
+    return b, rng, mot, motaz
 
 
 def detect_lying(npz, baseline="empty_20260721", thr=15.0, near_m=0.9):
@@ -106,17 +111,24 @@ def detect_lying(npz, baseline="empty_20260721", thr=15.0, near_m=0.9):
     body = the motion-change spread over a contiguous RANGE SPAN (body length).
     """
     HERE = __file__.rsplit("/", 1)[0]
-    rng, mot, motaz = _motion_profile(npz)
+    bL, rngL, mot, motaz = _motion_profile(npz)
     base = baseline if "/" in baseline else f"{HERE}/../case/{baseline}.npz"
-    rB, motB, _ = _motion_profile(base)
-    n = min(len(rng), len(motB)); rng = rng[:n]
-    change = 10*np.log10(mot[:n] + 1e-9) - 10*np.log10(motB[:n] + 1e-9)  # per-range CHANGE
+    bB, _, motB, _ = _motion_profile(base)
+    # align by BIN NUMBER (32-bin sit/stand vs 63-bin empty must match by range, not index)
+    common = np.intersect1d(bL, bB)
+    iL = {int(v): i for i, v in enumerate(bL)}; iB = {int(v): i for i, v in enumerate(bB)}
+    liveI = np.array([iL[int(v)] for v in common]); baseI = np.array([iB[int(v)] for v in common])
+    rng = rngL[liveI]; motaz = motaz[liveI]
+    change = 10*np.log10(mot[liveI] + 1e-9) - 10*np.log10(motB[baseI] + 1e-9)  # per-range CHANGE
     change = np.where(rng >= near_m, change, -99.0)
     person = change > thr
     rows = np.where(person)[0]
     span_m = float(rng[rows[-1]] - rng[rows[0]]) if len(rows) > 1 else 0.0
     ip = int(np.argmax(change))
     ia = int(np.argmax(motaz[ip]))
+    # azimuth-spread proxy: # of AZ steps above half-max at the peak range. A TANGENTIAL
+    # body spreads WIDE in azimuth (range-span's complement); radial/compact is narrow.
+    _azpk = motaz[ip]; az_halfmax = int((_azpk > 0.5 * _azpk.max()).sum()) if _azpk.max() > 0 else 0
     x, y = to_ground(rng[ip], AZ[ia])
     # DYNAMIC BASELINE — decision 2026-07-21: LOG-ONLY, do NOT update. When no
     # person is present this frame COULD be blended into the baseline (slow EMA,
@@ -125,7 +137,7 @@ def detect_lying(npz, baseline="empty_20260721", thr=15.0, near_m=0.9):
     update_candidate = bool(person.sum() == 0)          # empty/no-life -> refreshable
     return dict(range_m=rng, change_db=change,
                 peak_db=round(float(change[ip]), 1), peak_range=round(float(rng[ip]), 2),
-                n_person_bins=int(person.sum()), span_m=round(span_m, 2),
+                n_person_bins=int(person.sum()), span_m=round(span_m, 2), az_halfmax=az_halfmax,
                 update_candidate=update_candidate,      # LOG-ONLY (baseline stays fixed)
                 location=(round(float(x), 2), round(float(y), 2), round(float(rng[ip]), 2)))
 
