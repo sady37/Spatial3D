@@ -872,24 +872,12 @@ def _scene():
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None)
 
-        # ⭐ FAR-RANGE FORCE (user 2026-07-20): a GTRACK death (lost trigger) beyond FAR_FORCE_M gets a
-        # cubeQuery REGARDLESS of the 3001 person/veto gate. Past ~4.5 m the cloud collapses so 3001
-        # can't confirm a person, and the lost-probe's person-gate (needs inherited tid + RR) blocks
-        # exactly the far lie we must catch. NO 18 s 3001-first wait: 3001 is useless at far range and
-        # the death memory only lives FALL_DEATH_S (8 s). RR/micro on the returned cube then confirm.
-        _far_death = next(((dt, dx, dy) for (dt, dx, dy) in reversed(_fall_deaths)
-                           if math.hypot(dx, dy) > FAR_FORCE_M and _now - dt >= LOST_WAIT_S), None)
-        if (_far_death is not None and not _cube_busy[0]
-                and (_now - sc.get("t", _now)) < STALE_GATE_S
-                and _now - _last_query_t[0] > QUERY_REFRESH_S
-                and _cube_episode[0] < MAX_CUBE_BURSTS):
-            if _cube_episode_t0[0] == 0.0:
-                _cube_episode_t0[0] = _now
-            # ⭐ below-floor cloud FIRST (user 0722): even the FAR-force death coord scatters; aim at
-            # the persistent below-floor mass, fall back to the death coord only if the cloud is gone.
-            rb = _cube_target_bin(sc, fallback=int(round(math.hypot(_far_death[1], _far_death[2]) / RANGE_STEP)))
-            _cube_busy[0] = True; _last_query_t[0] = _now; _cube_episode[0] += 1
-            threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60), daemon=True).start()
+        # ⛔ FAR-RANGE FORCE REMOVED (user 2026-07-22): it fired a cubeQuery on a far death REGARDLESS
+        # of the 3001 gate and with NO 18 s wait -- violating the core "3001 FILTERS first, THEN the
+        # cube CONFIRMS" flow. Cube queries are expensive and easily wedge the firmware, so every query
+        # must pass the 3001 filter (floor_fall / below-floor cloud / sustained-down) AND the 18 s
+        # 3001-first delay. A far fall is now carried by the below-floor cloud (floor_fall leg) which
+        # persists far, then the down-/lost-probe fires the cube AFTER 18 s -- no immediate far bypass.
 
         # ---- floor-fall leg: pick the FALLEN cluster by PER-CLUSTER floor-band ratio --------
         # Multi-person: a dense SEATED 2nd person has MORE points but a LOW floor_frac; the
