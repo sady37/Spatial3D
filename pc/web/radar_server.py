@@ -187,14 +187,7 @@ CUBE_RESET_S = 5.0           # after this long with NO active fall (person up & 
 # query CUBE_DELAY_S after the episode's trigger: 0-18 s the living gate = the 3001 below-floor
 # cloud (floor_fall, inherently micro-motion-keyed) + sustained-down -> red WITHOUT cube; at 18 s
 # the cube adds RR/floor-energy (tier 2) and gives the server ExtraMLP its cube features.
-CUBE_DELAY_S = 3.0           # hold the episode's FIRST cubeQuery this long after the trigger. Was 18s
-                             # (the "3001-first" tier: cube-free red covered 0-18s). Now that the
-                             # cube-free red is CLOSED, red REQUIRES the cube -> an 18s delay is an
-                             # 18s RED-BLIND window at the START of every fall: a fall down <18s (or a
-                             # short/flickering far fall) never fetches a cube -> never reds -> MISSED
-                             # (live 040500: down 13.6s at 5.2m, reported only ~18s later at the record
-                             # boundary). 3s = enough to debounce the trigger, fast enough to catch short
-                             # falls and alarm in ~3-9s (the burst). Budget still capped by MAX_CUBE_BURSTS.
+CUBE_DELAY_S = 18.0          # hold the episode's FIRST cubeQuery this long after the trigger (3001 first)
 _cube_episode_t0 = [0.0]     # wall time the current cube episode's trigger fired (0 = no episode)
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
