@@ -94,25 +94,29 @@ flowchart TD
     E --> F["cube query<br/>目标 = 楼下云 median bin<br/>门:fresh · 非busy · 速率 · 固件预算"]:::done
     F --> G["cube 一发返回"]:::proc
 
-    G --> P["① PRESENCE — lying (Y/N) 单独定 fall"]:::hd
+    G --> AB{"cube 校验 · 已实现 8e0cfdd · 统一 10 bin 门限<br/>(A) 位置:查询bin 与 当前楼下云bin 相差 ≤ 10 且该位置存在<br/>(B) 归属:回包 resp_bin 与 查询bin 相差 ≤ 10"}:::done
+    AB -->|"任一失败"| VOID["作废 · 视为无返回"]:::discard
+    VOID -.->|"60s 自动重查"| F
+
+    AB -->|"通过"| P["① PRESENCE — lying (Y/N) 单独定 fall"]:::hd
     P --> P1{"cube_ff 够强?"}:::dec
     P1 -->|"强"| PY["lying = Y<br/>(cube_ff 主判据)"]:::done
-    P1 -->|"弱 / =0 / 多簇(chair隔断·径向或轴向)"| P2["z40 兜底 · TODO#2<br/>差值/基值 vs 空房 · XY 逐格"]:::todo
+    P1 -->|"<0.5 / =0"| P2["z40 兜底 · 已实现 3449523<br/>差值/基值 vs 空房 · XY 逐格<br/>(多簇 chair隔断 仲裁仍 TODO#2:现由 cube_ff<0.5 近似)"]:::done
     P2 --> P3{"z40 ≥ 0.4 ?"}:::dec
     P3 -->|"是"| PY
     P3 -->|"否"| PN["lying = N"]:::discard
     P1 -->|"0 条目 · z40 也无数据"| PX["作废 · 不评估"]:::discard
 
-    G --> L["② LIVENESS — Living_state(仅标签)"]:::hd
+    AB -->|"通过"| L["② LIVENESS — Living_state(仅标签)"]:::hd
     L --> L1{"RR 或 micro 测到?"}:::dec
     L1 -->|"是"| LV["Living"]:::done
     L1 -->|"测不到 · 仅腿/胸被挡"| LU["? 未知<br/>≠ 崩溃"]:::todo
 
     PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 &nbsp; · &nbsp; ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["trigger 锁定 · TODO#1<br/>R=150cm 内 down 无权撤警<br/>只有 cube 连续 2 次阴性可撤"]:::todo
+    R --> T["确认后按住红 · 已实现 3449523<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连续2次阴性<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
 
-    F -.->|"无资源 / 空返回"| RT["等 X≈60s 重试 · TODO#3<br/>吃满固件 10% 占空 · 长趴持续复查"]:::todo
+    F -.->|"无资源 / 空返回"| RT["60s 节奏重查 · 已实现 eaafa5f<br/>确认后仍每 60s 刷新(无硬帽 · 无停查)<br/>吃满固件 10% 占空 · 长趴持续复查"]:::done
     RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -140,21 +144,31 @@ flowchart TD
       <h3>判决原则</h3>
       <ul>
         <li><b>Fall ≥ 1</b>:任一发 lying=Y 即报</li>
-        <li>presence 主判据 = <b>cube_ff</b>,z40 兜底</li>
-        <li>lying 单独定 fall;Living_state 只贴标签</li>
-        <li>"?" = 仅腿/遮挡测不到,<b>不等于崩溃</b></li>
-        <li>trigger(down)无权在 R=150cm 内撤警</li>
+        <li>presence 主判据 = <b>cube_ff</b>(≥0.5),z40 兜底(<0.5)</li>
+        <li>lying 单独定 fall;Living_state 只贴标签("?"≠崩溃)</li>
+        <li><b>cube 是权威</b>:进 cube-query = down 已不可信 → down 不再排/撤 cube</li>
+        <li>确认后按住红,起身(cloud_up)或 cube 连2阴性 才撤</li>
+        <li>cube 校验:(A)位置 +(B)归属,10bin,失败作废 → 60s 重查</li>
       </ul>
     </div>
     <div class="card note">
-      <h3>待定阈值 <span style="color:var(--todo)">open</span></h3>
+      <h3>阈值 <span style="color:var(--done)">已定案</span></h3>
       <ul>
-        <li class="muted">cube_ff 强 / 弱 界线(近身体 vs 远身体)</li>
-        <li class="muted">z40 lying 阈值(现 <code>0.4</code>,Fall1 实测 34–56)</li>
-        <li class="muted">重试间隔 X(≈60s,或 90s 保守)</li>
+        <li>cube_ff 强/弱 = <code>0.5</code>(躺 0.55–0.92 vs 远/静 0.00)</li>
+        <li>z40 lying = <code>0.4</code>(躺 ~28 ≫ 空 ~0)</li>
+        <li>重试 X = <code>60s</code>(固件 300帧/300s/10%)· 已实现</li>
+        <li>校验门限 = <code>10 bin</code>(1bin≈10.8cm → ~1m)</li>
       </ul>
     </div>
   </div>
 
-  <div class="foot">已实现 c1110ac / b1f1adf / 8982ea6 / 7fb173c &nbsp;·&nbsp; TODO #1 trigger 锁定 · #2 多簇转 z40 · #3 饿死重试 &nbsp;·&nbsp; 禁止修改中,仅根因 + 设计</div>
+  <div class="foot">已实现 3449523 cube_ff主/z40兜 · eaafa5f 60s刷新(去停查自锁) · 8e0cfdd (A)位置+(B)归属校验 &nbsp;·&nbsp; 基线 c1110ac / b1f1adf / 8982ea6 / 7fb173c &nbsp;·&nbsp; TODO:down门/3001 veto 重设计 · RANGE_STEP 校正 · 多簇 #2</div>
 </div>
+
+<script type="module">
+  // mermaid 加载器(原文件缺这段 → 框图渲染不出)。Live Server 有网,走 CDN。
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({ startOnLoad: true, theme: dark ? 'dark' : 'base' });
+</script>
+</body></html>
