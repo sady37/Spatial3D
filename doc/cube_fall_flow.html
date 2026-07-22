@@ -1,0 +1,160 @@
+<title>Cube 跌倒判读流程</title>
+<style>
+  :root{
+    --bg:#f4f6f9; --panel:#ffffff; --panel-2:#eef2f6; --ink:#16202b; --muted:#5a6b7b;
+    --line:#d6dee7; --accent:#0d9488;
+    --done:#0e9f6e; --todo:#d97706; --alarm:#dc2626; --discard:#64748b;
+    --diagram-bg:#fbfcfe;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0c1117; --panel:#141c26; --panel-2:#0f1620; --ink:#e6edf3; --muted:#8b9bab;
+      --line:#243040; --accent:#2dd4bf; --diagram-bg:#111a24;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#f4f6f9; --panel:#ffffff; --panel-2:#eef2f6; --ink:#16202b; --muted:#5a6b7b;
+    --line:#d6dee7; --accent:#0d9488; --diagram-bg:#fbfcfe;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1117; --panel:#141c26; --panel-2:#0f1620; --ink:#e6edf3; --muted:#8b9bab;
+    --line:#243040; --accent:#2dd4bf; --diagram-bg:#111a24;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.55; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1120px; margin:0 auto; padding:40px 24px 72px}
+  header.top{border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:26px}
+  .eyebrow{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--accent); font-weight:600;
+  }
+  h1{font-size:29px; line-height:1.15; margin:.35em 0 .15em; letter-spacing:-.01em; text-wrap:balance}
+  .sub{color:var(--muted); font-size:15px; max-width:64ch; margin:0}
+  .legend{display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:18px}
+  .chip{
+    display:inline-flex; align-items:center; gap:8px; font-size:13px; color:var(--muted);
+    font-family:ui-monospace,Menlo,monospace;
+  }
+  .dot{width:12px; height:12px; border-radius:3px; flex:none}
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    box-shadow:0 1px 2px rgba(15,23,42,.04);
+  }
+  .diagram{
+    background:var(--diagram-bg); border-radius:14px; padding:22px 10px; overflow-x:auto;
+  }
+  .diagram pre.mermaid{margin:0; text-align:center; min-width:760px}
+  .notes{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-top:26px}
+  .note{padding:18px 20px}
+  .note h3{
+    margin:0 0 10px; font-size:12px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-weight:600;
+  }
+  .note ul{margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:9px}
+  .note li{font-size:13.5px; color:var(--ink); padding-left:16px; position:relative}
+  .note li::before{content:""; position:absolute; left:0; top:.62em; width:6px; height:6px; border-radius:50%; background:var(--accent)}
+  .note li.muted{color:var(--muted)}
+  .note li.muted::before{background:var(--muted)}
+  code{
+    font-family:ui-monospace,Menlo,monospace; font-size:.88em; background:var(--panel-2);
+    padding:1px 5px; border-radius:5px; color:var(--ink);
+  }
+  .tag{font-weight:700}
+  .tag.done{color:var(--done)} .tag.todo{color:var(--todo)}
+  .foot{margin-top:30px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:12.5px; font-family:ui-monospace,Menlo,monospace}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">AWRL6844 · Fall pipeline</div>
+    <h1>Cube 跌倒判读流程</h1>
+    <p class="sub">从 TI 片上 alarm 到报警,cube 是唯一权威。3001 只负责过滤与起钟;判决走 cube 的两维返回,trigger 无权在原地否决。</p>
+    <div class="legend">
+      <span class="chip"><span class="dot" style="background:#0e9f6e"></span>已实现(本会话提交)</span>
+      <span class="chip"><span class="dot" style="background:#d97706"></span>TODO(设计定案 · 未实现)</span>
+      <span class="chip"><span class="dot" style="background:#dc2626"></span>报警 / FALL</span>
+      <span class="chip"><span class="dot" style="background:#64748b"></span>作废 / 不评估</span>
+      <span class="chip"><span class="dot" style="background:#0d9488"></span>入口 · 过程 · 判断</span>
+    </div>
+  </header>
+
+  <div class="card diagram">
+    <pre class="mermaid">
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'ui-monospace, Menlo, monospace','fontSize':'13px','lineColor':'#94a3b8','edgeLabelBackground':'#cbd5e1'}}}%%
+flowchart TD
+    A["TI alarm — window-Z / MLP (TLV 321)<br/>—或— 3001 floor_fall(楼下云)"]:::src
+    A --> B["down = (w_down AND real_person) OR floor_fall<br/>⚠ down 对遮挡/远身体是胡猜(可信度≈0)"]:::proc
+    B --> C{"down 首次 = 1 ?"}:::dec
+    C -->|"是"| D["起 18s 钟 · 3001-first"]:::done
+    D --> E["等 18s<br/>0–18s 只 3001 过滤 · 不发 cube · 不报红"]:::done
+    E --> F["cube query<br/>目标 = 楼下云 median bin<br/>门:fresh · 非busy · 速率 · 固件预算"]:::done
+    F --> G["cube 一发返回"]:::proc
+
+    G --> P["① PRESENCE — lying (Y/N) 单独定 fall"]:::hd
+    P --> P1{"cube_ff 够强?"}:::dec
+    P1 -->|"强"| PY["lying = Y<br/>(cube_ff 主判据)"]:::done
+    P1 -->|"弱 / =0 / 多簇(chair隔断·径向或轴向)"| P2["z40 兜底 · TODO#2<br/>差值/基值 vs 空房 · XY 逐格"]:::todo
+    P2 --> P3{"z40 ≥ 0.4 ?"}:::dec
+    P3 -->|"是"| PY
+    P3 -->|"否"| PN["lying = N"]:::discard
+    P1 -->|"0 条目 · z40 也无数据"| PX["作废 · 不评估"]:::discard
+
+    G --> L["② LIVENESS — Living_state(仅标签)"]:::hd
+    L --> L1{"RR 或 micro 测到?"}:::dec
+    L1 -->|"是"| LV["Living"]:::done
+    L1 -->|"测不到 · 仅腿/胸被挡"| LU["? 未知<br/>≠ 崩溃"]:::todo
+
+    PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
+    Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 &nbsp; · &nbsp; ? → 红 + 活体未知(非崩溃)"]:::alarm
+    R --> T["trigger 锁定 · TODO#1<br/>R=150cm 内 down 无权撤警<br/>只有 cube 连续 2 次阴性可撤"]:::todo
+
+    F -.->|"无资源 / 空返回"| RT["等 X≈60s 重试 · TODO#3<br/>吃满固件 10% 占空 · 长趴持续复查"]:::todo
+    RT -.-> F
+
+    classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
+    classDef proc fill:#475569,color:#fff,stroke:#334155,stroke-width:1px;
+    classDef dec fill:#cbd5e1,color:#0f172a,stroke:#64748b,stroke-width:1px;
+    classDef done fill:#0e9f6e,color:#fff,stroke:#0b7a55,stroke-width:1px;
+    classDef todo fill:#d97706,color:#fff,stroke:#a85d05,stroke-width:1px;
+    classDef alarm fill:#dc2626,color:#fff,stroke:#991b1b,stroke-width:1.5px;
+    classDef discard fill:#64748b,color:#fff,stroke:#475569,stroke-width:1px;
+    classDef hd fill:#6366f1,color:#fff,stroke:#4f46e5,stroke-width:1px;
+    </pre>
+  </div>
+
+  <div class="notes">
+    <div class="card note">
+      <h3>硬约束</h3>
+      <ul>
+        <li><span class="tag done">18s</span> 3001-first:前 18s 只过滤,无 cube 无红</li>
+        <li>固件 cubeGuard 硬窗口 <code>300s</code>(3000帧)</li>
+        <li>预算 <code>300</code> cube-帧/窗口(30s)= <b>10% 占空</b></li>
+        <li>单发上限 <code>300</code>帧(30s);server 用 60帧/发</li>
+      </ul>
+    </div>
+    <div class="card note">
+      <h3>判决原则</h3>
+      <ul>
+        <li><b>Fall ≥ 1</b>:任一发 lying=Y 即报</li>
+        <li>presence 主判据 = <b>cube_ff</b>,z40 兜底</li>
+        <li>lying 单独定 fall;Living_state 只贴标签</li>
+        <li>"?" = 仅腿/遮挡测不到,<b>不等于崩溃</b></li>
+        <li>trigger(down)无权在 R=150cm 内撤警</li>
+      </ul>
+    </div>
+    <div class="card note">
+      <h3>待定阈值 <span style="color:var(--todo)">open</span></h3>
+      <ul>
+        <li class="muted">cube_ff 强 / 弱 界线(近身体 vs 远身体)</li>
+        <li class="muted">z40 lying 阈值(现 <code>0.4</code>,Fall1 实测 34–56)</li>
+        <li class="muted">重试间隔 X(≈60s,或 90s 保守)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="foot">已实现 c1110ac / b1f1adf / 8982ea6 / 7fb173c &nbsp;·&nbsp; TODO #1 trigger 锁定 · #2 多簇转 z40 · #3 饿死重试 &nbsp;·&nbsp; 禁止修改中,仅根因 + 设计</div>
+</div>
