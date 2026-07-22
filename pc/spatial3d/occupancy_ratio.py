@@ -207,6 +207,48 @@ def detect_fall_z40(live_npz, empty_npz=_EMPTY, thr=1.0, omni_thr=1.0, az_step=3
             "peak_range": round(best_b * dr, 2), "peak_omni": round(float(best_omni), 2)}
 
 
+_z40_empty_cache = {}
+
+
+def _empty_z40_profile(empty_npz, az_step):
+    """Cached z<=40 accumulation profile of the FIXED install background (computed once)."""
+    key = (empty_npz, az_step)
+    if key not in _z40_empty_cache:
+        arr = real_array()
+        azg = np.deg2rad(np.arange(-50, 50.001, az_step))
+        bE, _, covE, dr = _power(empty_npz)
+        _z40_empty_cache[key] = (bE, _z40_power(covE, bE, dr, azg, arr), dr)
+    return _z40_empty_cache[key]
+
+
+def z40_present_from_cov(live_cov, live_bins, dr, fall_range_m=None, empty_npz=_EMPTY,
+                         near=2.1, wall=5.8, az_step=3.0):
+    """思路B presence from a LIVE cube's per-bin covariances (list aligned with live_bins) vs the
+    fixed empty background — for the real-time server (radar_server _fetch_cube_bg). Returns the
+    PEAK z<=40 差值/基值 ratio over [near,wall] (or within +/-0.5m of fall_range_m if given).
+    Ghost/wall-multipath rejected (wall gate), breathing-INDEPENDENT, furniture subtracts out
+    (it's in the background). >= ~0.4 = a real floor body; furniture/empty ~0. Empty z40 profile
+    is cached (fixed background)."""
+    arr = real_array()
+    azg = np.deg2rad(np.arange(-50, 50.001, az_step))
+    bE, zE, _ = _empty_z40_profile(empty_npz, az_step)
+    zL = _z40_power(list(live_cov), np.asarray(live_bins), dr, azg, arr)
+    iL = {int(x): k for k, x in enumerate(live_bins)}
+    iE = {int(x): k for k, x in enumerate(bE)}
+    best = 0.0
+    for b in sorted(set(iL) & set(iE)):
+        R = b * dr
+        if not (near <= R <= wall):
+            continue
+        if fall_range_m is not None and abs(R - fall_range_m) > 0.5:
+            continue
+        ez = zE[iE[b]]
+        if np.isnan(zL[iL[b]]) or np.isnan(ez) or ez <= 0:
+            continue
+        best = max(best, float((zL[iL[b]] - ez) / ez))
+    return best
+
+
 def z40_cell_map(npz, cell=0.10, xlim=3.0, ylim=6.0, az_step=2.0):
     """Per-cell z<=40 floor-band intensity map (for the ratio figure). Projects each
     (range, az)'s z<=40-window power to its floor cell (z=0 -> ground g=sqrt(R^2-H^2))."""

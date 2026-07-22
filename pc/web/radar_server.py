@@ -143,6 +143,14 @@ _EXTRAMLP_ON = os.environ.get("EXTRAMLP", "1") != "0"
 # cube second-check). Set CUBEFREE_FALL=1 to restore the old sustained-down-without-cube leg (A/B).
 _CUBEFREE_FALL = os.environ.get("CUBEFREE_FALL", "0") != "0"
 _cleaner.require_cube = not _CUBEFREE_FALL   # closes the cleaner's cube-free (extra_strong) confirm too
+# ⭐ Z40_PRESENCE (default ON, validated 2026-07-22): use the 思路B z<=40 差值/基值 vs the FIXED install
+# background (empty_20260721) as the cleaner's PRESENCE signal (floor_frac), replacing the raw MUSIC
+# floor energy. Furniture/static clutter subtracts out (it's IN the background) -> fixed the LIVE
+# "standing behind ChairL -> false fall" FP: the chair's MUSIC ffrac=1.0 fooled presence, but z40 sees
+# NO new body vs the background (5 red -> 0) while all real falls hold (222500/000000/215500/013500).
+# Set Z40_PRESENCE=0 to revert to MUSIC floor_frac. CAVEAT: relies on empty_20260721 being the valid
+# background -- rearranging furniture would need a fresh install background. See fall-cube-free-gate.
+_Z40_PRESENCE = os.environ.get("Z40_PRESENCE", "1") != "0"
 _cube_busy = [False]         # a request_cube fetch is in flight (1-elem list = mutable flag)
 _last_query_t = [0.0]        # last cubeQuery wall time (rate-limit: 1 per fall episode + refresh)
 QUERY_REFRESH_S = 12.0       # min seconds between cubeQuery bursts while down. A 60-frame
@@ -414,10 +422,29 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60):
                                      timeout=n_frames / 10.0 + 3.0)
             rr, strength, micro, measured = _rr_from_cube(ents)
             cube_ff = _cube_floor_energy(ents)          # MUSIC power-weighted floor band (or None)
+            z40 = None
+            if _Z40_PRESENCE and ents:                  # 思路B presence vs the fixed background
+                try:
+                    import numpy as _np2
+                    from collections import defaultdict as _dd
+                    from spatial3d.range_music import DR_M as _DRM
+                    from spatial3d.occupancy_ratio import z40_present_from_cov
+                    byb = _dd(list)
+                    for e in ents:
+                        byb[int(e.range_bin)].append(_np2.asarray(e.vec, complex))
+                    lbins = sorted(b for b in byb if len(byb[b]) >= 8)
+                    if lbins:
+                        lcov = [((_np2.stack(byb[b]).conj().T @ _np2.stack(byb[b])) / len(byb[b]))
+                                for b in lbins]
+                        drr = float((_meta or {}).get("source", {}).get("dr") or _DRM)
+                        z40 = round(z40_present_from_cov(lcov, lbins, drr,
+                                                         fall_range_m=range_bin * drr), 2)
+                except Exception:
+                    z40 = None
             _cube_result.update(rr=rr, strength=strength, t=time.time(),
                                 floor_frac=round(float(floor_frac), 2), bin=int(range_bin),
                                 cube_ff=(None if cube_ff is None else round(cube_ff, 2)),
-                                micro=micro, measured=measured)
+                                micro=micro, measured=measured, z40=z40)
     except Exception:
         pass
     finally:
@@ -986,7 +1013,13 @@ def _scene():
     if now - _cube_result["t"] < 12.0:
         # Tier-2 floor evidence = the BETTER of the sparse 3001 floor_frac and the cube's OWN
         # MUSIC power-weighted band (the latter sees a far/specular lying body where 3001 collapsed).
-        _ff_use = max(float(_cube_result["floor_frac"] or 0.0), float(_cube_result.get("cube_ff") or 0.0))
+        # PRESENCE = the CUBE's OWN floor energy (its MUSIC band), NOT the sparse 3001 floor_frac:
+        # the 3001 floor_frac reads a standing-behind-chair low cluster as floor-dominated (=1.0) and
+        # an UNASSESSED cube (0 ents) then falsely asserts a body -> cube-collapse red. cube_ff is None
+        # when the cube returned nothing -> 0 -> not present -> not a fall (unassessed, correctly).
+        _ff_use = float(_cube_result.get("cube_ff") or 0.0)
+        if _Z40_PRESENCE and _cube_result.get("z40") is not None:   # 思路B (furniture/ghost rejected) wins
+            _ff_use = 1.0 if float(_cube_result["z40"]) >= 0.4 else 0.0
         # micro = living micro-motion (confirms a person when RR can't lock: back-to-radar/occluded)
         cube_ev = {"rr": _cube_result["rr"], "floor_frac": _ff_use, "micro": _cube_result.get("micro")}
 
@@ -1149,7 +1182,8 @@ def _scene():
                  f"real_inst={int(real_inst)},real={int(real_person)},floor={int(floor_fall)}) "
                  f"hs={w_hs if w_hs is None else round(w_hs,2)} prim=tid{prim['tid'] if prim else '-'} "
                  f"n={prim.get('n') if prim else '-'} pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
-                 f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},age={now-cr['t']:.1f}s) "
+                 f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},"
+                 f"z40={cr.get('z40')},bin={cr.get('bin')},age={now-cr['t']:.1f}s) "
                  f"run={_cleaner.run} P={fall_p} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}")
         print(_line, flush=True)
         try:
