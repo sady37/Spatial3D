@@ -16,7 +16,7 @@ flowchart TD
     E --> F["cube query<br/>目标 = 楼下云 median bin<br/>门:fresh · 非busy · 速率 · 固件预算"]:::done
     F --> G["cube 一发返回"]:::proc
 
-    G --> AB{"cube 校验 · 已实现 8e0cfdd · 统一 10 bin 门限<br/>(A) 位置:查询bin 与 当前楼下云bin 相差 ≤ 10 且该位置存在<br/>(B) 归属:回包 resp_bin 与 查询bin 相差 ≤ 10"}:::done
+    G --> AB{"cube 校验<br/>(A) 位置:查询bin 与 当前楼下云bin ≤ 10 且存在(8e0cfdd)<br/>(B) 归属:回包必须属于【本次主动查询】· query-epoch 相等(0722d)<br/>发新查询即作废旧结果 · bin 距离判不了返回时间"}:::done
     AB -->|"任一失败"| VOID["作废 · 视为无返回"]:::discard
     VOID -.->|"30s 自动重查"| F
 
@@ -38,7 +38,7 @@ flowchart TD
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 · ? → 红 + 活体未知(非崩溃)"]:::alarm
     R --> T["确认后按住红 · 已实现 3449523<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连续2次阴性<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
 
-    F -.->|"无资源 / 空返回"| RT["30s 节奏重查(60→30 救 fall2)<br/>确认后仍每 30s 刷新(无硬帽 · 无停查)<br/>固件 cubeGuard 才是防挂主力(超预算固件拒发)<br/>30s×5发=30s=正好摊满 300s 窗口 10% 预算"]:::done
+    F -.->|"无资源 / 空返回"| RT["30s 节奏重查(60→30 救 fall2)<br/>确认后仍每 30s 刷新(无硬帽 · 无停查)<br/>固件 cubeGuard 才是防挂主力:每 300s 窗只放 30s(5发×6s=10%)<br/>server 超问部分固件直接拒发 · 不灌 UART"]:::done
     RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -70,7 +70,7 @@ flowchart TD
 - **cube_ff = `0.5`**:≥0.5 用 cube_ff 判 lying;<0.5 转 z40。(躺好信号 0.55-0.92 vs 远/静止 0.00,双峰空档)
 - **z40 = `0.4`(现有,不动)**:down 已成立,只判躺(~28)vs 空(~0);站/走上游点云 Z 已排,不用抬。
 - **重试节奏 = `30s`(60→30 救 fall2)**:60s 网格把落在前一次冷却影里的第二次跌倒饿死;防挂靠固件 cubeGuard(10% 占空硬闸,超预算固件拒发),server 节奏只摊预算。无 cubeGuard 固件则 ≥20s。
-- **校验门限 = `10 bin`**(1bin≈10.8cm → ~1m)。
+- **cube 校验 = (A)位置 `10 bin`(1bin≈10.8cm → ~1m)+ (B)归属 `query-epoch`**:发起查询即 +1,回包打戳,判决只认 `epoch == 当前` → 发新查询立刻作废旧包(fall1 的 cube 永远确认不了 fall2,bin 距离判不了返回时间)。
 - ⚠️ cube 波束宽 → 分不了姿态/家具;姿态=点云 Z,排家具=z40+一次性空房基线。
 
 ## 状态
@@ -80,7 +80,8 @@ flowchart TD
 | c1110ac / b1f1adf / 8982ea6 / 7fb173c | 基线:cube 目标=楼下云 median · z40 dr+XY逐格+堵红漏 · 删 far-force · 确认后锁红 |
 | 3449523 | cube_ff 主 / z40 兜底(纠正 A+B z40-primary 弄反) |
 | eaafa5f | 重试刷新去停查自锁(确认后仍刷新) |
-| 8e0cfdd | cube 校验 (A)位置 + (B)归属,10 bin |
+| 8e0cfdd | cube 校验 (A)位置 10 bin |
+| 0722d | (B)归属改 **query-epoch** 时序绑定(替换 resp_bin ±10):只认本次主动查询回包 |
 | 52e1f21 | 重试节奏 60→30s(救 fall2 时序饥饿;固件 cubeGuard 防挂) |
 
 | TODO(未实现) | 内容 |
