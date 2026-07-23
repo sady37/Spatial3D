@@ -115,9 +115,10 @@ flowchart TD
 
     PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 &nbsp; · &nbsp; ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["确认后按住红(报警已完成)<br/>撤警 = 恢复 或 cube 连2次阴性 → 复位 fall + 3次预算<br/>恢复(距离无关三选一):近=cloud_up · 远=起身移动的GTRACK轨迹 · 或跌倒点云清空<br/>(cloud_up 远距失灵:站着整云中位掉<0.4;down-gate 作废=进cube已不可信)"]:::done
+    R --> T["⭐ 红状态机 = cube 判决(每发定'此刻',≤3发/轮)<br/>升红 = 1发 Y(lying+isPerson) · 撤红 = 连2发 N · 作废(None)不算<br/>Y 令阴性清零;配额尽仍未2N → 红保持<br/>无持久撤警检测 · 无 cloud_up/六关 —— cube 自己的 N 就是撤红"]:::done
+    T --> RA["撤红 = 连2N(cube说没了) 或 down 持续清 CUBE_RESET_S(轮结束)<br/>→ episode 复位 + 重新武装下一轮;再倒 = 第2轮<br/>YYY保持 · YNN撤 · YNY阴性清零保持 · Y作废N保持"]:::done
 
-    F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(确认@+18s → +60s → +60s)后停<br/>报警已完成 —— 红色由确认按住,不再刷新<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止<br/>人恢复(cloud_up)/ cube 连2次空 → 撤销 fall + 复位 3 次预算"]:::done
+    F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(确认@+18s → +60s → +60s)后停<br/>报警是事件,发出即完成 —— 不无限刷<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止"]:::done
     RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -148,7 +149,7 @@ flowchart TD
         <li>presence 主判据 = <b>cube_ff</b>(≥0.5),z40 兜底(<0.5)</li>
         <li>lying 单独定 fall;Living_state 只贴标签("?"≠崩溃)</li>
         <li><b>cube 是权威</b>:进 cube-query = down 已不可信 → down 不再排/撤 cube</li>
-        <li>确认后按住红,起身(cloud_up)或 cube 连2阴性 才撤</li>
+        <li>红状态机:升红=1发Y · 撤红=连2发N · 作废不算 · Y清零(无 cloud_up/六关)</li>
         <li>cube 校验:(A)位置 10bin +(B)归属 <b>query-epoch</b>(只认本次查询回包,发新查询即作废旧包),失败作废 → 下次 query 重查</li>
       </ul>
     </div>
@@ -157,7 +158,7 @@ flowchart TD
       <ul>
         <li>cube_ff 强/弱 = <code>0.5</code>(躺 0.55–0.92 vs 远/静 0.00)</li>
         <li>z40 lying = <code>0.4</code>(躺 ~28 ≫ 空 ~0)</li>
-        <li>每次跌倒 ≤ <code>3</code> query(@+18/+60/+60s),报警完成即停;<b>人恢复→撤销 fall</b></li>
+        <li>每次跌倒 ≤ <code>3</code> query(@+18/+60/+60s),配额尽停;<b>撤红=连2N 或 down清轮结束</b></li>
         <li>校验门限 = <code>10 bin</code>(1bin≈10.8cm → ~1m)</li>
       </ul>
     </div>
