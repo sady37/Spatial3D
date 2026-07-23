@@ -430,6 +430,21 @@ class LiveSource:
             except Exception:
                 pass
 
+    def push_cfg(self, cfg_path, echo=False):
+        """Stream a .cfg over the CLI (sensorStop -> cfg -> sensorStart) on the LIVE session.
+
+        WHY THIS EXISTS (2026-07-23): on the 6844 the flash holds the FIRMWARE, not the CONFIG. A
+        power-cycled EVM therefore boots to the `mmwDemo:/>` prompt and sits there until a host
+        pushes a cfg -- ports enumerate, the CLI answers `version` normally, and the DATA line stays
+        at exactly zero bytes. That is what was found this morning after the radar was power-cycled
+        (it was NOT a wedge, and NOT a leftover sensorStop: this server closes with
+        stop_sensor=False and never stops the sensor). Normally the TI visualiser does this push;
+        with the Mac driving the sensor there was nothing to do it."""
+        if not self._sess:
+            return False
+        self._sess.send_cfg(cfg_path, echo=echo)
+        return True
+
     def meta(self):
         with self._lock:
             bins = sorted(self.buf)

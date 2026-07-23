@@ -19,7 +19,7 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # pc/ -> falldet
 import radar_pipeline as pipe
-from radar_source import make_source
+from radar_source import make_source, LiveSource
 from falldet.window import FloorMap, WindowDetector
 from falldet.clean import Cleaner
 from falldet.extramlp import ExtraMLP
@@ -193,11 +193,28 @@ SWEEP_PERIOD_S = float(os.environ.get("SWEEP_PERIOD_S", "3600"))   # 1 h (user s
                              # ACROSS DAYS at a fixed hour (diurnal controlled). Within-hour spread is
                              # NOT wanted: it measures 2 s measurement noise, not the drift a threshold
                              # must survive. See baseline_store.hour_stats().
-SWEEP_SHOTS = ((20, 19), (48, 16))    # (center_bin, half_win) -> bins 1-39, 32-64 (overlap 32-39)
+SWEEP_SHOTS = ((17, 16), (47, 16))    # (center, half_win) -> bins 1-33 + 31-63, full coverage.
+                             # SYMMETRIC 33-bin shots, 7 entries of headroom under TBC_MAX_ENTRIES=40.
+                             # Width is NOT what makes a shot fail (measured: 39 bins came back
+                             # 39/39 while a 25-bin shot returned nothing -- see the retry note in
+                             # _sweep_bg), but equal-load shots make any future asymmetry legible,
+                             # and running flush against the firmware ceiling leaves no slack if a
+                             # burst ever emits one entry more than expected.
 SWEEP_FRAMES = 20                     # 2 s per shot: plenty for a trace-power/covariance estimate
 SWEEP_MASK_R_M = 1.0                  # mask +-1 m around any occupant (multipath contamination)
+SWEEP_SHOT_GAP_S = 12.0               # idle gap between the 2 shots -- see the measurement note
+                                      # at the sleep: queries closer than ~8 s fail in alternation
 _sweep_last = [0.0]
 _sweep_busy = [False]
+# cfg pushed at startup when the EVM is idling at its CLI prompt (see the self-heal in main()).
+# The in-repo copy is the source of truth and was verified byte-identical to the flashed-era file
+# under ~/project/TI/Tiinstall on 2026-07-23. It is the 128-sample variant: dR = 0.1065 m/bin,
+# which is what RANGE_STEP=0.107 matches. The 160-sample sibling gives 0.085 -- the server's old
+# default, and the reason cube queries were aimed ~1.1 m past the body at 4-5 m.
+AUTO_CFG = os.environ.get("AUTO_CFG") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "firmware", "people_tracking_6844", "chirp_configs", "sbr_3dpt_6p5m_pose_128.cfg")
+_last_client_scene = [0.0]   # last time an HTTP client pulled /api/scene (self-tick gate)
 Z40_LYING_THR = 0.4
 # ⭐ PROVENANCE/LOCATION gate: a cube result used in the fall decision MUST be THIS active query's OWN
 # answer AT THIS location, else it is a stale/foreign result reused as a false confirm (Q2 live 154000:
@@ -586,11 +603,33 @@ def _sweep_bg(occupied_r, tracks_xy):
     try:
         byb = _dd(list)
         for center, hw in SWEEP_SHOTS:
-            ents = _src.request_cube(center, n_frames=SWEEP_FRAMES, half_win=hw,
-                                     timeout=SWEEP_FRAMES / 10.0 + 3.0)
+            # ⭐ RETRY ONCE ON EMPTY (measured 2026-07-23): cubeQuery fails in strict ALTERNATION --
+            # every other query comes back [NO-Done] with zero entries, and the gap length does not
+            # matter (observed at 0.5 s, 4 s and 12 s spacing alike; the WIDEST window, `20 19` =
+            # 39 bins at the TBC_MAX_ENTRIES=40 ceiling, returned a full 39/39 on its good cycles).
+            # That is a state TOGGLE, not a rate limit -- it looks like tbcQueryActive surviving a
+            # completed burst, so the next query is rejected and the rejection clears it. Hence the
+            # long-standing "near-half failed" in CAPTURES_20260721.md was never about the near
+            # bins. A single retry lands on the good cycle. NOTE: the fall path's own cube query is
+            # exposed to the same toggle -- an unlucky cycle returns nothing and the verdict 作废.
+            ents = None
+            for _try in range(2):
+                ents = _src.request_cube(center, n_frames=SWEEP_FRAMES, half_win=hw,
+                                         timeout=SWEEP_FRAMES / 10.0 + 3.0)
+                if ents:
+                    break
+                time.sleep(1.0)
             for e in (ents or []):
                 byb[int(e.range_bin)].append(_np.asarray(e.vec, complex))
-            time.sleep(0.5)                      # let the DATA UART drain between shots
+            # ⭐ SHOT GAP (measured 2026-07-23): back-to-back cubeQueries fail in strict
+            # ALTERNATION -- probing 5 shots 4 s apart gave ok/FAIL/ok/FAIL/ok regardless of width
+            # (the WIDEST, `20 19` = 39 bins at the TBC_MAX_ENTRIES=40 ceiling, returned a full
+            # 39/39). So the long-standing "near-half failed" in CAPTURES_20260721.md was never
+            # about the near bins or the window size: two queries simply landed too close together.
+            # 0.5 s between shots is what made this sweep's shot 1 come back [NO-Done] and store
+            # only the far half (32 of 63 bins). A successful query needs the firmware idle for
+            # roughly 8 s, so leave a wide margin -- the sweep is hourly, latency is free here.
+            time.sleep(SWEEP_SHOT_GAP_S)
         if not byb:
             return
         cov_by_bin, pow_by_bin = {}, {}
@@ -1807,6 +1846,7 @@ class Handler(BaseHTTPRequestHandler):
             _cube_neg_run[0] = 0
             return self._send(200, json.dumps({"fall_reset": True}))
         if u.path == "/api/scene":
+            _last_client_scene[0] = time.time()
             try:
                 return self._send(200, json.dumps(_scene()))
             except Exception as e:
@@ -1930,6 +1970,55 @@ def main():
         rec_dir = os.path.join(os.path.dirname(HERE), "record")
         os.makedirs(rec_dir, exist_ok=True)
         record_prefix = rec_name if os.path.sep in rec_name else os.path.join(rec_dir, rec_name)
+    # ⭐ SELF-HEAL, BEFORE the source grabs the ports (2026-07-23). On the 6844 the flash holds the
+    # FIRMWARE but not the CONFIG, so a power-cycled EVM boots to `mmwDemo:/>` and streams nothing
+    # until a host pushes a cfg -- ports enumerate, `version` answers normally, DATA stays at
+    # exactly zero bytes. (That was this morning's "dead radar"; it was NOT a wedge, and NOT a
+    # leftover sensorStop -- this server closes with stop_sensor=False.) Normally the TI visualiser
+    # pushes the cfg; with the Mac driving the sensor nobody did.
+    # It MUST happen here, on a private connection: pushing through the live RadarSession fails
+    # silently -- its drain thread eats the CLI replies, so sensorStart never takes (observed:
+    # cubeQuery still answered [OK] while the frame loop stayed dead).
+    if spec == "live" and os.path.exists(AUTO_CFG):
+        try:
+            import serial as _ser
+            _d = _ser.Serial(LiveSource.DATA, 1250000, timeout=0.4)
+            _t0, _n = time.time(), 0
+            while time.time() - _t0 < 2.0:
+                _n += len(_d.read(8192))
+            _d.close()
+            if _n < 500:
+                print(f"DATA silent ({_n} B/2s) -> pushing {os.path.basename(AUTO_CFG)}", flush=True)
+                _c = _ser.Serial(LiveSource.CLI, 115200, timeout=1.2)
+                _c.reset_input_buffer()
+                _fatal = []
+                for _raw in open(AUTO_CFG):
+                    _l = _raw.strip()
+                    if not _l or _l.startswith("%"):
+                        continue
+                    _c.write(_l.encode() + b"\r\n"); _c.flush()
+                    time.sleep(4.0 if _l.startswith("sensorStart") else 1.0)
+                    _rsp = _c.read(4096).decode("ascii", "replace")
+                    if "already defined" in _rsp or "mmWave open failed" in _rsp:
+                        _fatal.append(_l.split()[0])
+                _c.close()
+                if _fatal:
+                    # ⭐ The cfg is ONE-SHOT PER BOOT (measured 2026-07-23): `antGeometryBoard`
+                    # answers "Antenna geometry is already defined" on a second parse, and once the
+                    # sensor has been stopped `sensorStart` fails with "mmWave open failed
+                    # [-203227134]" -- the RF front end cannot be reopened. So this self-heal can
+                    # rescue a FRESHLY BOOTED EVM (its intended case: flash keeps the firmware, not
+                    # the config, so a power-cycled board idles at the prompt) but nothing can
+                    # rescue a configured-then-stopped sensor. Say so instead of idling silently.
+                    print("*" * 78 + "\n"
+                          f"  CFG REJECTED ({', '.join(sorted(set(_fatal)))}) — the EVM was already\n"
+                          "  configured this boot and the RF front end will not reopen.\n"
+                          "  >>> POWER-CYCLE THE EVM. <<<  No host-side command can recover this;\n"
+                          "  the cfg parses only once per boot. (Never send sensorStop to this\n"
+                          "  firmware -- there is no way back from it.)\n" + "*" * 78, flush=True)
+                time.sleep(1.0)
+        except Exception as _e:
+            print(f"cfg self-heal skipped: {type(_e).__name__}: {_e}", flush=True)
     _src = make_source(spec, record_prefix=record_prefix, save_on=save_on)
     _src.start()
     # live source needs a moment for the reader thread to see the first frames
@@ -1949,6 +2038,21 @@ def main():
     rec = f"  recording 5-min files -> {record_prefix}_*.npz" if record_prefix else ""
     print(f"source={m['kind']} ({m['name']})  bins {min(m['bins']) if m['bins'] else '?'}-"
           f"{max(m['bins']) if m['bins'] else '?'}  serving http://127.0.0.1:{port}{rec}", flush=True)
+    # ⭐ SELF-TICK (2026-07-23): _scene() only ran when something GET /api/scene -- the server was
+    # PURELY passive. Close the dashboard and fall detection, 5-min recording and the hourly
+    # baseline sweep all silently stop, which is exactly wrong for an unattended run (verified live:
+    # no sweep fired for 90 s until a curl arrived). This drives the pipeline itself, but ONLY while
+    # no client is polling, so an open dashboard keeps its own cadence and _scene() is not called
+    # from two threads at once in the normal case.
+    def _self_tick():
+        while True:
+            try:
+                time.sleep(0.5)
+                if time.time() - _last_client_scene[0] > 2.0:
+                    _scene()
+            except Exception:
+                pass
+    threading.Thread(target=_self_tick, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     # graceful stop on Ctrl-C AND SIGTERM (plain `pkill`) so the read-only serial
     # attach is released cleanly and never wedges the firmware. NOTE: `kill -9`
@@ -1956,7 +2060,14 @@ def main():
     import signal
     global _shutdown
     def _graceful(*_a):
-        _src.stop(); srv.shutdown()
+        # ⭐ MUST run off the main thread (fixed 2026-07-23). Python delivers signals to the MAIN
+        # thread, which is exactly where serve_forever() is blocked; ServerBase.shutdown() then
+        # waits for that loop to finish -- and the loop cannot advance because the main thread is
+        # sitting inside this handler. Self-deadlock: SIGTERM and SIGINT were both ignored, so every
+        # stop ended in `kill -9`, the one thing this handler exists to avoid (SIGKILL is uncatchable
+        # and can wedge the UART -- the "ports up, firmware alive, zero bytes" state found this
+        # morning). Handing the shutdown to a helper thread lets the main loop unwind normally.
+        threading.Thread(target=lambda: (_src.stop(), srv.shutdown()), daemon=True).start()
     _shutdown = _graceful                                 # exposed via /api/quit
     signal.signal(signal.SIGINT, _graceful)
     signal.signal(signal.SIGTERM, _graceful)
