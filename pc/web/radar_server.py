@@ -429,7 +429,8 @@ _fall_deaths = []            # [(t, x, y)] recent GTRACK deaths (a person may ha
 _fall_region = {"since": 0.0, "last": 0.0, "x": 0.0, "y": 0.0}  # sticky armed fall region
 _fall_anchor = [None]        # world GROUND range (wy) of the selected fallen cluster -> cube target
                              # (per-cluster selection; None -> fall back to aggregate _fall_range_bin)
-_clusters_now = [[]]         # THIS frame's clusters (set after the cluster loop) -> _cube_target_bin uses
+_clusters_now = [[]]
+_refl_log_t = {}            # tid -> last [refl] log time (throttle the reflector-probe stream)         # THIS frame's clusters (set after the cluster loop) -> _cube_target_bin uses
                              # the CURRENT-frame floor-dominated cluster, not a stored/stale anchor (0722j)
 _fall_trigger_anchor = [None]  # ⭐ (x, y) of the FALL/LOST track the firmware flagged (user 2026-07-22k):
                              # y = world GROUND range -> the cube queries WHERE TI localized the faller, NOT
@@ -1364,6 +1365,42 @@ def _scene():
         _floor_pts = _floor_pts[-4000:]
         if len(_floor_pts) >= 200 and len(_floor.hg) == 0:
             _floor.fit(_floor_pts)
+
+    # ⭐ REFLECTOR PROBE (observation only, user 2026-07-23): per-track top-5 point stability. A metal
+    # ghost has sigma_pos ~ 0 (fixed facet) while its power is modulated by passers-by; a real person
+    # has large sigma_pos (body deforms/sways/breathes). Logs [refl] throttled per-tid so the two
+    # distributions become visible before any gate is built. Position-only for now (pc_pts carries no
+    # snr); sigma_pos is the discriminator regardless.
+    try:
+        import web.reflector_probe as _refl
+    except Exception:
+        _refl = None
+    if _refl is not None and tg:
+        _rnow = time.time()                             # `now` is defined later in _scene; use a local
+        _alive = set()
+        for _b in boxes:
+            _ti = _b.get("ti"); _tid = _b.get("tid")
+            if _ti is None or _tid is None:
+                continue
+            _alive.add(_tid)
+            _tp = [(p[0], p[1], p[2], None) for p in pc_pts if p[3] == _ti]
+            _st = _refl.update(_tid, _tp)
+            if _st is None:
+                continue
+            _last = _refl_log_t.get(_tid, 0.0)
+            if _rnow - _last >= 2.0:                     # throttle: one [refl] per tid per 2 s
+                _refl_log_t[_tid] = _rnow
+                _rl = (f"[refl] tid{_tid} n={_b['n']} pose={_b.get('pose')} "
+                       f"sigma_pos={_st['sigma_pos']} zspread={_st['zspread']} "
+                       f"xy=({(_b['x0']+_b['x1'])/2:.2f},{(_b['y0']+_b['y1'])/2:.2f})")
+                print(_rl, flush=True)
+                try:
+                    with open(os.path.join(os.path.dirname(__file__), "..", "record",
+                                           "fall_debug.log"), "a") as _fh:
+                        _fh.write(_rl + "\n")
+                except Exception:
+                    pass
+        _refl.prune(_alive)
 
     # Module 1: sustained max-height window on the primary track's points.
     # Prefer the FIRMWARE window leg (TLV 321, true 10 fps sustain) when it's
