@@ -3181,7 +3181,6 @@ int32_t MmwDemo_CLICubeGuardCfg (int32_t argc, char* argv[])
     gMmwMssMCB.tbcRefillMilli = ((int32_t)gMmwMssMCB.tbcBudgetFrames * 1000) /
                                 (int32_t)gMmwMssMCB.tbcBudgetWindow;
     gMmwMssMCB.tbcTokensMilli = (int32_t)gMmwMssMCB.tbcBudgetFrames * 1000;  /* start full */
-    gMmwMssMCB.tbcTokenHbCtr  = 0;
     return 0;
 }
 
@@ -3265,7 +3264,6 @@ void CLI_init (uint8_t taskPriority)
     gMmwMssMCB.tbcBudgetWindow      = 4500;     /* frames to refill one full bucket */
     gMmwMssMCB.tbcRefillMilli       = (450 * 1000) / 4500;   /* = 100 milli/frame = 0.1 token */
     gMmwMssMCB.tbcTokensMilli       = 450 * 1000;            /* start full */
-    gMmwMssMCB.tbcTokenHbCtr        = 0;
 
     /* Initialize the CLI configuration: */
     memset ((void *)&cliCfg, 0, sizeof(CLI_Cfg));

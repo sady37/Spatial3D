@@ -1534,14 +1534,14 @@ typedef struct MmwDemo_MSS_MCB_t
      *   spend         = 1000 milli per extracted cube-frame
      *   refill/frame  = capacity_milli / tbcBudgetWindow   (450000/4500 = 100 milli = 0.1 tok)
      * cubeGuardCfg is REINTERPRETED (same 3 args): <maxPerQuery> <capacity> <refillWindowFrames>.
-     * The host reads the remaining tokens two ways: on the TLV 320 cube subheader (post-query, the
-     * moment it matters) and a TLV 322 heartbeat every ~300 frames (idle resync). */
+     * The host reads the remaining tokens on the TLV 320 cube subheader (post-query) -- that is the
+     * only moment it matters; between queries the host extrapolates (only it spends, refill is
+     * deterministic) and assumes a full bucket after an idle gap. No separate heartbeat needed. */
     uint16_t              tbcMaxFramesPerQuery; /*!< hard cap on one cubeQuery (frames)     */
     uint16_t              tbcBudgetFrames;      /*!< bucket CAPACITY in whole tokens (450)  */
     uint16_t              tbcBudgetWindow;      /*!< frames to refill one full bucket (4500=10%)*/
     volatile int32_t      tbcTokensMilli;       /*!< current tokens x1000 (0 .. capacity*1000) */
     volatile int32_t      tbcRefillMilli;       /*!< refill per frame x1000 (capacity*1000/window) */
-    volatile uint32_t     tbcTokenHbCtr;        /*!< frames since the last TLV 322 heartbeat   */
 
     /* Spatial3D: per-track pose classification (auxiliary fall leg). Filled in
      * dpc_mss.c right after DPU_TrackerProc_process (track kinematics + gated
@@ -1583,9 +1583,6 @@ typedef enum mmwLab_output_message_type_e
 
     /*! @brief   Spatial3D: per-track pose classification (Stood/Sat/Lying/Falling) */
     MMWDEMO_OUTPUT_EXT_MSG_POSE = 321,
-
-    /*! @brief   Spatial3D: cube token-bucket heartbeat {tokens, capacity} (every ~300 frames) */
-    MMWDEMO_OUTPUT_EXT_MSG_CUBE_TOKENS = 322,
 
     /*! @brief   Point Cloud - Array of detected points (range/angle/doppler) */
     MMWDEMO_OUTPUT_MSG_POINT_CLOUD = 3001,

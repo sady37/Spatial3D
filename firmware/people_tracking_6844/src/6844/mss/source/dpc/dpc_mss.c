@@ -3057,7 +3057,6 @@ void DPC_Execute(){
             {
                 gMmwMssMCB.tbcTokensMilli = capMilli;
             }
-            gMmwMssMCB.tbcTokenHbCtr++;    /* one tick/frame -> TLV 322 heartbeat at 300 (transmit) */
         }
         if (gMmwMssMCB.tbcQueryActive && gMmwMssMCB.tbcQueryFramesLeft > 0
                 && gMmwMssMCB.tbcTokensMilli >= 1000)

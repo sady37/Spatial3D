@@ -314,18 +314,6 @@ def parse_track_bin_cube(payload: bytes) -> TrackBinCube:
     return TrackBinCube(int(n_ant), entries, tokens=tokens)
 
 
-TLV_CUBE_TOKENS = 322        # Spatial3D cube token-bucket heartbeat {u16 tokens, u16 capacity}
-_CUBE_TOKENS = struct.Struct("<2H")
-
-
-def parse_cube_tokens(payload: bytes):
-    """TLV 322: {u16 tokens_remaining, u16 capacity}. Idle-resync heartbeat (~every 300 frames)."""
-    if len(payload) < _CUBE_TOKENS.size:
-        return None
-    tok, cap = _CUBE_TOKENS.unpack_from(payload, 0)
-    return {"tokens": int(tok), "capacity": int(cap)}
-
-
 @dataclass
 class PointCloud:
     """Minor-motion point cloud (TLV 3001), decoded to Cartesian + SNR (radar frame)."""

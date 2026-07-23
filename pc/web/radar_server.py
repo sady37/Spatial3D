@@ -119,9 +119,14 @@ _cache = {"t": 0.0, "key": None, "state": None}
 _lock = threading.Lock()
 
 # ---- live falldet pipeline (server-side reference; mirrors the on-chip Phase-3 window) ----
-RANGE_STEP = float(os.environ.get("RANGE_STEP", "0.085"))  # m per range bin; MUST match the flashed
-                            # cfg's dR (5m/pose/pose65=0.085; the 128-samp pose65s=0.106). Set via env
-                            # per cfg so the cubeQuery bin mapping stays aligned with the firmware bins.
+RANGE_STEP = float(os.environ.get("RANGE_STEP", "0.107"))  # m per range bin = the flashed cfg's dR.
+                            # ⭐ Default is 0.107 (2026-07-23): the committed/auto-pushed cfg is the
+                            # 128-sample 6.5 m pose65s (dR=0.1065). The old 0.085 default was for the
+                            # 160-sample cfg -- with it, a 4.4 m body was queried at 5.5 m (10 bins off)
+                            # and z40 came back NEGATIVE. But the ROBUST fix is not this default: the
+                            # firmware SELF-DESCRIBES dR via each 320 entry's range_m/range_bin, and the
+                            # server ADOPTS it from the first burst (_adopt_dr below) -- so a cfg change
+                            # self-corrects and the env var is only a first-query seed.
 _floor = FloorMap(cell=0.5)                                   # rolling floor map H_g(x,y)
 _floor_pts = []                                              # recent world points for calibration
 _window = WindowDetector(_floor, margin=0.45, sustain=3, clear=3)  # sustain in SCENE-calls (~3/s)
@@ -671,6 +676,7 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
     the lost-track/still-person probe uses a LONGER window (~15s) -- a still body is not
     time-limited, and longer coherent integration lifts weak breathing above the ~1um
     noise floor (SNR ~ sqrt(T)) AND sharpens RR resolution. Non-blocking for /api/scene."""
+    global RANGE_STEP                    # adopted from the firmware's self-describing dR (below)
     try:
         if hasattr(_src, "request_cube"):
             # ⭐ TWO-STAGE cube (2026-07-23, after a wide 39-bin x 60-frame burst WEDGED the sensor
@@ -712,21 +718,29 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
                 verdict_bin = int(range_bin)
                 ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=CUBE_VERDICT_HW,
                                          timeout=n_frames / 10.0 + 3.0)
-            # ⭐ RANGE_STEP SELF-CHECK (user 2026-07-22j, 2nd bug): the firmware's true dR = range_m/range_bin
-            # of the returned 320 entries. If the server's RANGE_STEP disagrees (server default 0.085 vs the
-            # 128-samp pose65s cfg's 0.106), we compute the WRONG target bin -> the firmware queries a
-            # different metre range (55*0.106=5.83m, into the wall). WARN once; fix by launching with
-            # RANGE_STEP=<firmware dR> (proper fix: read dR from the cfg/TLV at start).
+            # ⭐ ADOPT dR FROM THE FIRMWARE (2026-07-23, replaces the old warn-only self-check): each
+            # 320 entry carries range_m AND range_bin, so dR = range_m/range_bin is self-describing.
+            # Adopt it as RANGE_STEP on the first burst that disagrees -- the firmware is the source of
+            # truth, so a cfg change self-corrects and the env var is just a first-query seed. This
+            # kills the whole "forgot RANGE_STEP -> query aimed 1 m past the body -> z40 negative" class
+            # of bug (the old code only WARNED and kept the wrong value). One-shot per session.
             if not _range_step_warned[0] and ents:
                 _drs = [e.range_m / e.range_bin for e in ents if getattr(e, "range_bin", 0)]
                 if _drs:
                     _dr_fw = sorted(_drs)[len(_drs) // 2]
-                    if abs(_dr_fw - RANGE_STEP) > 0.005:
-                        _range_step_warned[0] = True
-                        import sys as _sys
-                        _sys.stderr.write("WARN: RANGE_STEP=%.4f but firmware dR=%.4f (320 range_m/bin) -- "
-                                          "target bins are WRONG. Relaunch with RANGE_STEP=%.4f\n"
-                                          % (RANGE_STEP, _dr_fw, round(_dr_fw, 3)))
+                    _range_step_warned[0] = True
+                    if abs(_dr_fw - RANGE_STEP) > 0.003:
+                        _old = RANGE_STEP
+                        RANGE_STEP = round(_dr_fw, 4)
+                        _msg = ("[fall] RANGE_STEP adopted from firmware: %.4f -> %.4f "
+                                "(320 range_m/bin); target bins now match the sensor" % (_old, RANGE_STEP))
+                        print(_msg, flush=True)
+                        try:
+                            with open(os.path.join(os.path.dirname(__file__), "..", "record",
+                                                   "fall_debug.log"), "a") as _fh:
+                                _fh.write(_msg + "\n")
+                        except Exception:
+                            pass
             # ⭐ (B) provenance: the RESPONSE's own range (median entry bin) -- checked against the
             # requested bin at decision time so a leftover/foreign burst is discarded (作废).
             _rbs = sorted(int(e.range_bin) for e in ents) if ents else []
