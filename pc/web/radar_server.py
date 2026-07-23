@@ -271,8 +271,9 @@ RECOVER_GROUND_N = 3         # LEG2 (6): <= this many below-floor points within 
 # frames to read "clear" -> a real get-up empties the spot PERSISTENTLY; a lying victim (+ standing caregiver)
 # keeps below-floor points in most frames. leg1 ALSO ANDs this so a caregiver raising the whole-cloud median
 # can't clear while the victim's floor points remain.
-RECOVER_GROUND_WIN = 10      # rolling window (frames) for the ground_clear majority
-RECOVER_GROUND_MAJ = 7       # >= this many of the last WIN frames below-floor-empty -> ground_clear
+GCLEAR_WIN = 10              # rolling window (frames) for the ground_clear majority vote
+GCLEAR_FRAC = 0.7            # >= this FRACTION of the window (>= GCLEAR_MIN_N samples) below-floor-empty -> clear
+GCLEAR_MIN_N = 5            # need at least this many samples before ground_clear can read True
 _ground_clear_hist = []      # rolling [bool] of the instant `_gm <= RECOVER_GROUND_N` (per-episode; reset on clear)
 _recover_since = [0.0]       # LEG1: wall time cloud_up has been continuously true
 _recover_cand = {}           # LEG2: tid -> {ox, oy, lx, ly, lt} candidate origin + last pos/time
@@ -898,7 +899,15 @@ def _scene():
         _fdnow = time.time()
         for _tid, _xy in _gtrack_prev.items():
             if _tid not in gtracks:
-                _fall_deaths.append((_fdnow, _xy[0], _xy[1]))
+                # ⑥ WALKED-OFF exclusion (user 0722i): a death with an UPRIGHT cloud cluster near it
+                # (med_wz > 0.4, n >= 8, within 1.6 m) is a person who STOOD UP and walked off -- their
+                # cloud trails the track -- NOT a body that dropped. Do NOT poison the floor-fall death
+                # table with it (that was the "walked away but still query" chain). Collapsed / low /
+                # no-cloud deaths enter normally (the real fall path is untouched).
+                _upright_near = any((c["cx"] - _xy[0]) ** 2 + (c["cy"] - _xy[1]) ** 2 < 1.6 ** 2
+                                    and c.get("med_wz", -1.0) > 0.4 and c["n"] >= 8 for c in clusters)
+                if not _upright_near:
+                    _fall_deaths.append((_fdnow, _xy[0], _xy[1]))
         _gtrack_prev = dict(gtracks)
         _fall_deaths = [(t, x, y) for (t, x, y) in _fall_deaths if _fdnow - t < FALL_DEATH_S]
         ftracks = _floor_tracker.update(time.time(), gtracks,
@@ -1272,10 +1281,10 @@ def _scene():
             _gm = int(((wz < FLOOR_Z) & (_np.abs(_np.hypot(px, py) - _fr) <= 10 * RANGE_STEP)).sum())
             _gm_ok = _gm <= RECOVER_GROUND_N
         _ground_clear_hist.append(bool(_gm_ok))
-        if len(_ground_clear_hist) > RECOVER_GROUND_WIN:
+        if len(_ground_clear_hist) > GCLEAR_WIN:
             del _ground_clear_hist[0]
-        ground_clear = (len(_ground_clear_hist) >= RECOVER_GROUND_MAJ
-                        and sum(_ground_clear_hist) >= RECOVER_GROUND_MAJ)
+        ground_clear = (len(_ground_clear_hist) >= GCLEAR_MIN_N
+                        and sum(_ground_clear_hist) / len(_ground_clear_hist) >= GCLEAR_FRAC)
         # LEG 1 cloud_up: whole-cloud median risen, sustained RECOVER_S, real_inst -- AND ground_clear so a
         # caregiver raising the aggregate median can't clear while the victim's floor points persist (①).
         cloud_up = bool(cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED and real_inst)
