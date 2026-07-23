@@ -36,7 +36,7 @@ flowchart TD
 
     PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 · ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["确认后按住红(报警已完成)<br/>_cube_confirmed_episode:红保持 while NOT cloud_up<br/>撤警 = 起身(cloud_up) 或 cube 连2次阴性 → 复位 fall + 3次预算<br/>(down-gate 概念作废:进 cube-query = down 已不可信)"]:::done
+    R --> T["确认后按住红(报警已完成)<br/>撤警 = 恢复 或 cube 连2次阴性 → 复位 fall + 3次预算<br/>恢复(距离无关三选一):近=cloud_up · 远=起身移动的GTRACK轨迹 · 或跌倒点云清空<br/>(cloud_up 远距失灵:站着整云中位掉<0.4;down-gate 作废=进cube已不可信)"]:::done
 
     F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(确认@+18s → +60s → +60s)后停<br/>报警已完成 —— 红色由确认按住,不再刷新<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止<br/>人恢复(cloud_up)/ cube 连2次空 → 撤销 fall + 复位 3 次预算"]:::done
     RT -.-> F
@@ -63,7 +63,8 @@ flowchart TD
 - presence 主判据 = **cube_ff**(≥0.5),z40 兜底(cube_ff <0.5/=0/多簇 时)。
 - `lying(Y/N)` 单独定 fall;`Living_state(Living/?)` 只贴标签。
 - **"?" = 仅腿/遮挡测不到,≠ 崩溃。**
-- **cube 是权威**:进 cube-query = down 已不可信 → down 不再排/撤 cube;确认后按住红,起身(cloud_up)或 cube 连 2 阴性 才撤。
+- **cube 是权威**:进 cube-query = down 已不可信 → down 不再排/撤 cube;确认后按住红。
+- **恢复撤警(距离无关,三选一 OR)**:近=`cloud_up`(整云中位>0.4);远=**起身移动的 GTRACK 轨迹**(直立+speed>0.2,安全主力,静躺不产生移动轨迹);或**跌倒点云清空**(≤3点,保守防误撤远-稀疏真躺)。持续 RECOVER_S 才撤。⚠️ cloud_up 远距(>3m)失灵——站着整云中位掉 0.0-0.4、和躺重叠,故必须补 B/A。
 
 ## 阈值(已定案,用 case/ 标注数据标定)
 

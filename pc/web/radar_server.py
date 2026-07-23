@@ -252,6 +252,18 @@ RECOVER_S = 2.0              # a CLEAR recovery this long CLEARS the latch early
                              # red). The centroid stays ~+0.7 m once up. Only clears when up.
 RECOVER_ZMED = 0.4           # whole-cloud median world height above this = the mass is UP (a
                              # lying body is -0.2..-0.5; standing/sitting is +0.5..+0.9).
+# ⭐ FAR-ROBUST RECOVERY (user 2026-07-22f): cloud_up (RECOVER_ZMED) is reliable NEAR but FAILS FAR --
+# at >3 m the downtilt term (-py*sin(25 deg) ~= -1.7 m @4 m) + elevation under-resolution collapse a
+# STANDING person's whole-cloud median to 0.0-0.4, overlapping a lying body, so a far recovered-in-place
+# fall never clears cloud_up -> red STUCK. Two range-INDEPENDENT recovery signals OR'd with cloud_up:
+#   (B) MOVED: a live GTRACK track near the fall spot that is UPRIGHT (world-h > FALL_UPRIGHT_M) AND
+#       MOVING (speed > RECOVER_VMIN). A still fallen body yields NO moving upright track, so this is
+#       SAFE (can't false-clear a real fall) and range-independent. Primary signal.
+#   (A) VACATED: the fall spot is essentially EMPTY of points (the body left the region). Conservative
+#       (<= RECOVER_VACATE_N points near _last_low_xy) to avoid false-clearing a far-SPARSE real lying
+#       body -- a lying body always leaves SOME low points at the spot; only a walked-off spot empties.
+RECOVER_VMIN = 0.2           # (B) min GTRACK track speed (m/s) to count as "got up and moving"
+RECOVER_VACATE_N = 3         # (A) <= this many points near the fall spot = the body has left (vacated)
 CANCEL_R = 0.5               # 30 s monitor: if a GTRACK track stands UP within this radius of
                              # where the body fell (the person got up unaided at the fall spot),
                              # DISCARD the fall -- a stumble that self-recovers is not an
@@ -1235,14 +1247,30 @@ def _scene():
     if (dec["fall"] or _cube_confirmed_episode[0]
             or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
-    # RECOVERY / 30 s-CANCEL clears the latch early: the person got up and moved on -- a stumble
-    # that self-recovers is not an emergency. Signal = the CLOUD/energy centroid at the fall spot
-    # has RISEN (cloud_up). We do NOT use the GTRACK track's Z here: it floats ~1 m on a still
-    # body (fall-design), so a fallen person's coasting track reads "up" and would falsely cancel
-    # a real fall (it wrecked fall B in 000000). The cloud centroid is the reliable "up". A track
-    # near the fall spot must ALSO show the cloud up -- which cloud_up already requires. Held
-    # RECOVER_S to debounce, and only when a real person is present (real_inst).
-    if real_inst and cloud_up:
+    # RECOVERY clears the latch early: the person got up and moved on -- a stumble that self-recovers
+    # is not an emergency. NEAR signal = the whole-cloud centroid at the fall spot has RISEN (cloud_up;
+    # we do NOT use the GTRACK track Z here -- it floats ~1 m on a still body, so a fallen person's
+    # coasting track reads "up" and would falsely cancel a real fall, wrecked fall B in 000000). cloud_up
+    # FAILS at range (see RECOVER_VMIN/RECOVER_VACATE_N notes), so OR in two range-independent signals:
+    _rmoved = False; _rvacated = False        # (B) got-up-and-moving, (A) fall spot vacated
+    _llxy = _last_low_xy[0]
+    if _llxy is not None:
+        _lx, _ly = _llxy
+        # (B) SAFE: an UPRIGHT, MOVING GTRACK track near the fall spot = person got up and walked.
+        _rmoved = any(((t["x"] - _lx) ** 2 + (t["y"] - _ly) ** 2 < FALL_REGION_M ** 2)
+                      and (mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)) > FALL_UPRIGHT_M
+                      and t.get("speed", 0.0) > RECOVER_VMIN for t in tg)
+        # (A) CONSERVATIVE: the fall spot is essentially EMPTY (body left the region). Guarded on the
+        # cloud existing; if there is NO cloud at all, the spot is trivially vacated.
+        if pcx is not None and len(pcx):
+            _nreg = ((px - _lx) ** 2 + (py - _ly) ** 2) < FALL_REGION_M ** 2
+            _rvacated = int(_nreg.sum()) <= RECOVER_VACATE_N
+        else:
+            _rvacated = True
+    recovered = cloud_up or _rmoved or _rvacated
+    # Held RECOVER_S to debounce (a flickering false signal won't sustain), only when a real person is
+    # present (real_inst). ANY signal sustaining RECOVER_S clears; they share the one _recover_since timer.
+    if real_inst and recovered:
         if _recover_since[0] == 0.0:
             _recover_since[0] = now
         if now - _recover_since[0] >= RECOVER_S:
