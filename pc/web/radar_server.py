@@ -373,6 +373,17 @@ _fall_anchor = [None]        # world GROUND range (wy) of the selected fallen cl
                              # (per-cluster selection; None -> fall back to aggregate _fall_range_bin)
 _clusters_now = [[]]         # THIS frame's clusters (set after the cluster loop) -> _cube_target_bin uses
                              # the CURRENT-frame floor-dominated cluster, not a stored/stale anchor (0722j)
+_fall_trigger_anchor = [None]  # ⭐ (x, y) of the FALL/LOST track the firmware flagged (user 2026-07-22k):
+                             # y = world GROUND range -> the cube queries WHERE TI localized the faller, NOT
+                             # the cloud median (near legs pollute it -> bin12 vs the real 4.7m). ALSO anchors
+                             # the tier-1 6 s filter: `down` must PERSIST within R<=FALL_ANCHOR_R of this spot
+                             # (a wandering down = a walk-by, not a fall). Captured from the down-triggering
+                             # `prim` box (w_down) or the lost track; cleared on episode reset / recovery.
+FALL_ANCHOR_R = 0.5          # the 6 s down-persistence must stay within this of the fall/lost spot (m)
+_fall_trigger_tid = [None]   # tid of the triggering track (identity continuity for the recovery-cancel)
+_fall_persist_since = [0.0]  # wall time the 6 s arming clock started (locked at the first down/lost)
+_arm_recover_since = [0.0]   # wall time the ID-backed recovery evidence has been continuous (debounce)
+ARM_CANCEL_S = 1.0           # recovery evidence must persist this long to CANCEL the arming (else ignored)
 _range_step_warned = [False] # one-shot: warn if RANGE_STEP disagrees with the stream's dr (grid mismatch)
 # Lost-track RR probe: when GTRACK drops a still person's track (FloorTracker inherits it),
 # actively cubeQuery that spot to get RR -- confirms a living body (vs furniture) and shows
@@ -584,9 +595,17 @@ def _cube_target_bin(sc, fallback=None):
     # n >= FALL_CLUSTER_MIN_N) -> the one with the MOST points (a lying body ffrac~1.0; standing legs ffrac
     # ~0.1-0.2 are excluded); (2) else the aggregate below-floor median (single-body collapse, 042500 stable);
     # (3) else the caller's fallback (death coord / whole-cloud median).
+    # (1) ⭐ floor-DOMINATED cluster (user 0722j): the faller's DENSE below-floor mass -- CLEAN (the ffrac
+    # gate drops a near stander's low-ffrac legs) AND PRECISE (its wy_med is the breathing mass centre, where
+    # z40/RR live). This is the primary target -- more precise than the trigger anchor's coarse box centre.
     _cl = [c for c in _clusters_now[0] if c.get("floor_frac", 0) >= 0.7 and c.get("n", 0) >= FALL_CLUSTER_MIN_N]
     if _cl:
-        return int(round(float(max(_cl, key=lambda c: c["n"])["wy_med"]) / RANGE_STEP))   # (1) floor-dominated
+        return int(round(float(max(_cl, key=lambda c: c["n"])["wy_med"]) / RANGE_STEP))
+    # (2) ⭐ TRIGGER ANCHOR: WHERE TI localized the fall/lost track (user 0722k) -- the FALLBACK when the
+    # cloud is too sparse/far to form a floor-dominated cluster (a far collapse). Query bin = anchor GROUND
+    # range (y). This is what keeps a far body queried at the RIGHT spot when the cluster path can't.
+    if _fall_trigger_anchor[0] is not None:
+        return int(round(float(_fall_trigger_anchor[0][1]) / RANGE_STEP))
     pcx = sc.get("pc_xyz")
     if pcx is not None and len(pcx):
         th = _m.radians(TILT or 0.0)
@@ -743,6 +762,8 @@ def _scene():
         _cube_episode_t0[0] = 0.0     # episode ended (round over) -> restart the 6 s/18 s clocks next round
         _last_low_xy[0] = None        # forget the fall spot
         _fall_anchor[0] = None        # forget the sticky faller-cluster anchor
+        _fall_trigger_anchor[0] = None; _fall_trigger_tid[0] = None   # forget the trigger-localized faller
+        _fall_persist_since[0] = 0.0; _arm_recover_since[0] = 0.0     # reset the tier-1 arming clocks
         _cube_confirmed_episode[0] = False   # round over (down cleared) -> drop the red hold
         _cube_neg_run[0] = 0
         _cube_query_epoch[0] += 1     # ③ invalidate any held cube result so it can't revive red via latch
@@ -1007,6 +1028,9 @@ def _scene():
                     _dxy = [(dx, dy) for (dt, dx, dy) in _fall_deaths
                             if (dx - ftk.x) ** 2 + (dy - ftk.y) ** 2 < FALL_REGION_M ** 2]
                     _ax, _ay = _dxy[-1] if _dxy else (ftk.x, ftk.y)
+                    # ⭐ TRIGGER ANCHOR (user 0722k): the LOST track's location (death coord / floor pos) is
+                    # where the faller went down -> that is the cube target (below).
+                    _fall_trigger_anchor[0] = (_ax, _ay)
                     rb = _cube_target_bin(sc, fallback=int(round(math.hypot(_ax, _ay) / RANGE_STEP)))
                     _cube_busy[0] = True
                     _lost_query_t[ftk.id] = _now
@@ -1151,11 +1175,45 @@ def _scene():
     elif _down_since[0] and (now - _down_last[0]) > DOWN_GAP_S:
         _down_since[0] = 0.0                       # down truly gone -> reset the sustain timer
     down_dur = (now - _down_since[0]) if _down_since[0] else 0.0
-    # ⭐ TIER-1 GATE: start the 3001-first episode ONLY after `down` persisted FALL_PERSIST_S (6 s free
-    # filter). Everything expensive (cube, susp-declaration, veto) hangs off _cube_episode_t0 -> a < 6 s
-    # false alarm never reaches the 3001 tier or the cube.
-    if down and down_dur >= FALL_PERSIST_S and _cube_episode_t0[0] == 0.0:
-        _cube_episode_t0[0] = now
+    # ⭐ TIER-1 TWO-STATE ARMING (user 0722k/4): lock the anchor + a 6 s clock on the FIRST down/lost. The
+    # ONLY early exit is ID-backed RECOVERY evidence sustained ARM_CANCEL_S (an UPRIGHT + TI-silent track,
+    # tid-continuous OR at the anchor R<=FALL_ANCHOR_R). EVERYTHING ELSE (down present/flicker/gone, single-
+    # frame evidence) is ignored -> at 6 s the episode opens BY DEFAULT and 3001/cube resolves it. Bias =
+    # never miss a collapse: an empty / far-sparse anchor still opens the episode (the cube asks the spot).
+    if _cube_episode_t0[0] == 0.0:                              # ARMING (episode not yet open)
+        if _fall_trigger_anchor[0] is None and down:           # FIRST down/lost -> lock anchor + start clock
+            if w_down and prim is not None:
+                _fall_trigger_anchor[0] = ((prim["x0"] + prim["x1"]) / 2.0, (prim["y0"] + prim["y1"]) / 2.0)
+                _fall_trigger_tid[0] = prim["tid"]
+            else:                                              # track-free (floor_fall) -> anchor the floor body
+                _fcl = [c for c in _clusters_now[0]
+                        if c.get("floor_frac", 0) >= 0.7 and c.get("n", 0) >= FALL_CLUSTER_MIN_N]
+                if _fcl:
+                    _bc = max(_fcl, key=lambda c: c["n"]); _fall_trigger_anchor[0] = (_bc["cx"], _bc["wy_med"])
+            if _fall_trigger_anchor[0] is not None:
+                _fall_persist_since[0] = now
+        if _fall_trigger_anchor[0] is not None:
+            _a = _fall_trigger_anchor[0]
+            _ti_silent = (not w_down) and not (fw is not None and fw.valid and fw.falling_prob >= 0.5)
+            _rec = _ti_silent and any(                          # ID-backed recovery: upright + silent
+                (mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)) >= FALL_UPRIGHT_M
+                and ((t["x"] - _a[0]) ** 2 + (t["y"] - _a[1]) ** 2 <= FALL_ANCHOR_R ** 2
+                     or t["tid"] == _fall_trigger_tid[0]) for t in tg)
+            if _rec:
+                if _arm_recover_since[0] == 0.0:
+                    _arm_recover_since[0] = now
+                if now - _arm_recover_since[0] >= ARM_CANCEL_S:  # sustained -> CANCEL -> standby (only exit)
+                    _fall_trigger_anchor[0] = None; _fall_trigger_tid[0] = None
+                    _fall_persist_since[0] = 0.0; _arm_recover_since[0] = 0.0
+            else:
+                _arm_recover_since[0] = 0.0                     # evidence flickered -> reset the debounce
+            if _fall_trigger_anchor[0] is not None and (now - _fall_persist_since[0]) >= FALL_PERSIST_S:
+                _cube_episode_t0[0] = now                      # 6 s default -> open episode, 3001-first起钟
+    elif w_down and prim is not None:                          # episode OPEN: refresh anchor for cube target
+        _cxy = ((prim["x0"] + prim["x1"]) / 2.0, (prim["y0"] + prim["y1"]) / 2.0)
+        _a = _fall_trigger_anchor[0]
+        if _a is None or (_cxy[0] - _a[0]) ** 2 + (_cxy[1] - _a[1]) ** 2 <= FALL_ANCHOR_R ** 2:
+            _fall_trigger_anchor[0] = _cxy
 
     # server-triggered cube fetch: HELD CUBE_DELAY_S after the trigger (3001-first tiering) then
     # rate-limited to one burst / CUBE_RETRY_S (TODO#3: firmware 10% duty) — not every scene call.
@@ -1354,6 +1412,8 @@ def _scene():
         _fall_deaths[:] = [(dt, dx, dy) for (dt, dx, dy) in _fall_deaths
                            if (dx - _lx) ** 2 + (dy - _ly) ** 2 > 1.0]   # ⑤ clear deaths within 1 m of spot
         _last_low_xy[0] = None; _fall_anchor[0] = None; _recover_cand.clear()
+        _fall_trigger_anchor[0] = None; _fall_trigger_tid[0] = None
+        _fall_persist_since[0] = 0.0; _arm_recover_since[0] = 0.0
         _recover_since[0] = 0.0; _ground_clear_hist.clear()
         _fall_onset_armed[0] = True                               # round over -> ready to count round 2
 
