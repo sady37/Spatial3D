@@ -19,7 +19,7 @@ flowchart TD
 
     G --> AB{"cube 校验<br/>(A) 位置:查询bin 与 当前楼下云bin ≤ 10 且存在(8e0cfdd)<br/>(B) 归属:回包必须属于【本次主动查询】· query-epoch 相等(0722d)<br/>发新查询即作废旧结果 · bin 距离判不了返回时间"}:::done
     AB -->|"任一失败"| VOID["作废 · 视为无返回"]:::discard
-    VOID -.->|"30s 自动重查"| F
+    VOID -.->|"60s 重查 · 不烧配额"| F
 
     AB -->|"通过"| P["① PRESENCE — lying (Y/N) 单独定 fall"]:::hd
     P --> P1{"cube_ff 够强?"}:::dec
@@ -30,18 +30,33 @@ flowchart TD
     P3 -->|"否"| PN["lying = N"]:::discard
     P1 -->|"0 条目 · z40 也无数据"| PX["作废 · 不评估"]:::discard
 
-    AB -->|"通过"| L["② LIVENESS — Living_state(仅标签)"]:::hd
+    AB -->|"通过"| L["LIVENESS — Living_state(仅标签)"]:::hd
     L --> L1{"RR 或 micro 测到?"}:::dec
     L1 -->|"是"| LV["Living"]:::done
-    L1 -->|"测不到 · 仅腿/胸被挡"| LU["? 未知<br/>≠ 崩溃"]:::todo
+    L1 -->|"测不到 · 仅腿/胸被挡"| LU["? 未知 ≠ 崩溃"]:::todo
 
-    PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
-    Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 · ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["⭐ 红状态机 = cube 判决(每发定'此刻',≤3发/轮)<br/>升红 = 1发 Y(lying+isPerson) · 撤红 = 连2发 N · 作废(None)不算 · Y 阴性清零<br/>配额尽仍未2N → 红保持(YYY保持·YNN撤·YNY保持·Y作废N保持)"]:::done
-    T --> RA["撤红/轮结束三路 → 全清+re-arm+待机,再倒=第2轮<br/>① cube 连2N(cube说没了)<br/>② 中途-up 恢复:leg1 cloud_up(整云median>0.4·2s·real_inst) 或 leg2 walk-away 六关<br/>③ down 持续清 CUBE_RESET_S(兜底)"]:::done
-    RA --> W6["walk-away 六关(leg2·起身且走):①起点≤0.8m ②位移≥1.5m ③限速1.2m/s+0.3裕量(瞬移取消重排队)<br/>④世界高≥0.4m ⑤TI静默 ⑥ground_clear(护理员克星)· ①②③硬关批权 ④⑤⑥否决关只拦"]:::todo
+    %% ⭐ 红状态机:每发 cube 定'此刻' · 配额 ≤3 有效发/轮 · 作废不烧配额
+    PY --> SM["🔴 Y = lying+isPerson<br/>升红/保持 · 阴性run 清零 · 扣 1 配额"]:::alarm
+    PN --> NN{"N · 扣 1 配额<br/>连 2 发 N ?"}:::dec
+    PX --> VD["作废(None)<br/>不扣配额 · 状态不动"]:::discard
+    NN -->|"连 2N"| CLR["🟦 撤红 · 轮结束"]:::discard
+    NN -->|"仅 1N(未达2)"| SM
+    VD -.->|"60s 重查 · 不烧配额"| F
+    SM --> QT{"配额尽(3 有效发)· 未 2N ?"}:::dec
+    QT -->|"否 未满3"| F
+    QT -->|"是"| HOLD["🔴 红保持 · 停查<br/>(报警是事件·已发出即完成)"]:::alarm
 
-    F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(@+18s → +60s → +60s),配额尽停<br/>报警是事件,发出即完成 —— 不无限刷<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止"]:::done
+    %% ⭐ 中途-up 撤红 —— 与 cube 连2N 并列的清红路(任一腿)
+    HOLD --> MU{"中途-up 撤红?(任一腿即撤)"}:::dec
+    SM -.->|"红保持中随时可撤"| MU
+    MU -->|"leg1 cloud_up(起身·走没走都算)"| LG1["整云 median 世界高 &gt;0.4 · 持续2s · real_inst<br/>AND ground_clear(多数票)—— 护理员拉高 median 骗不过持续楼下点"]:::done
+    MU -->|"leg2 walk-away 六关(起身且走)"| LG2["①起点≤0.8m ②位移≥1.5m ③限速1.2m/s+0.3裕(瞬移取消重排队)<br/>④世界高≥0.4m ⑤TI静默 ⑥ground_clear(多数票·护理员克星)<br/>①②③硬关批权 · ④⑤⑥否决关只拦"]:::done
+    LG1 --> STB["全清 + re-arm + 待机"]:::proc
+    LG2 --> STB
+    CLR --> STB
+    HOLD -.->|"或 down 持续清 CUBE_RESET_S(兜底)"| STB
+    STB --> RB["再倒 → 第 2 轮(新 trigger · 新 18s · 新 ≤3 发)"]:::proc
+    RB -.-> A
     RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -75,7 +90,7 @@ flowchart TD
 
 - **cube_ff = `0.5`**:≥0.5 用 cube_ff 判 lying;<0.5 转 z40。(躺好信号 0.55-0.92 vs 远/静止 0.00,双峰空档)
 - **z40 = `0.4`(现有,不动)**:down 已成立,只判躺(~28)vs 空(~0);站/走上游点云 Z 已排,不用抬。
-- **每次跌倒 ≤ `3` 次 query(轮次模型)**:query@+18s → +60s → +60s,配额尽停。cube 的活 = 判这一轮 fall/not-fall(见上"红状态机"),报警是事件、发出即完成,不无限刷。3×6s=18s/次 ≪ 固件预算,不 wedge、自终止。
+- **每次跌倒 ≤ `3` 有效发 query**:@+18s → +60s → +60s,配额只数**有效发(Y/N)**,**作废(None)不烧配额**(救 222000 短跌倒饿死),launch 门 <MAX 不变、超发由 60s 节拍+固件 cubeGuard 兜。报警是事件、发出即完成,不无限刷。
 - **cube 校验 = (A)位置 `10 bin`(1bin≈10.8cm → ~1m)+ (B)归属 `query-epoch`**:发起查询即 +1,回包打戳,判决只认 `epoch == 当前` → 发新查询立刻作废旧包(fall1 的 cube 永远确认不了 fall2,bin 距离判不了返回时间)。
 - ⚠️ cube 波束宽 → 分不了姿态/家具;姿态=点云 Z,排家具=z40+一次性空房基线。
 
@@ -92,6 +107,7 @@ flowchart TD
 | 0722e | 报警完成模型:每次跌倒 ≤3 query(@+18/+60/+60s)后停;回 60s |
 | 0722g | 红状态机:红=cube判决(升红1Y/撤红2N/作废不算/Y清零) |
 | 0722h | **中途-up 恢复两腿**:leg1 cloud_up(整云median>0.4·2s·real_inst)+ leg2 walk-away 六关 → 撤警全清待机;与 cube-2N 并列的撤红路 |
+| 0722i | review 六修:①leg1 AND ground_clear ②ground_clear 多数票(win10/70%/min5) ③恢复+CUBE_RESET bump epoch(防复燃) ④配额移到评估时扣(作废不烧,救222000) ⑤撤红补 region+死表局部清 ⑥walked-off 死表排除 |
 
 | TODO(未实现) | 内容 |
 |---|---|
