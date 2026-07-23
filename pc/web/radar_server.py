@@ -233,14 +233,19 @@ _cube_episode_t0 = [0.0]     # wall time the current cube episode's trigger fire
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
-# ⭐ ROUND MODEL (user 2026-07-22g): red is NOT a persistent state needing "recovery" clearing -- a fall is
-# ONE ROUND, held by the FALL_HOLD_S latch, ended when `down` clears (person got up = the NEXT round). REMOVED
-# the confirmed-hold (`_cube_confirmed_episode`, TODO#1), the cube-negative cancel, and the cloud_up / 6-gate
-# walk-away recovery detection -- all were modelling red as a persistent state, which spawned the far-blind
-# cloud_up + stuck-red mess. A still-down body just re-detects as a new round (periodic re-alert = OK). See
-# the round-model block in _scene.
-FALL_HOLD_S = 30.0           # red Fall latch: keep it visible this long after the last confirmation
-                             # (dashboard visibility + bridges brief `down` flicker). Round ends on down-clear.
+# ⭐ RED STATE MACHINE via CUBE VERDICTS (user 2026-07-22g): the <=3 cube queries of a round DECIDE red.
+#   升红 (raise) = ONE Y query (lying + isPerson Y/not-sure).
+#   撤红 (clear) = TWO CONSECUTIVE N queries.
+#   作废 (None)  = counts as NEITHER (skipped -- does not raise, count, or reset).
+#   a Y RESETS the negative run (阴性清零); quota (3 queries) exhausted w/o 2 N -> red HOLDS.
+# `_cube_confirmed_episode` is the persistent RED hold (raised on Y, held across the 60 s query gaps and
+# through 作废/single-N, cleared ONLY by 2 consecutive N OR the round ending on down-clear). This REPLACES
+# the far-blind cloud_up / 6-gate walk-away recovery (all removed) -- the CUBE's own N verdict is the clear.
+_cube_confirmed_episode = [False]  # persistent RED hold (cube Y raised it; 2N / down-clear clears it)
+_cube_neg_run = [0]          # consecutive cube-N run; None(作废) neither counts nor resets; Y resets to 0
+_cube_eval_t = [0.0]         # _cube_result["t"] last counted (dedup: each query's verdict counts once)
+CUBE_CANCEL_NEG = 2          # 撤红: this many consecutive cube N clears the red hold
+FALL_HOLD_S = 30.0           # red latch: bridges brief `down`/dec flicker on top of the confirmed hold
 _last_low_xy = [None]        # radar-frame (x, y) of the most recent below-floor cloud mass
 _down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
 _lying_since = [0.0]         # wall time the ExtraMLP lying_state has been continuously true
@@ -676,6 +681,8 @@ def _scene():
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended (round over) -> restart the 6 s/18 s clocks next round
         _last_low_xy[0] = None        # forget the fall spot
+        _cube_confirmed_episode[0] = False   # round over (down cleared) -> drop the red hold
+        _cube_neg_run[0] = 0
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
@@ -1146,6 +1153,19 @@ def _scene():
         if cube_lying:
             _alive = (_cube_result["rr"] not in (None, 0)) or bool(_cube_result.get("micro"))
             cube_living_state = "Living" if _alive else "?"
+    # ⭐ RED STATE MACHINE (user 2026-07-22g): count THIS query's verdict ONCE (dedup on _cube_result["t"]).
+    # Y -> 升红 + 阴性清零; N -> +1, two consecutive -> 撤红; None(作废) -> skip (neither raise nor count).
+    if _cube_result["t"] > 0.0 and _cube_result["t"] != _cube_eval_t[0]:
+        _cube_eval_t[0] = _cube_result["t"]
+        if cube_lying is True:                       # Y -> raise red, reset the negative run
+            _cube_confirmed_episode[0] = True
+            _cube_neg_run[0] = 0
+        elif cube_lying is False:                    # N -> count; 2 consecutive -> clear red
+            _cube_neg_run[0] += 1
+            if _cube_neg_run[0] >= CUBE_CANCEL_NEG:
+                _cube_confirmed_episode[0] = False
+                _fall_latch_until[0] = 0.0
+        # None (作废) -> neither: leave the hold and the negative run untouched
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
@@ -1196,18 +1216,14 @@ def _scene():
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
 
-    # ⭐ ROUND MODEL (user 2026-07-22g): a fall is ONE ROUND. Red shows while THIS round is confirmed,
-    # plus a FALL_HOLD_S latch to bridge brief `down` flicker + keep it visible on the dashboard. The
-    # round ENDS when `down` stays clear (person got up) -> latch expires -> red off -> the episode resets
-    # on down-clear (below) and re-arms. Getting up is the START of the NEXT round, NOT "recovery of a held
-    # state" -- so there is NO confirmed-hold and NO cloud_up / walk-away recovery detection (those modelled
-    # red as a persistent state that then needed clearing, which spawned the far-blind cloud_up + stuck-red
-    # mess). A still-down (occluded) body keeps re-confirming within the 30 s latch so its red never
-    # flickers off; if its `down` drops and later re-asserts it simply re-detects as a NEW round (periodic
-    # re-alert of a person still on the floor = acceptable, throttled by the ~24 s round cadence).
+    # ⭐ RED = the cube-verdict hold (升红 on Y, 撤红 on 2N; see the state machine above) OR the short latch
+    # that bridges a live confirmation's flicker. The round ENDS -- and the hold clears -- on 2 consecutive
+    # cube N (cube says the body is gone) OR on `down` staying clear (person got up -> episode reset below).
+    # Getting up is the START of the NEXT round, NOT "recovery of a held state" -> NO cloud_up / walk-away
+    # recovery detection (removed); the CUBE's own N verdict + down-clear are the only clears.
     if dec["fall"] or (_CUBEFREE_FALL and sustained_fall):
-        _fall_latch_until[0] = now + FALL_HOLD_S      # live confirmation -> (re)extend the red latch
-    if now < _fall_latch_until[0]:
+        _fall_latch_until[0] = now + FALL_HOLD_S      # live confirmation -> (re)extend the bridging latch
+    if _cube_confirmed_episode[0] or now < _fall_latch_until[0]:
         fall_state = "fall"
     # fused fall probability P (dashboard '跌倒概率 P 融合'): TI MLP + the 5 scene features.
     _mlp_p = (fw.falling_prob if (fw is not None and fw.valid) else 0.0)
@@ -1377,6 +1393,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(_meta))
         if u.path == "/api/fall/reset":              # clear a latched red Fall
             _fall_latch_until[0] = 0.0
+            _cube_confirmed_episode[0] = False
+            _cube_neg_run[0] = 0
             return self._send(200, json.dumps({"fall_reset": True}))
         if u.path == "/api/scene":
             try:
