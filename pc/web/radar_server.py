@@ -177,8 +177,12 @@ CUBE_FF_THR = 0.5
 # captures at 25 frames/shot; 60 frames at that width is NOT yet validated -- if the 320 wedges,
 # relaunch with CUBE_HALF_WIN=3 to restore the old narrow behaviour instantly.
 CUBE_HALF_WIN = int(os.environ.get("CUBE_HALF_WIN", "19"))   # A-stage query width (+- bins); 3 = old
-CUBE_VERDICT_HW = 3          # the verdict (RR / cube_ff / z40) still runs on a 7-bin sub-window --
-                             # now CENTRED ON THE PROFILE PEAK instead of on the pre-data guess.
+CUBE_VERDICT_HW = 3          # B-stage: the verdict (RR / cube_ff / z40) runs on a 7-bin burst at the
+                             # A-stage peak bin -- narrow, so it can integrate the full ~6 s cheaply.
+CUBE_A_FRAMES = int(os.environ.get("CUBE_A_FRAMES", "20"))   # A-stage LOCATE burst = 2 s (presence
+                             # converges in ~8 snapshots; keeping the wide burst SHORT is what caps
+                             # the DATA-UART high-pressure window at 2 s instead of the RR window's 6 s
+                             # -- a single wide+long burst wedged the sensor live on 2026-07-23).
 _empty_prof = [None]         # cached (bins, trace-power) of the fixed empty-room install baseline
 # ⭐ PERIODIC WHOLE-ROOM SWEEP (user spec 2026-07-23). Two shots cover the room (cube_sweep's
 # geometry: bins 1-39 + 32-64), 2 s each, every SWEEP_PERIOD_S. Two jobs:
@@ -668,8 +672,45 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
     noise floor (SNR ~ sqrt(T)) AND sharpens RR resolution. Non-blocking for /api/scene."""
     try:
         if hasattr(_src, "request_cube"):
-            ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=CUBE_HALF_WIN,
-                                     timeout=n_frames / 10.0 + 3.0)
+            # ⭐ TWO-STAGE cube (2026-07-23, after a wide 39-bin x 60-frame burst WEDGED the sensor
+            # live -- frames stopped seconds after `CUBE-A ... shift=+9` and never came back). The
+            # single wide+long burst was the WORST case for the DATA UART: RR needs ~6 s, so all 39
+            # bins streamed for 6 s = ~28 KB/s of the 125 KB/s link held for the whole window. Split
+            # the jobs by their real integration need:
+            #   A) LOCATE -- wide but SHORT. Presence (covariance) converges in ~8 snapshots, so a
+            #      2 s burst is plenty to pick the body's bin from the profile peak. High byte rate,
+            #      but for 2 s, not 6.
+            #   B) MEASURE -- NARROW and long. RR/z40 need ~6 s of coherent integration, but only at
+            #      the peak bin, so a 7-bin burst = ~5 KB/s (the pre-wide load) for those 6 s.
+            # Peak byte rate is unchanged but the high-pressure window drops 6 s -> 2 s, and total
+            # bytes nearly halve. When CUBE_HALF_WIN <= CUBE_VERDICT_HW the stages collapse to one
+            # narrow burst (the instant fallback if the wide stage is ever implicated again).
+            _wide = CUBE_HALF_WIN > CUBE_VERDICT_HW
+            if _wide:
+                a_ents = _src.request_cube(range_bin, n_frames=CUBE_A_FRAMES, half_win=CUBE_HALF_WIN,
+                                           timeout=CUBE_A_FRAMES / 10.0 + 3.0)
+                verdict_bin = int(range_bin)
+                prof = _cube_presence_profile(a_ents) if a_ents else []
+                if prof:
+                    verdict_bin = max(prof, key=lambda t: t[1])[0]
+                    _top = sorted(prof, key=lambda t: -t[1])[:3]
+                    _dbg_a = ("[fall] CUBE-A req=%d peak=%d (%.2fm) shift=%+d | top3 %s" % (
+                        range_bin, verdict_bin, verdict_bin * RANGE_STEP, verdict_bin - range_bin,
+                        " ".join("b%d:%+.2f" % (b, r) for b, r, _ in _top)))
+                    print(_dbg_a, flush=True)
+                    try:
+                        with open(os.path.join(os.path.dirname(__file__), "..", "record",
+                                               "fall_debug.log"), "a") as _fh:
+                            _fh.write(_dbg_a + "\n")
+                    except Exception:
+                        pass
+                # B) narrow long burst at the located bin for RR/z40 (the verdict integration)
+                ents = _src.request_cube(verdict_bin, n_frames=n_frames, half_win=CUBE_VERDICT_HW,
+                                         timeout=n_frames / 10.0 + 3.0)
+            else:
+                verdict_bin = int(range_bin)
+                ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=CUBE_VERDICT_HW,
+                                         timeout=n_frames / 10.0 + 3.0)
             # ⭐ RANGE_STEP SELF-CHECK (user 2026-07-22j, 2nd bug): the firmware's true dR = range_m/range_bin
             # of the returned 320 entries. If the server's RANGE_STEP disagrees (server default 0.085 vs the
             # 128-samp pose65s cfg's 0.106), we compute the WRONG target bin -> the firmware queries a
@@ -689,27 +730,6 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
             # requested bin at decision time so a leftover/foreign burst is discarded (作废).
             _rbs = sorted(int(e.range_bin) for e in ents) if ents else []
             resp_bin = _rbs[len(_rbs) // 2] if _rbs else None
-            # ⭐ A-stage peak pick: with a wide burst the target bin is chosen from the DATA (the
-            # presence profile's peak) instead of from the pre-data guess, then the verdict runs on
-            # the usual 7-bin sub-window centred there. A guess that was 10-30 bins out is now just
-            # a starting window, not a fatal commitment. No baseline -> keep the requested bin.
-            verdict_bin = int(range_bin)
-            if ents and CUBE_HALF_WIN > CUBE_VERDICT_HW:
-                prof = _cube_presence_profile(ents)
-                if prof:
-                    verdict_bin = max(prof, key=lambda t: t[1])[0]
-                    _top = sorted(prof, key=lambda t: -t[1])[:3]
-                    _dbg_a = ("[fall] CUBE-A req=%d peak=%d (%.2fm) shift=%+d | top3 %s" % (
-                        range_bin, verdict_bin, verdict_bin * RANGE_STEP, verdict_bin - range_bin,
-                        " ".join("b%d:%+.2f" % (b, r) for b, r, _ in _top)))
-                    print(_dbg_a, flush=True)
-                    try:
-                        with open(os.path.join(os.path.dirname(__file__), "..", "record",
-                                               "fall_debug.log"), "a") as _fh:
-                            _fh.write(_dbg_a + "\n")
-                    except Exception:
-                        pass
-                ents = [e for e in ents if abs(int(e.range_bin) - verdict_bin) <= CUBE_VERDICT_HW]
             range_bin = verdict_bin              # stamp/report the bin the verdict actually used
             rr, strength, micro, measured = _rr_from_cube(ents)
             cube_ff = _cube_floor_energy(ents)          # MUSIC power-weighted floor band (or None)
@@ -2029,9 +2049,10 @@ def main():
             break
         time.sleep(0.1)
     m = _src.meta()
-    if not m["bins"]:
-        print("WARN: no radar frames yet (sensor streaming? ports free?). Serving anyway.",
-              flush=True)
+    # NOTE: m["bins"] fills only from cubeQuery 320 data, so it is EMPTY on a healthy point-cloud
+    # stream -- do NOT use it as a liveness signal (it produced a spurious "no radar frames" every
+    # startup). Real liveness is the frame reader: LiveSource logs "no radar frames for Ns — WEDGED"
+    # from its own thread when the DATA line goes silent, which is the signal the monitor watches.
     _meta = dict(source=m, win_s=WIN_S, mount_calibrated=(TILT is not None and MOUNT is not None),
                  tilt_deg=TILT, h_mount=MOUNT,
                  range=pipe.measurable_range(m["bins"], m["dr"]) if m["bins"] else None)
