@@ -159,6 +159,27 @@ _Z40_PRESENCE = os.environ.get("Z40_PRESENCE", "1") != "0"
 # empty baseline): z40 >= Z40_LYING_THR = a lying body vs empty (far/occluded workhorse, body
 # ~28-97 >> empty ~0; `down` already excluded stand/walk upstream so 0.4 only clears empty-noise).
 CUBE_FF_THR = 0.5
+# ⭐ WIDE CUBE (A-stage, user 2026-07-23): the firmware buffers TBC_MAX_ENTRIES=40 entries/frame, so
+# ONE query can carry up to +-19 bins (39 bins ~ 4.2 m at dR 0.107) -- we were using +-3 (7 bins,
+# 0.75 m). The guard budget (cubeGuardCfg 300/300/3000) counts cube-FRAMES, not entries, so a wide
+# burst costs the SAME budget as a narrow one: we were spending the whole budget to look at 0.75 m.
+# WHY IT MATTERS: every cube failure this session came from committing to a target bin BEFORE any
+# data existed, using the least reliable input (a fragmenting track / anchor) -- RANGE_STEP skew put
+# the query 10 bins out (4.39 m body queried at 5.54 m), near-leg pollution put it 30 bins out
+# (void(loc=0 qbin=41 curbin=11)), old anchors scattered to bins 57/18/5/-10. A wide burst moves the
+# targeting decision to AFTER the data: pick the bin from the burst's own presence profile.
+# EVIDENCE (case/CAPTURES_20260721.md ground truth, 63-bin sweeps vs the boxes-removed baseline):
+# the profile peak located a seated person to 4 cm (ChairL peak 4.24 m vs truth 4.20 m) and 0.5 cm
+# (ChairR 3.29 vs 3.28). Amplitude is weak for seated bodies (+1.24 / +0.36) as expected -- 差值/基值
+# rests on the LYING body-floor dihedral -- but A-stage only needs the peak POSITION to be right.
+# COST: 39 bins x ~72 B x 10 fps ~ 28 KB/s of the 125 KB/s DATA UART for the burst (vs ~5 KB/s), the
+# axis that WEDGES the sensor (needs a power-cycle). cube_sweep.py has run half_win=19 for years of
+# captures at 25 frames/shot; 60 frames at that width is NOT yet validated -- if the 320 wedges,
+# relaunch with CUBE_HALF_WIN=3 to restore the old narrow behaviour instantly.
+CUBE_HALF_WIN = int(os.environ.get("CUBE_HALF_WIN", "19"))   # A-stage query width (+- bins); 3 = old
+CUBE_VERDICT_HW = 3          # the verdict (RR / cube_ff / z40) still runs on a 7-bin sub-window --
+                             # now CENTRED ON THE PROFILE PEAK instead of on the pre-data guess.
+_empty_prof = [None]         # cached (bins, trace-power) of the fixed empty-room install baseline
 Z40_LYING_THR = 0.4
 # ⭐ PROVENANCE/LOCATION gate: a cube result used in the fall decision MUST be THIS active query's OWN
 # answer AT THIS location, else it is a stale/foreign result reused as a false confirm (Q2 live 154000:
@@ -493,6 +514,43 @@ def _cube_floor_energy(entries, fps=10.0):
     return None if not mp else float(mp.get("floor_frac", 0.0))
 
 
+def _cube_presence_profile(entries):
+    """⭐ A-stage: per-bin 差值/基值 presence profile from ONE wide burst.
+
+    ratio[b] = (P_live[b] - P_empty[b]) / P_empty[b], P = trace(covariance) -- the same metric as
+    occupancy_ratio.detect_occupancy, but computed from live entries instead of a saved npz. The
+    RATIO (not the difference) is what makes near and far comparable (近大远小): a near reflector has
+    a huge base AND a huge diff; the fraction cancels the R^4.
+    Returns [(bin, ratio, P_live)] sorted by bin, or [] if the baseline is unavailable."""
+    import numpy as _np
+    from collections import defaultdict as _dd
+    if not entries:
+        return []
+    byb = _dd(list)
+    for e in entries:
+        byb[int(e.range_bin)].append(_np.asarray(e.vec, complex))
+    if _empty_prof[0] is None:
+        try:
+            _p = os.path.join(os.path.dirname(__file__), "..", "case", "empty_20260721.npz")
+            _d = _np.load(_p, allow_pickle=True)
+            _b = _d["bins"].astype(int)
+            _P = _np.array([float(_np.real(_np.trace(_d["covariances"][i]))) for i in range(len(_b))])
+            _empty_prof[0] = {int(b): p for b, p in zip(_b, _P) if p > 0}
+        except Exception:
+            _empty_prof[0] = {}
+    base = _empty_prof[0]
+    if not base:
+        return []
+    out = []
+    for b in sorted(byb):
+        s = _np.stack(byb[b])
+        if len(s) < 4 or b not in base:
+            continue
+        P = float(_np.real(_np.trace((s.conj().T @ s) / len(s))))
+        out.append((b, (P - base[b]) / base[b], P))
+    return out
+
+
 def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
     """Background: burst 320 at range_bin, then compute RR from it (the cube second-check).
     n_frames sets the integration window: 60 (~6s, ~2 breaths) for a quick fall confirm;
@@ -501,7 +559,7 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
     noise floor (SNR ~ sqrt(T)) AND sharpens RR resolution. Non-blocking for /api/scene."""
     try:
         if hasattr(_src, "request_cube"):
-            ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=3,
+            ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=CUBE_HALF_WIN,
                                      timeout=n_frames / 10.0 + 3.0)
             # ⭐ RANGE_STEP SELF-CHECK (user 2026-07-22j, 2nd bug): the firmware's true dR = range_m/range_bin
             # of the returned 320 entries. If the server's RANGE_STEP disagrees (server default 0.085 vs the
@@ -522,6 +580,28 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
             # requested bin at decision time so a leftover/foreign burst is discarded (作废).
             _rbs = sorted(int(e.range_bin) for e in ents) if ents else []
             resp_bin = _rbs[len(_rbs) // 2] if _rbs else None
+            # ⭐ A-stage peak pick: with a wide burst the target bin is chosen from the DATA (the
+            # presence profile's peak) instead of from the pre-data guess, then the verdict runs on
+            # the usual 7-bin sub-window centred there. A guess that was 10-30 bins out is now just
+            # a starting window, not a fatal commitment. No baseline -> keep the requested bin.
+            verdict_bin = int(range_bin)
+            if ents and CUBE_HALF_WIN > CUBE_VERDICT_HW:
+                prof = _cube_presence_profile(ents)
+                if prof:
+                    verdict_bin = max(prof, key=lambda t: t[1])[0]
+                    _top = sorted(prof, key=lambda t: -t[1])[:3]
+                    _dbg_a = ("[fall] CUBE-A req=%d peak=%d (%.2fm) shift=%+d | top3 %s" % (
+                        range_bin, verdict_bin, verdict_bin * RANGE_STEP, verdict_bin - range_bin,
+                        " ".join("b%d:%+.2f" % (b, r) for b, r, _ in _top)))
+                    print(_dbg_a, flush=True)
+                    try:
+                        with open(os.path.join(os.path.dirname(__file__), "..", "record",
+                                               "fall_debug.log"), "a") as _fh:
+                            _fh.write(_dbg_a + "\n")
+                    except Exception:
+                        pass
+                ents = [e for e in ents if abs(int(e.range_bin) - verdict_bin) <= CUBE_VERDICT_HW]
+            range_bin = verdict_bin              # stamp/report the bin the verdict actually used
             rr, strength, micro, measured = _rr_from_cube(ents)
             cube_ff = _cube_floor_energy(ents)          # MUSIC power-weighted floor band (or None)
             z40 = None
