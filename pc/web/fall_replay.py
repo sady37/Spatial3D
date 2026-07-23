@@ -84,9 +84,31 @@ class FakeSource:
         """Return the recorded TLV-320 vectors at bins within half_win of range_bin over
         the forward n_frames window (the burst the live query would have received)."""
         lo, hi = range_bin - half_win, range_bin + half_win
-        m = (self.eb >= lo) & (self.eb <= hi) & \
-            (self.ef >= self.fi) & (self.ef < self.fi + n_frames)
+        at_bin = (self.eb >= lo) & (self.eb <= hi)
+        m = at_bin & (self.ef >= self.fi) & (self.ef < self.fi + n_frames)
         idx = np.where(m)[0]
+        if len(idx) == 0:
+            # ⭐ NEAREST recorded burst (2026-07-23): the npz only holds the bursts the LIVE run
+            # actually fired (e.g. frames 251-310, 854-913). A replay re-decides WHEN to query, so
+            # its query almost never lands inside a recorded burst's forward window -> [] -> the
+            # cube path returned rr/cube_ff/z40 = None -> 作废 on every frame -> the replay could
+            # NOT reproduce ANY cube-confirmed red (live 010500: 2 reds, replay 0). Since the burst
+            # is the physical evidence at that bin and a cube is a ~6 s integration, serve the
+            # nearest one at the same bins instead of nothing. This is a HARNESS approximation:
+            # it answers "what would the verdict be on this body's cube", not "was a burst in
+            # flight at this instant". Bursts further than NEAR_BURST_MAX_FR stay unavailable.
+            NEAR_BURST_MAX_FR = 150                  # ~15 s at 10 fps (~live's 12 s freshness).
+            # Verdicts are INSENSITIVE to this: 150/300/600 give identical counts on
+            # 010500 / 231500 / 222500 / standBehindChairL -- so the tightest is kept.
+            cand = np.where(at_bin)[0]
+            if len(cand) == 0:
+                return []
+            near_f = self.ef[cand]
+            j = int(np.argmin(np.abs(near_f - self.fi)))
+            if abs(int(near_f[j]) - self.fi) > NEAR_BURST_MAX_FR:
+                return []
+            f0 = int(near_f[j])                      # serve that burst's whole window
+            idx = np.where(at_bin & (self.ef >= f0 - n_frames) & (self.ef < f0 + n_frames))[0]
         if len(idx) == 0:            # no recorded burst there -> live would also get nothing
             return []
         return [types.SimpleNamespace(range_bin=int(self.eb[i]), vec=self.evec[i],
@@ -112,7 +134,7 @@ def _reset_state():
     srv._last_cube_burst_t[0] = 0.0
     srv._last_low_xy[0] = None
     srv._cube_confirmed_episode[0] = False; srv._cube_neg_run[0] = 0; srv._cube_eval_t[0] = 0.0
-    srv._recover_since[0] = 0.0; srv._recover_cand.clear(); srv._ground_clear_hist.clear()
+    srv._recover_since[0] = 0.0; srv._recover_cand.clear()
     srv._fall_anchor[0] = None; srv._fall_trigger_anchor[0] = None; srv._clusters_now[0] = []
     srv._fall_trigger_tid[0] = None; srv._fall_persist_since[0] = 0.0; srv._arm_recover_since[0] = 0.0
     srv._gtrack_prev = {}; srv._fall_deaths = []

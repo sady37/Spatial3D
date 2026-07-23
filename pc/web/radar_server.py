@@ -214,6 +214,7 @@ _cube_episode = [0]          # cube bursts fired in the CURRENT fall episode -> 
                              # floor-track id (those CHURN -> a per-id cap leaked a fresh budget each
                              # new id -> re-wedge). Reset on recovery / CUBE_RESET_S quiet.
 _cube_last_active = [0.0]    # last wall time a fall was active (down / floor-fall / latched)
+_quiet_reset_done = [False]  # one-shot: the CUBE_RESET_S quiet reset has already run this quiet period
 CUBE_RESET_S = 5.0           # after this long with NO active fall (person up & gone), the cube
                              # episode budget resets -> the next distinct fall gets its own bursts
 # ⭐ 3001-FIRST tiering emulated by DELAY (user 2026-07-18b): the deployed product bursts 18 s of
@@ -253,28 +254,25 @@ FALL_HOLD_S = 30.0           # red latch: bridges brief `down`/dec flicker on to
 #        (lying -0.2..-0.5 vs standing/sitting +0.5..+0.9), so 0.4 splits it cleanly; per-box metrics thrash as
 #        the body fragments but the median stays ~+0.7. 2 s guards single-frame spikes. Covers get-up-in-place /
 #        sit-on-bed / lean-on-table (mass rises but doesn't walk far).
-#  LEG 2 walk-away 6-gate (got up AND walked, before cloud_up's 2 s accumulates -- fast exit): per-track
-#        candidate AND-chain -- (1)(2)(3) HARD gates (positive physical displacement, can't fake), (4)(5)(6)
-#        VETO gates (block only, never grant). Fires as soon as all 6 hold (no extra sustain -- the walk IS
-#        the time). See the gate list at the recovery block.
+#  LEG 2 walk-away 3-gate (got up AND walked, before cloud_up's 2 s accumulates -- fast exit): per-track
+#        candidate AND-chain of the THREE positive physical gates -- (1) origin, (2) displacement, (3) speed
+#        limit. Fires as soon as all 3 hold (no extra sustain -- the walk IS the time). See the gate list at
+#        the recovery block.
+#        ⛔ the old VETO gates are GONE (user 2026-07-23): track-Z upright (4) vetoes a person who stands up
+#        while their track Z is still frozen/low from the fall, and the TI-silent veto (5, w_down /
+#        falling_prob) re-uses the very evidence the walk is supposed to OVERRIDE -- a stale `down` would
+#        block the recovery forever. Displacement under a speed cap is unfakeable on its own: coasting drift
+#        can't reach 1.5 m, and a fragment re-attach shows up as a teleport step, which gate (3) disqualifies.
 RECOVER_ZMED = 0.4           # LEG1: whole-cloud median world height above this = mass is UP
 RECOVER_S = 2.0              # LEG1: sustain the cloud_up recovery this long (single-frame spike guard)
 RECOVER_ORIGIN_M = 0.8       # LEG2 (1): candidate track must first appear within this of the fall spot
 RECOVER_DISP_M = 1.5         # LEG2 (2): straight-line displacement from origin to count as walked-away
 RECOVER_SPEED_MAX = 1.2      # LEG2 (3): per-step speed cap (m/s); a faster step = teleport
 RECOVER_STEP_NOISE = 0.3     # LEG2 (3): only flag a teleport when the step also exceeds this (position noise)
-RECOVER_TRACK_Z = 0.4        # LEG2 (4): track WORLD height (mount+z*cos-y*sin) >= this = upright (not crawl)
-RECOVER_GROUND_N = 3         # LEG2 (6): <= this many below-floor points within +-10 bins of the fall bin = clear
-# ⭐ ground_clear is MAJORITY-SMOOTHED (user 0722i, fixes ① & ②): the raw 3001 below-floor count near a still
-# body OSCILLATES 0..36 frame-to-frame (see the L~81 note), so a single-frame `_gm <= 3` dip false-clears
-# (leg2 gate6, and leg1's caregiver-median case). Require >= RECOVER_GROUND_MAJ of the last RECOVER_GROUND_WIN
-# frames to read "clear" -> a real get-up empties the spot PERSISTENTLY; a lying victim (+ standing caregiver)
-# keeps below-floor points in most frames. leg1 ALSO ANDs this so a caregiver raising the whole-cloud median
-# can't clear while the victim's floor points remain.
-GCLEAR_WIN = 10              # rolling window (frames) for the ground_clear majority vote
-GCLEAR_FRAC = 0.7            # >= this FRACTION of the window (>= GCLEAR_MIN_N samples) below-floor-empty -> clear
-GCLEAR_MIN_N = 5            # need at least this many samples before ground_clear can read True
-_ground_clear_hist = []      # rolling [bool] of the instant `_gm <= RECOVER_GROUND_N` (per-episode; reset on clear)
+# ⛔ ground_clear (raw below-floor point count near the anchor) DELETED (user 2026-07-22j): DEADLOCKED by
+# static furniture -- a table/chair leg permanently sits below the floor line, so the count never empties
+# -> recovery impossible, red STUCK forever. Furniture immunity comes from the cube z40 (差值/基值 vs the
+# empty-room baseline), not a raw point count. "Is the person UP" -> energy-centroid height (TODO), not points.
 _recover_since = [0.0]       # LEG1: wall time cloud_up has been continuously true
 _recover_cand = {}           # LEG2: tid -> {ox, oy, lx, ly, lt} candidate origin + last pos/time
 _last_low_xy = [None]        # radar-frame (x, y) of the most recent below-floor cloud mass
@@ -757,7 +755,15 @@ def _scene():
     # fall) for CUBE_RESET_S -> the next distinct fall re-confirms from scratch. (The old hard
     # burst cap is gone -- TODO#3 rate limit -- but the episode boundary still gates the confirm/
     # vitals/negative state.)
-    if time.time() - _cube_last_active[0] > CUBE_RESET_S:
+    # ⭐ EDGE-TRIGGERED (2026-07-23): this used to run EVERY frame for as long as the scene stayed
+    # quiet, so `_cube_query_epoch += 1` ticked repeatedly -- including across the ~6 s a cube burst
+    # is in flight. Live 014000: a textbook fall (body on the floor 55 s, cloud never collapsed, cube
+    # aimed dead-on at bin 40 vs the cloud's bin 39-41, z40=72.08 vs a 0.4 threshold, RR 10.5) was
+    # THROWN AWAY as 作废 with `void(loc=1 qbin=40 curbin=41, epoch=0 51vs54)` -- the answer came back
+    # stamped 51 while the counter had already reached 54. Nothing physical failed; the bookkeeping
+    # invalidated a correct answer. Now the reset fires ONCE per quiet period, not once per frame.
+    if time.time() - _cube_last_active[0] > CUBE_RESET_S and not _quiet_reset_done[0]:
+        _quiet_reset_done[0] = True
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended (round over) -> restart the 6 s/18 s clocks next round
         _last_low_xy[0] = None        # forget the fall spot
@@ -766,11 +772,25 @@ def _scene():
         _fall_persist_since[0] = 0.0; _arm_recover_since[0] = 0.0     # reset the tier-1 arming clocks
         _cube_confirmed_episode[0] = False   # round over (down cleared) -> drop the red hold
         _cube_neg_run[0] = 0
-        _cube_query_epoch[0] += 1     # ③ invalidate any held cube result so it can't revive red via latch
-        _recover_cand.clear(); _ground_clear_hist.clear()
+        # ⭐ never invalidate the query that is CURRENTLY being answered (2026-07-23): the epoch
+        # exists to drop a HELD result across a state reset, not to void the burst still in flight.
+        # (A) location still guards against a foreign/misplaced answer.
+        if not _cube_busy[0]:
+            _cube_query_epoch[0] += 1     # ③ invalidate any HELD cube result so it can't revive red
+        _recover_cand.clear()
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
+        _dbg_reset = (f"[fall] QUIET-RESET epoch={_cube_query_epoch[0]} busy={int(_cube_busy[0])} "
+                      f"(bumped={int(not _cube_busy[0])}) quiet={time.time()-_cube_last_active[0]:.1f}s")
+        print(_dbg_reset, flush=True)
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "record", "fall_debug.log"), "a") as _fh:
+                _fh.write(_dbg_reset + "\n")
+        except Exception:
+            pass
+    elif time.time() - _cube_last_active[0] <= CUBE_RESET_S:
+        _quiet_reset_done[0] = False      # scene active again -> re-arm the one-shot for the NEXT quiet
     pts_raw = sc.get("points")
     tgts = sc.get("targets") or []
     mount_m = (MOUNT if MOUNT is not None else 1.0)
@@ -843,6 +863,11 @@ def _scene():
             px, py, wy, wz, P = px[keep], py[keep], wy[keep], wz[keep], P[keep]
         if len(wz):
             cloud_wz_med = float(_np.median(wz))       # robust up/down signal (all points)
+            cloud_wz_cog = float(_np.mean(wz))         # ⭐ ENERGY CENTROID (point-weighted mean world-z;
+                                                       # no per-point power so density ≈ energy). "有没有
+                                                       # 倒地看能量重心>40" (user 0722j): a person's body is
+                                                       # many points -> dominates; furniture legs (few points)
+                                                       # can't pull it -> furniture-immune "is the mass UP".
             cloud_below_frac = float((wz < FLOOR_Z).mean())   # below-floor energy density
         # CLUSTER by connectivity: points closer than EPS chain into one cluster; a gap
         # bigger than EPS (e.g. two people ~1 m apart) splits them into separate boxes.
@@ -1260,6 +1285,7 @@ def _scene():
     # This REPLACES the A+B z40-primary override (z40 wrongly won whenever present -- BACKWARDS).
     cube_ev = None
     cube_lying = None            # cube presence verdict: True=body / False=empty / None=作废
+    _cube_void = ""              # DIAG only: why a fresh cube verdict was 作废 (loc / epoch)
     cube_living_state = None     # "Living" (rr|micro) / "?" (body but unmeasurable) / None (no fresh cube)
     if now - _cube_result["t"] < 12.0:
         cube_lying = _cube_lying_verdict(_cube_result)
@@ -1278,6 +1304,8 @@ def _scene():
             _epoch_ok = (_cube_result.get("epoch") == _cube_query_epoch[0])   # (B) provenance: this query's own
             if not (_loc_ok and _epoch_ok):
                 cube_lying = None                        # not THIS active query's answer here -> 作废
+                _cube_void = (f"void(loc={int(bool(_loc_ok))} qbin={_qbin} curbin={_curbin},"
+                              f"epoch={int(bool(_epoch_ok))} {_cube_result.get('epoch')}vs{_cube_query_epoch[0]})")
         if cube_lying is not None:                       # a real assessment (Y or N) -> feed the cleaner
             # micro = living micro-motion (confirms a person when RR can't lock: back-to-radar/occluded)
             cube_ev = {"rr": _cube_result["rr"],
@@ -1357,54 +1385,68 @@ def _scene():
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
 
     # ⭐ 中途-UP RECOVERY (user 2026-07-22h): got up mid-round -> 撤警 + FULL CLEAR -> standby. LEG 1 cloud_up
-    # (mass risen, sustained RECOVER_S) OR LEG 2 walk-away 6-gate (got up AND walked). See the RECOVER_* block.
+    # (mass risen, sustained RECOVER_S) OR LEG 2 walk-away 3-gate (got up AND walked). See the RECOVER_* block.
     leg1 = leg2 = False
-    _llxy = _last_low_xy[0]
+    _leg2_why = ""                                                # DIAG only (which track/disp fired LEG2)
+    # ⭐ IDLE GUARD (2026-07-23): only run the recovery when there is something to RECOVER FROM.
+    # A walking person's leg cloud dips below the floor line -> _last_low_xy gets set -> LEG1 then
+    # sees the (correctly) high whole-cloud median and "撤警" over and over with no red on: live
+    # 0723 logged 9 RECOVER firings in 38 s at down=0, wz_med 0.62-0.85, cands=0. Each firing wiped
+    # episode state and ticked _cube_query_epoch, which is what voids in-flight cube answers.
+    _episode_live = bool(_cube_confirmed_episode[0] or now < _fall_latch_until[0] or _down_since[0])
+    _llxy = _last_low_xy[0] if _episode_live else None
     if _llxy is not None:
         _lx, _ly = _llxy
-        # gate (6) ground_clear -- MAJORITY-SMOOTHED (① & ②): instant `_gm <= N` oscillates, so require a
-        # majority of the last WIN frames empty. A real get-up empties the spot persistently; a lying victim
-        # (+ any standing caregiver) keeps below-floor points in most frames.
-        _gm_ok = True
-        if pcx is not None and len(pcx):
-            _fr = math.hypot(_lx, _ly)
-            _gm = int(((wz < FLOOR_Z) & (_np.abs(_np.hypot(px, py) - _fr) <= 10 * RANGE_STEP)).sum())
-            _gm_ok = _gm <= RECOVER_GROUND_N
-        _ground_clear_hist.append(bool(_gm_ok))
-        if len(_ground_clear_hist) > GCLEAR_WIN:
-            del _ground_clear_hist[0]
-        ground_clear = (len(_ground_clear_hist) >= GCLEAR_MIN_N
-                        and sum(_ground_clear_hist) / len(_ground_clear_hist) >= GCLEAR_FRAC)
-        # LEG 1 cloud_up: whole-cloud median risen, sustained RECOVER_S, real_inst -- AND ground_clear so a
-        # caregiver raising the aggregate median can't clear while the victim's floor points persist (①).
+        # ⛔ ground_clear DELETED (user 2026-07-22j): counting raw below-floor points near the anchor is
+        # DEADLOCKED by static furniture -- a table/chair leg permanently sits below the floor line, so _gm
+        # never drops to <=3 -> ground_clear never True -> recovery IMPOSSIBLE, red STUCK forever. Furniture
+        # immunity must come from the cube's z40 (差值/基值 vs the empty-room baseline), NOT a raw point count.
+        # LEG 1 cloud_up: whole-cloud median risen, sustained RECOVER_S, real_inst.
         cloud_up = bool(cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED and real_inst)
         _recover_since[0] = _recover_since[0] or (now if cloud_up else 0.0)
         if not cloud_up:
             _recover_since[0] = 0.0
-        leg1 = cloud_up and (now - _recover_since[0] >= RECOVER_S) and ground_clear
-        # LEG 2 walk-away 6-gate (per-track):
-        _veto = (not w_down) and not (fw is not None and fw.valid and fw.falling_prob >= 0.5)  # gate (5) TI silent
+        leg1 = cloud_up and (now - _recover_since[0] >= RECOVER_S)
+        # LEG 2 walk-away 3-gate (per-track): (1) origin, (2) displacement, (3) speed limit. No vetoes.
         _alive_ids = set()
         for t in tg:
             _tid = t["tid"]; _alive_ids.add(_tid)
             _c = _recover_cand.get(_tid)
             if _c is None:                                         # gate (1) ORIGIN within 0.8 m of fall spot
                 if (t["x"] - _lx) ** 2 + (t["y"] - _ly) ** 2 <= RECOVER_ORIGIN_M ** 2:
-                    _recover_cand[_tid] = {"ox": t["x"], "oy": t["y"], "lx": t["x"], "ly": t["y"], "lt": now}
+                    _recover_cand[_tid] = {"ox": t["x"], "oy": t["y"], "lx": t["x"], "ly": t["y"],
+                                           "lt": now, "t0": now}
                 continue
             _step = math.hypot(t["x"] - _c["lx"], t["y"] - _c["ly"]); _dt = max(now - _c["lt"], 0.05)
             if _step > RECOVER_STEP_NOISE and _step / _dt > RECOVER_SPEED_MAX:   # gate (3) teleport -> re-queue
                 _recover_cand.pop(_tid, None); continue           # cancel qualification, may re-register via (1)
             _c["lx"], _c["ly"], _c["lt"] = t["x"], t["y"], now
             _disp = math.hypot(t["x"] - _c["ox"], t["y"] - _c["oy"])                 # gate (2) displacement
-            _wh = mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)            # gate (4) upright
-            if _disp >= RECOVER_DISP_M and _wh >= RECOVER_TRACK_Z and _veto and ground_clear:
-                leg2 = True                                       # (1)(2)(3) pass + (4)(5)(6) don't veto
+            if _disp >= RECOVER_DISP_M:                           # (1)(2)(3) all pass -> walked away
+                leg2 = True
+                _el = max(now - _c["t0"], 0.05)
+                _leg2_why = (f"tid{_tid} o=({_c['ox']:.2f},{_c['oy']:.2f}) "
+                             f"now=({t['x']:.2f},{t['y']:.2f}) disp={_disp:.2f} "
+                             f"el={_el:.2f}s avg={_disp/_el:.2f}m/s step={_step:.2f}/{_dt:.2f}s")   # DIAG only
         for _d in [k for k in _recover_cand if k not in _alive_ids]:
             _recover_cand.pop(_d, None)
     else:
-        _recover_cand.clear(); _ground_clear_hist.clear()
+        _recover_cand.clear()
     if leg1 or leg2:                                              # 撤警 + 全清 -> 待机 (round 2 re-triggers)
+        # DIAG (2026-07-23): WHICH leg 撤了红, with the numbers that decided it. A red that dies while
+        # the person is still down (live 005619 / 010902: down=1, hs<0.3) must be pinnable to leg1's
+        # cloud median vs leg2's walked-off displacement. Logging only -- no decision uses this.
+        _dbg = (f"[fall] RECOVER leg1={int(leg1)} leg2={int(leg2)} "
+                f"wz_med={cloud_wz_med if cloud_wz_med is None else round(cloud_wz_med, 2)} "
+                f"real_inst={int(real_inst)} rec_s={(now - _recover_since[0]) if _recover_since[0] else 0:.1f} "
+                f"down={int(down)} w_down={int(w_down)} spot=({_lx:.2f},{_ly:.2f}) "
+                f"cands={len(_recover_cand)}" + (f" | LEG2 {_leg2_why}" if _leg2_why else ""))
+        print(_dbg, flush=True)
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "record", "fall_debug.log"), "a") as _fh:
+                _fh.write(_dbg + "\n")
+        except Exception:
+            pass
         _cube_confirmed_episode[0] = False; _fall_latch_until[0] = 0.0
         _cube_episode[0] = 0; _cube_episode_t0[0] = 0.0; _cube_neg_run[0] = 0
         _cube_query_epoch[0] += 1        # ③ invalidate any held cube result so it can't revive red via latch
@@ -1414,7 +1456,7 @@ def _scene():
         _last_low_xy[0] = None; _fall_anchor[0] = None; _recover_cand.clear()
         _fall_trigger_anchor[0] = None; _fall_trigger_tid[0] = None
         _fall_persist_since[0] = 0.0; _arm_recover_since[0] = 0.0
-        _recover_since[0] = 0.0; _ground_clear_hist.clear()
+        _recover_since[0] = 0.0
         _fall_onset_armed[0] = True                               # round over -> ready to count round 2
 
     # ⭐ RED = the cube-verdict hold (升红 on Y, 撤红 on 2N) OR the short bridging latch. The hold clears on 2
@@ -1506,7 +1548,8 @@ def _scene():
                  f"n={prim.get('n') if prim else '-'} pffrac={prim_ffrac:.2f} busy={int(_cube_busy[0])} "
                  f"cube_res(rr={cr['rr']},str={cr['strength']},ffrac={cr['floor_frac']},"
                  f"z40={cr.get('z40')},bin={cr.get('bin')},age={now-cr['t']:.1f}s) "
-                 f"run={_cleaner.run} P={fall_p} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}")
+                 f"run={_cleaner.run} P={fall_p} conf={dec['confidence']} reason={dec['reason']} cleaned={dec['cleaned']}"
+                 + (f" {_cube_void}" if _cube_void else ""))
         print(_line, flush=True)
         try:
             with open(os.path.join(os.path.dirname(__file__), "..", "record", "fall_debug.log"), "a") as _fh:
