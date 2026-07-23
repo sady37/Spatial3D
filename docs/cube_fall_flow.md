@@ -37,8 +37,9 @@ flowchart TD
 
     PY --> Z{"Fall ≥ 1<br/>任一发 lying = Y ?"}:::dec
     Z -->|"是"| R["🔴 FALL · 报警<br/>Living → 红 · ? → 红 + 活体未知(非崩溃)"]:::alarm
-    R --> T["⭐ 红状态机 = cube 判决(每发定'此刻',≤3发/轮)<br/>升红 = 1发 Y(lying+isPerson) · 撤红 = 连2发 N · 作废(None)不算<br/>Y 令阴性清零;配额尽仍未2N → 红保持<br/>无持久撤警检测 · 无 cloud_up/六关 —— cube 自己的 N 就是撤红"]:::done
-    T --> RA["撤红 = 连2N(cube说没了) 或 down 持续清 CUBE_RESET_S(轮结束)<br/>→ episode 复位 + 重新武装下一轮;再倒 = 第2轮<br/>YYY保持 · YNN撤 · YNY阴性清零保持 · Y作废N保持"]:::done
+    R --> T["⭐ 红状态机 = cube 判决(每发定'此刻',≤3发/轮)<br/>升红 = 1发 Y(lying+isPerson) · 撤红 = 连2发 N · 作废(None)不算 · Y 阴性清零<br/>配额尽仍未2N → 红保持(YYY保持·YNN撤·YNY保持·Y作废N保持)"]:::done
+    T --> RA["撤红/轮结束三路 → 全清+re-arm+待机,再倒=第2轮<br/>① cube 连2N(cube说没了)<br/>② 中途-up 恢复:leg1 cloud_up(整云median>0.4·2s·real_inst) 或 leg2 walk-away 六关<br/>③ down 持续清 CUBE_RESET_S(兜底)"]:::done
+    RA --> W6["walk-away 六关(leg2·起身且走):①起点≤0.8m ②位移≥1.5m ③限速1.2m/s+0.3裕量(瞬移取消重排队)<br/>④世界高≥0.4m ⑤TI静默 ⑥ground_clear(护理员克星)· ①②③硬关批权 ④⑤⑥否决关只拦"]:::todo
 
     F -.->|"无资源 / 空返回"| RT["每次跌倒 ≤ 3 次 query(@+18s → +60s → +60s),配额尽停<br/>报警是事件,发出即完成 —— 不无限刷<br/>3×6s=18s/次 ≪ 固件预算(cubeGuard 300/300/3000)· 不 wedge、自终止"]:::done
     RT -.-> F
@@ -67,7 +68,8 @@ flowchart TD
 - `lying(Y/N)` 单独定 fall;`Living_state(Living/?)` 只贴标签。
 - **"?" = 仅腿/遮挡测不到,≠ 崩溃。**
 - **cube 是权威**:进 cube-query = down 已不可信 → down 不再排/撤 cube;确认后按住红。
-- **红状态机(cube 判决,轮次模型)**:升红=1发 Y;撤红=连2发 N;作废(None)不算;Y 令阴性清零;配额(3发)尽仍未2N → 红保持。撤红 = 连2N(cube 说没了)或 down 持续清 CUBE_RESET_S(轮结束→复位重新武装,再倒=第2轮)。**无 cloud_up / 六关走查 / 持久撤警检测**(全删)—— cube 自己的 N 就是撤红,报警是事件、发出即完成。YYY保持 · YNN撤 · YNY阴性清零保持 · Y作废N保持。
+- **红状态机(cube 判决)**:升红=1发 Y;撤红=连2发 N;作废(None)不算;Y 令阴性清零;配额(3发)尽仍未2N → 红保持(YYY保持·YNN撤·YNY保持·Y作废N保持)。
+- **撤红/轮结束三路**(任一→全清+re-arm+待机,再倒=第2轮):① cube 连2N;② **中途-up 恢复**两腿——leg1 `cloud_up`(整云 median 世界高>0.4·持续2s·real_inst,覆盖原地起身/坐床边/扶桌)/ leg2 **walk-away 六关**(起身且走:①起点≤0.8m ②位移≥1.5m ③限速1.2m/s+0.3m裕量·瞬移取消重排队 ④世界高≥0.4m ⑤TI静默 ⑥ground_clear;①②③硬关批权·④⑤⑥否决关只拦);③ down 持续清 CUBE_RESET_S(兜底)。
 
 ## 阈值(已定案,用 case/ 标注数据标定)
 
@@ -88,7 +90,8 @@ flowchart TD
 | 0722d | (B)归属改 **query-epoch** 时序绑定(替换 resp_bin ±10):只认本次主动查询回包 |
 | 52e1f21 | 重试节奏 60→30s(临时;已被 0722e 覆盖) |
 | 0722e | 报警完成模型:每次跌倒 ≤3 query(@+18/+60/+60s)后停;回 60s |
-| 0722g | **轮次模型 + 红状态机**:红=cube判决(升红1Y/撤红2N/作废不算/Y清零);删 cloud_up+六关走查+持久撤警;down清=轮结束复位 |
+| 0722g | 红状态机:红=cube判决(升红1Y/撤红2N/作废不算/Y清零) |
+| 0722h | **中途-up 恢复两腿**:leg1 cloud_up(整云median>0.4·2s·real_inst)+ leg2 walk-away 六关 → 撤警全清待机;与 cube-2N 并列的撤红路 |
 
 | TODO(未实现) | 内容 |
 |---|---|
