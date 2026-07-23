@@ -143,6 +143,7 @@ class TrackBinCube:
     """Per-still/fallen-track per-bin zero-Doppler antenna vectors (TLV 320)."""
     num_virt_ant: int
     entries: list["TrackBinEntry"] = field(default_factory=list)
+    tokens: int = -1                 # cube token-bucket remaining (new firmware 3H subhdr); -1=old fw
 
     def by_track(self) -> dict[int, np.ndarray]:
         """{tid: (n_bins, num_virt_ant) complex64}, bins ordered by range_bin.
@@ -286,9 +287,19 @@ def parse_track_bin_cube(payload: bytes) -> TrackBinCube:
     """
     if len(payload) < _TBC_SUBHDR.size:
         return TrackBinCube(0, [])
-    n_ent, n_ant = _TBC_SUBHDR.unpack_from(payload, 0)
-    off = _TBC_SUBHDR.size
+    n_ent, n_ant = _TBC_SUBHDR.unpack_from(payload, 0)   # first 2 u16 identical in both layouts
     vec_bytes = n_ant * _BYTES_PER_ANT
+    # ⭐ BACKWARD-COMPATIBLE subheader (2026-07-23): old firmware = {nEnt, nAnt} (2H, 4 B); new
+    # firmware = {nEnt, nAnt, tokens} (3H, 6 B). The two differ by exactly the 2 token bytes, so
+    # disambiguate by the exact payload length for this n_ent/n_ant. Recorded npz + the flashed
+    # (old) sensor still parse; the new build's token feedback is picked up automatically.
+    body = n_ent * (_TBC_ENTRY.size + vec_bytes)
+    tokens = -1
+    if len(payload) == 6 + body:                # new 3H layout
+        tokens = int(struct.unpack_from("<H", payload, 4)[0])
+        off = 6
+    else:                                        # old 2H layout (or 0-entry: assume old)
+        off = _TBC_SUBHDR.size
     entries: list[TrackBinEntry] = []
     for _ in range(n_ent):
         if off + _TBC_ENTRY.size + vec_bytes > len(payload):
@@ -300,7 +311,19 @@ def parse_track_bin_cube(payload: bytes) -> TrackBinCube:
         raw = raw.reshape(n_ant, 2)                    # (num_virt_ant, [imag, real])
         vec = (raw[:, 1] + 1j * raw[:, 0]).astype(np.complex64)
         entries.append(TrackBinEntry(int(tid), int(rbin), int(vel), float(rng), vec))
-    return TrackBinCube(int(n_ant), entries)
+    return TrackBinCube(int(n_ant), entries, tokens=tokens)
+
+
+TLV_CUBE_TOKENS = 322        # Spatial3D cube token-bucket heartbeat {u16 tokens, u16 capacity}
+_CUBE_TOKENS = struct.Struct("<2H")
+
+
+def parse_cube_tokens(payload: bytes):
+    """TLV 322: {u16 tokens_remaining, u16 capacity}. Idle-resync heartbeat (~every 300 frames)."""
+    if len(payload) < _CUBE_TOKENS.size:
+        return None
+    tok, cap = _CUBE_TOKENS.unpack_from(payload, 0)
+    return {"tokens": int(tok), "capacity": int(cap)}
 
 
 @dataclass

@@ -1524,11 +1524,24 @@ typedef struct MmwDemo_MSS_MCB_t
      * it in the FIRMWARE so no host mistake can flood 320: a single query is clamped to
      * tbcMaxFramesPerQuery, and at most tbcBudgetFrames cube-frames may run per rolling
      * tbcBudgetWindow frames. Default 300 / 300 / 3000 (30 s single, 30 s per 300 s = 10%). */
+    /* ⭐ TOKEN BUCKET (Spatial3D 2026-07-23, replaces the old fixed-window budget). The fixed
+     * window had a CLIFF: spend the budget and the sensor is locked until the next 300 s boundary
+     * (measured: 5 cube queries then 7 hard rejects, budget refilled only at the window edge). A
+     * token bucket refills CONTINUOUSLY, so a burst (a fall needing A+B+retry, or two falls close
+     * together) is absorbed up to `capacity`, then throttles smoothly to the average rate. Fixed
+     * point in MILLI-tokens to keep the 0.1 token/frame refill integer:
+     *   capacity      = tbcBudgetFrames * 1000       (whole tokens -> milli)
+     *   spend         = 1000 milli per extracted cube-frame
+     *   refill/frame  = capacity_milli / tbcBudgetWindow   (450000/4500 = 100 milli = 0.1 tok)
+     * cubeGuardCfg is REINTERPRETED (same 3 args): <maxPerQuery> <capacity> <refillWindowFrames>.
+     * The host reads the remaining tokens two ways: on the TLV 320 cube subheader (post-query, the
+     * moment it matters) and a TLV 322 heartbeat every ~300 frames (idle resync). */
     uint16_t              tbcMaxFramesPerQuery; /*!< hard cap on one cubeQuery (frames)     */
-    uint16_t              tbcBudgetFrames;      /*!< max cube-frames per budget window      */
-    uint16_t              tbcBudgetWindow;      /*!< budget window length (frames, 3000=300s)*/
-    volatile uint16_t     tbcBudgetUsed;        /*!< cube-frames spent in the current window */
-    volatile uint32_t     tbcBudgetWindowStart; /*!< frame counter at window start          */
+    uint16_t              tbcBudgetFrames;      /*!< bucket CAPACITY in whole tokens (450)  */
+    uint16_t              tbcBudgetWindow;      /*!< frames to refill one full bucket (4500=10%)*/
+    volatile int32_t      tbcTokensMilli;       /*!< current tokens x1000 (0 .. capacity*1000) */
+    volatile int32_t      tbcRefillMilli;       /*!< refill per frame x1000 (capacity*1000/window) */
+    volatile uint32_t     tbcTokenHbCtr;        /*!< frames since the last TLV 322 heartbeat   */
 
     /* Spatial3D: per-track pose classification (auxiliary fall leg). Filled in
      * dpc_mss.c right after DPU_TrackerProc_process (track kinematics + gated
@@ -1570,6 +1583,9 @@ typedef enum mmwLab_output_message_type_e
 
     /*! @brief   Spatial3D: per-track pose classification (Stood/Sat/Lying/Falling) */
     MMWDEMO_OUTPUT_EXT_MSG_POSE = 321,
+
+    /*! @brief   Spatial3D: cube token-bucket heartbeat {tokens, capacity} (every ~300 frames) */
+    MMWDEMO_OUTPUT_EXT_MSG_CUBE_TOKENS = 322,
 
     /*! @brief   Point Cloud - Array of detected points (range/angle/doppler) */
     MMWDEMO_OUTPUT_MSG_POINT_CLOUD = 3001,

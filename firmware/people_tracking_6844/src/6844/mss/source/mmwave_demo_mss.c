@@ -566,10 +566,21 @@ void MmwDemo_transmitProcessedOutputTask()
         if (gMmwMssMCB.tbcNumEntries > 0)
         {
             tl[tlvIdx].type   = MMWDEMO_OUTPUT_EXT_MSG_TRACK_BIN_CUBE;
-            tl[tlvIdx].length = 2 * sizeof(uint16_t) +
+            tl[tlvIdx].length = 3 * sizeof(uint16_t) +    /* subHdr now {nEnt, nAnt, tokens} */
                 (uint32_t)gMmwMssMCB.tbcNumEntries *
                 (sizeof(uint32_t) + 2 * sizeof(uint16_t) + sizeof(float) +
                  (uint32_t)gMmwMssMCB.tbcNumVirtAnt * sizeof(cmplx16ImRe_t));
+            packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+            tlvIdx++;
+        }
+
+        /* Spatial3D: cube token-bucket heartbeat every ~300 frames (idle resync for the host).
+         * The counter is incremented once per frame in dpc_mss.c (next to the token refill), so
+         * this list-build and the payload-write below see the same value and stay in lockstep. */
+        if (gMmwMssMCB.tbcTokenHbCtr >= 300)
+        {
+            tl[tlvIdx].type   = MMWDEMO_OUTPUT_EXT_MSG_CUBE_TOKENS;
+            tl[tlvIdx].length = 2 * sizeof(uint16_t);     /* {tokens, capacity} */
             packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
             tlvIdx++;
         }
@@ -684,12 +695,13 @@ void MmwDemo_transmitProcessedOutputTask()
         /*********************************************/
         if (gMmwMssMCB.tbcNumEntries > 0)
         {
-            uint16_t subHdr[2];
+            uint16_t subHdr[3];               /* {numEntries, numVirtAnt, tokens} */
             uint16_t k;
             MmwDemo_uartWrite(uartHandle, (uint8_t *)&tl[tlvIdx],
                               sizeof(MmwDemo_output_message_tl));
             subHdr[0] = gMmwMssMCB.tbcNumEntries;
             subHdr[1] = gMmwMssMCB.tbcNumVirtAnt;
+            subHdr[2] = (uint16_t)(gMmwMssMCB.tbcTokensMilli / 1000);  /* remaining whole tokens */
             MmwDemo_uartWrite(uartHandle, (uint8_t *)subHdr, sizeof(subHdr));
             for (k = 0; k < gMmwMssMCB.tbcNumEntries; k++)
             {
@@ -701,6 +713,20 @@ void MmwDemo_transmitProcessedOutputTask()
                 MmwDemo_uartWrite(uartHandle, (uint8_t *)ent->vec,
                                   (uint32_t)gMmwMssMCB.tbcNumVirtAnt * sizeof(cmplx16ImRe_t));
             }
+            tlvIdx++;
+        }
+
+        /* Spatial3D: cube token-bucket heartbeat (must mirror the list-build condition above -- the
+         * counter was already incremented there; here we write and reset it). */
+        if (gMmwMssMCB.tbcTokenHbCtr >= 300)
+        {
+            uint16_t tokHdr[2];
+            tokHdr[0] = (uint16_t)(gMmwMssMCB.tbcTokensMilli / 1000);   /* remaining tokens */
+            tokHdr[1] = gMmwMssMCB.tbcBudgetFrames;                     /* capacity */
+            MmwDemo_uartWrite(uartHandle, (uint8_t *)&tl[tlvIdx],
+                              sizeof(MmwDemo_output_message_tl));
+            MmwDemo_uartWrite(uartHandle, (uint8_t *)tokHdr, sizeof(tokHdr));
+            gMmwMssMCB.tbcTokenHbCtr = 0;
             tlvIdx++;
         }
 

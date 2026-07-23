@@ -3137,16 +3137,16 @@ int32_t MmwDemo_CLICubeQuery (int32_t argc, char* argv[])
         nFrames = (int32_t) gMmwMssMCB.tbcMaxFramesPerQuery;
     }
     {
-        int32_t avail = (int32_t) gMmwMssMCB.tbcBudgetFrames -
-                        (int32_t) gMmwMssMCB.tbcBudgetUsed;
+        /* token bucket: whole tokens currently available (milli / 1000) */
+        int32_t avail = gMmwMssMCB.tbcTokensMilli / 1000;
         if (avail <= 0)
         {
-            CLI_write ("cubeQuery: budget exhausted this window\n");
+            CLI_write ("cubeQuery: no tokens (bucket empty)\n");
             return 0;                        /* refuse -- protect the frame pipeline */
         }
         if (nFrames > avail)
         {
-            nFrames = avail;
+            nFrames = avail;                 /* clamp to what the bucket can pay for now */
         }
     }
     gMmwMssMCB.tbcQueryBin        = (uint16_t) bin;
@@ -3168,14 +3168,20 @@ int32_t MmwDemo_CLICubeGuardCfg (int32_t argc, char* argv[])
 {
     if (argc < 4)
     {
-        CLI_write ("Error: cubeGuardCfg <maxFramesPerQuery> <budgetFrames> <budgetWindowFrames>\n");
+        CLI_write ("Error: cubeGuardCfg <maxPerQuery> <capacity> <refillWindowFrames>\n");
         return -1;
     }
+    /* cubeGuardCfg <maxPerQuery> <capacity> <refillWindowFrames> -- token bucket (see the .h note).
+     * refill/frame(milli) = capacity*1000 / refillWindow. Start the bucket FULL so a fall right
+     * after boot is not throttled. */
     gMmwMssMCB.tbcMaxFramesPerQuery = (uint16_t) atoi (argv[1]);
-    gMmwMssMCB.tbcBudgetFrames      = (uint16_t) atoi (argv[2]);
-    gMmwMssMCB.tbcBudgetWindow      = (uint16_t) atoi (argv[3]);
-    gMmwMssMCB.tbcBudgetUsed        = 0;
-    gMmwMssMCB.tbcBudgetWindowStart = gMmwMssMCB.stats.frameStartIntCounter;
+    gMmwMssMCB.tbcBudgetFrames      = (uint16_t) atoi (argv[2]);     /* capacity (whole tokens) */
+    gMmwMssMCB.tbcBudgetWindow      = (uint16_t) atoi (argv[3]);     /* frames to refill one bucket */
+    if (gMmwMssMCB.tbcBudgetWindow < 1) { gMmwMssMCB.tbcBudgetWindow = 1; }
+    gMmwMssMCB.tbcRefillMilli = ((int32_t)gMmwMssMCB.tbcBudgetFrames * 1000) /
+                                (int32_t)gMmwMssMCB.tbcBudgetWindow;
+    gMmwMssMCB.tbcTokensMilli = (int32_t)gMmwMssMCB.tbcBudgetFrames * 1000;  /* start full */
+    gMmwMssMCB.tbcTokenHbCtr  = 0;
     return 0;
 }
 
@@ -3252,11 +3258,14 @@ void CLI_init (uint8_t taskPriority)
      * single query <= 30 s (300 frames) and <= 30 s of cube per rolling 300 s (10% duty).
      * Without this the zero-init would set the window to 0 (no protection) and the per-query
      * cap to 0 (no cube at all). Override at runtime with `cubeGuardCfg`. */
+    /* token-bucket defaults: capacity 450 tokens, refill 450 over 4500 frames = 0.1/frame = 10%
+     * average; single query <= 300 frames. Bucket starts FULL. cubeGuardCfg overrides at runtime. */
     gMmwMssMCB.tbcMaxFramesPerQuery = 300;
-    gMmwMssMCB.tbcBudgetFrames      = 300;
-    gMmwMssMCB.tbcBudgetWindow      = 3000;
-    gMmwMssMCB.tbcBudgetUsed        = 0;
-    gMmwMssMCB.tbcBudgetWindowStart = 0;
+    gMmwMssMCB.tbcBudgetFrames      = 450;      /* capacity (whole tokens) */
+    gMmwMssMCB.tbcBudgetWindow      = 4500;     /* frames to refill one full bucket */
+    gMmwMssMCB.tbcRefillMilli       = (450 * 1000) / 4500;   /* = 100 milli/frame = 0.1 token */
+    gMmwMssMCB.tbcTokensMilli       = 450 * 1000;            /* start full */
+    gMmwMssMCB.tbcTokenHbCtr        = 0;
 
     /* Initialize the CLI configuration: */
     memset ((void *)&cliCfg, 0, sizeof(CLI_Cfg));

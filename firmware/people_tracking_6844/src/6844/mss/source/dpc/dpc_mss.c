@@ -3048,19 +3048,23 @@ void DPC_Execute(){
          * Must run HERE - radarCube[0] still holds this frame; the next frame's range
          * proc is triggered just below (which starts overwriting it). While a query is
          * armed, extract bin +- halfWin and count the frame down; disarm at zero. */
-        /* GUARD (cubeGuardCfg): refill the cube-frame budget at each rolling window boundary */
-        if ((uint32_t)(gMmwMssMCB.stats.frameStartIntCounter - gMmwMssMCB.tbcBudgetWindowStart)
-                >= (uint32_t)gMmwMssMCB.tbcBudgetWindow)
+        /* GUARD (cubeGuardCfg token bucket): refill CONTINUOUSLY every frame, capped at capacity.
+         * capacity_milli = tbcBudgetFrames * 1000. No cliff -- a drained bucket recovers smoothly. */
         {
-            gMmwMssMCB.tbcBudgetUsed        = 0;
-            gMmwMssMCB.tbcBudgetWindowStart = gMmwMssMCB.stats.frameStartIntCounter;
+            int32_t capMilli = (int32_t)gMmwMssMCB.tbcBudgetFrames * 1000;
+            gMmwMssMCB.tbcTokensMilli += gMmwMssMCB.tbcRefillMilli;
+            if (gMmwMssMCB.tbcTokensMilli > capMilli)
+            {
+                gMmwMssMCB.tbcTokensMilli = capMilli;
+            }
+            gMmwMssMCB.tbcTokenHbCtr++;    /* one tick/frame -> TLV 322 heartbeat at 300 (transmit) */
         }
         if (gMmwMssMCB.tbcQueryActive && gMmwMssMCB.tbcQueryFramesLeft > 0
-                && gMmwMssMCB.tbcBudgetUsed < gMmwMssMCB.tbcBudgetFrames)
+                && gMmwMssMCB.tbcTokensMilli >= 1000)
         {
             MmwDemo_tbcExtractBin((int32_t)gMmwMssMCB.tbcQueryBin,
                                   gMmwMssMCB.tbcQueryHalfWin);
-            gMmwMssMCB.tbcBudgetUsed++;           /* spend one cube-frame from the budget */
+            gMmwMssMCB.tbcTokensMilli -= 1000;    /* spend one token (=one cube-frame) */
             if (--gMmwMssMCB.tbcQueryFramesLeft <= 0)
             {
                 gMmwMssMCB.tbcQueryActive = 0;   /* burst complete -> stop */
@@ -3068,7 +3072,7 @@ void DPC_Execute(){
         }
         else
         {
-            gMmwMssMCB.tbcQueryActive = 0;        /* done / budget exhausted -> stop */
+            gMmwMssMCB.tbcQueryActive = 0;        /* done / no tokens -> stop */
             gMmwMssMCB.tbcNumEntries  = 0;       /* no query -> emit no TLV 320 */
         }
 
