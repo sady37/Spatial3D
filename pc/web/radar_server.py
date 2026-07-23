@@ -371,6 +371,9 @@ _fall_deaths = []            # [(t, x, y)] recent GTRACK deaths (a person may ha
 _fall_region = {"since": 0.0, "last": 0.0, "x": 0.0, "y": 0.0}  # sticky armed fall region
 _fall_anchor = [None]        # world GROUND range (wy) of the selected fallen cluster -> cube target
                              # (per-cluster selection; None -> fall back to aggregate _fall_range_bin)
+_clusters_now = [[]]         # THIS frame's clusters (set after the cluster loop) -> _cube_target_bin uses
+                             # the CURRENT-frame floor-dominated cluster, not a stored/stale anchor (0722j)
+_range_step_warned = [False] # one-shot: warn if RANGE_STEP disagrees with the stream's dr (grid mismatch)
 # Lost-track RR probe: when GTRACK drops a still person's track (FloorTracker inherits it),
 # actively cubeQuery that spot to get RR -- confirms a living body (vs furniture) and shows
 # the RR for a sitting/fallen still person. WAIT 2 s first: most track losses are brief
@@ -491,6 +494,21 @@ def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
         if hasattr(_src, "request_cube"):
             ents = _src.request_cube(range_bin, n_frames=n_frames, half_win=3,
                                      timeout=n_frames / 10.0 + 3.0)
+            # ⭐ RANGE_STEP SELF-CHECK (user 2026-07-22j, 2nd bug): the firmware's true dR = range_m/range_bin
+            # of the returned 320 entries. If the server's RANGE_STEP disagrees (server default 0.085 vs the
+            # 128-samp pose65s cfg's 0.106), we compute the WRONG target bin -> the firmware queries a
+            # different metre range (55*0.106=5.83m, into the wall). WARN once; fix by launching with
+            # RANGE_STEP=<firmware dR> (proper fix: read dR from the cfg/TLV at start).
+            if not _range_step_warned[0] and ents:
+                _drs = [e.range_m / e.range_bin for e in ents if getattr(e, "range_bin", 0)]
+                if _drs:
+                    _dr_fw = sorted(_drs)[len(_drs) // 2]
+                    if abs(_dr_fw - RANGE_STEP) > 0.005:
+                        _range_step_warned[0] = True
+                        import sys as _sys
+                        _sys.stderr.write("WARN: RANGE_STEP=%.4f but firmware dR=%.4f (320 range_m/bin) -- "
+                                          "target bins are WRONG. Relaunch with RANGE_STEP=%.4f\n"
+                                          % (RANGE_STEP, _dr_fw, round(_dr_fw, 3)))
             # ⭐ (B) provenance: the RESPONSE's own range (median entry bin) -- checked against the
             # requested bin at decision time so a leftover/foreign burst is discarded (作废).
             _rbs = sorted(int(e.range_bin) for e in ents) if ents else []
@@ -557,6 +575,18 @@ def _cube_target_bin(sc, fallback=None):
     while 16417 below-floor points sat at bin 46) and must NOT drive the query. `fallback` (a
     death-coordinate bin) is used ONLY when there is no below-floor mass (cloud fully gone)."""
     import numpy as _np, math as _m
+    # ⭐ TARGET SELECTION (user 2026-07-22j, live 195000): the AGGREGATE below-floor median MIXES people --
+    # `below = wz < floor+0.5` also counts a NEAR standing/sitting person's LEGS/FEET, and near echoes are
+    # dense (R^4), so the median is out-voted to ~1 m (bin 11) while the 4.7 m collapsed body (8-30 pts, bin
+    # ~50) is ignored -> the fall was queried at empty bin 11 -> ghost/N -> never red. FIX = restore the
+    # per-cluster pick to PRIMARY, but from the CURRENT frame's clusters (NOT a stored anchor -- 042500's real
+    # bug was STALE anchor drift, not cluster selection): (1) a floor-DOMINATED cluster (floor_frac >= 0.7,
+    # n >= FALL_CLUSTER_MIN_N) -> the one with the MOST points (a lying body ffrac~1.0; standing legs ffrac
+    # ~0.1-0.2 are excluded); (2) else the aggregate below-floor median (single-body collapse, 042500 stable);
+    # (3) else the caller's fallback (death coord / whole-cloud median).
+    _cl = [c for c in _clusters_now[0] if c.get("floor_frac", 0) >= 0.7 and c.get("n", 0) >= FALL_CLUSTER_MIN_N]
+    if _cl:
+        return int(round(float(max(_cl, key=lambda c: c["n"])["wy_med"]) / RANGE_STEP))   # (1) floor-dominated
     pcx = sc.get("pc_xyz")
     if pcx is not None and len(pcx):
         th = _m.radians(TILT or 0.0)
@@ -564,9 +594,9 @@ def _cube_target_bin(sc, fallback=None):
         wy = py * _m.cos(th) + pz * _m.sin(th)                # world GROUND range (matches 320)
         wz = MOUNT + pz * _m.cos(th) - py * _m.sin(th)        # world height
         below = wz < (_floor.default + 0.5)
-        if int(below.sum()) >= FALL_LEG_MIN_PTS:              # a real fallen-body mass exists here
+        if int(below.sum()) >= FALL_LEG_MIN_PTS:              # (2) aggregate below-floor median
             return int(round(float(_np.median(wy[below])) / RANGE_STEP))
-    return fallback
+    return fallback                                           # (3) caller fallback
 
 
 def _fall_range_bin(sc):
@@ -712,6 +742,7 @@ def _scene():
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended (round over) -> restart the 6 s/18 s clocks next round
         _last_low_xy[0] = None        # forget the fall spot
+        _fall_anchor[0] = None        # forget the sticky faller-cluster anchor
         _cube_confirmed_episode[0] = False   # round over (down cleared) -> drop the red hold
         _cube_neg_run[0] = 0
         _cube_query_epoch[0] += 1     # ③ invalidate any held cube result so it can't revive red via latch
@@ -875,6 +906,7 @@ def _scene():
             for i in idx[::max(1, len(idx) // 150)]:
                 pc_pts.append([round(float(px[i]), 2), round(float(wy[i]), 2),
                                round(float(wz[i]), 2), ti])
+        _clusters_now[0] = clusters                       # THIS frame's clusters -> _cube_target_bin (0722j)
         for b in bytid.values():                          # per TRACK (merged whole body)
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"],
                                  ez=b.pop("_zsum") / max(b["n"], 1))   # energy-center world-z
@@ -1012,7 +1044,7 @@ def _scene():
         _cand = [c for c in clusters if c["n"] >= FALL_CLUSTER_MIN_N
                  and c["floor_frac"] >= FALL_LEG_FRAC and c["med_wz"] < FALL_LEG_ZMED]
         fall_cl = max(_cand, key=lambda c: (c["floor_frac"], c["n"])) if _cand else None
-        _fall_anchor[0] = fall_cl["wy_med"] if fall_cl is not None else None
+        _fall_anchor[0] = fall_cl["wy_med"] if fall_cl is not None else None   # per-frame (deep fallback only)
         if fall_cl is not None:
             bx, by = fall_cl["cx"], fall_cl["cy"]                 # the faller cluster centroid
         elif int(below.sum()) >= FALL_LEG_MIN_PTS:
@@ -1321,7 +1353,8 @@ def _scene():
         _fall_region["since"] = 0.0      # ⑤ stop the region re-arming on residual clutter after 撤警
         _fall_deaths[:] = [(dt, dx, dy) for (dt, dx, dy) in _fall_deaths
                            if (dx - _lx) ** 2 + (dy - _ly) ** 2 > 1.0]   # ⑤ clear deaths within 1 m of spot
-        _last_low_xy[0] = None; _recover_cand.clear(); _recover_since[0] = 0.0; _ground_clear_hist.clear()
+        _last_low_xy[0] = None; _fall_anchor[0] = None; _recover_cand.clear()
+        _recover_since[0] = 0.0; _ground_clear_hist.clear()
         _fall_onset_armed[0] = True                               # round over -> ready to count round 2
 
     # ⭐ RED = the cube-verdict hold (升红 on Y, 撤红 on 2N) OR the short bridging latch. The hold clears on 2
