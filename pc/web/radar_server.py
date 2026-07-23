@@ -1074,6 +1074,9 @@ def _scene():
     # Gating on tg was why the scene went blank after a fall (no cloud, no id near the floor).
     if pcx is not None and len(pcx):
         px, py, pz = pcx[:, 0], pcx[:, 1], pcx[:, 2]
+        pdop = sc.get("pc_doppler")                            # per-point radial velocity (reflector probe)
+        if pdop is None or len(pdop) != len(px):
+            pdop = _np.zeros(len(px), _np.float32)
         wz = mount_m + pz * math.cos(th) - py * math.sin(th)   # world height
         wy = py * math.cos(th) + pz * math.sin(th)             # world ground range
         from scipy.spatial import cKDTree
@@ -1085,6 +1088,7 @@ def _scene():
             nn = cKDTree(P).query(P, k=2)[0][:, 1]
             keep = nn <= 5.0 * float(nn.mean())
             px, py, wy, wz, P = px[keep], py[keep], wy[keep], wz[keep], P[keep]
+            pdop = pdop[keep]
         if len(wz):
             cloud_wz_med = float(_np.median(wz))       # robust up/down signal (all points)
             cloud_wz_cog = float(_np.mean(wz))         # ⭐ ENERGY CENTROID (point-weighted mean world-z;
@@ -1175,7 +1179,7 @@ def _scene():
             idx = _np.where(m)[0]
             for i in idx[::max(1, len(idx) // 150)]:
                 pc_pts.append([round(float(px[i]), 2), round(float(wy[i]), 2),
-                               round(float(wz[i]), 2), ti])
+                               round(float(wz[i]), 2), ti, round(float(pdop[i]), 3)])
         _clusters_now[0] = clusters                       # THIS frame's clusters -> _cube_target_bin (0722j)
         for b in bytid.values():                          # per TRACK (merged whole body)
             b["pose"] = _pose_of(b["x0"], b["x1"], b["y0"], b["y1"], b["z0"], b["z1"],
@@ -1221,7 +1225,7 @@ def _scene():
             ftk = ft_by_xy.get((round(o["cx"], 3), round(o["cy"], 3)))
             fid = int(ftk.id) if ftk else -999            # -999 = unassigned floor cloud
             for p in o["pts"]:                            # ALWAYS draw the floor cloud
-                pc_pts.append([p[0], p[1], p[2], fid])
+                pc_pts.append([p[0], p[1], p[2], fid, 0.0])   # floor-tracker pts: no doppler
             if ftk and ftk.person and ftk.id not in boxed:   # person -> add a fall box/alert
                 fb = {"tid": int(ftk.id), "ti": int(ftk.id), "x0": o["x0"], "x1": o["x1"],
                       "y0": o["y0"], "y1": o["y1"], "z0": o["z0"], "z1": o["z1"], "n": o["n"],
@@ -1380,11 +1384,14 @@ def _scene():
         if len(_floor_pts) >= 200 and len(_floor.hg) == 0:
             _floor.fit(_floor_pts)
 
-    # ⭐ REFLECTOR PROBE (observation only, user 2026-07-23): per-track top-5 point stability. A metal
-    # ghost has sigma_pos ~ 0 (fixed facet) while its power is modulated by passers-by; a real person
-    # has large sigma_pos (body deforms/sways/breathes). Logs [refl] throttled per-tid so the two
-    # distributions become visible before any gate is built. Position-only for now (pc_pts carries no
-    # snr); sigma_pos is the discriminator regardless.
+    # ⭐ REFLECTOR PROBE (observation only, user 2026-07-23): per-track ghost-vs-body discriminators
+    # on the top-5 highest points. User's refinement: a real body's top-5 are SPREAD (body extent)
+    # and move INCOHERENTLY (multi-directional micro-motion -> wide per-point doppler); a metal / metal-
+    # reflection ghost is the opposite -- a DENSE concentrated knot (small dispersion) moving COHERENTLY
+    # (rigid -> tight, single-sign doppler). So both `dispersion` and `doppler_std`/`bipolar` are
+    # LARGE for a person, SMALL for a ghost. (The still-person worry for sigma_pos is moot -- GTRACK
+    # CFAR keeps a standing person tracked, 6 s persistence filters flicker, it never reaches here.)
+    # Purely server-side from the 3001 cloud + track the server already receives -- no firmware.
     try:
         import web.reflector_probe as _refl
     except Exception:
@@ -1397,7 +1404,7 @@ def _scene():
             if _ti is None or _tid is None:
                 continue
             _alive.add(_tid)
-            _tp = [(p[0], p[1], p[2], None) for p in pc_pts if p[3] == _ti]
+            _tp = [(p[0], p[1], p[2], p[4] if len(p) > 4 else 0.0) for p in pc_pts if p[3] == _ti]
             _st = _refl.update(_tid, _tp)
             if _st is None:
                 continue
@@ -1405,7 +1412,8 @@ def _scene():
             if _rnow - _last >= 2.0:                     # throttle: one [refl] per tid per 2 s
                 _refl_log_t[_tid] = _rnow
                 _rl = (f"[refl] tid{_tid} n={_b['n']} pose={_b.get('pose')} "
-                       f"sigma_pos={_st['sigma_pos']} zspread={_st['zspread']} "
+                       f"disp={_st['dispersion']} dop_std={_st['doppler_std']} "
+                       f"bipolar={_st['bipolar']} sigma_pos={_st['sigma_pos']} zspread={_st['zspread']} "
                        f"xy=({(_b['x0']+_b['x1'])/2:.2f},{(_b['y0']+_b['y1'])/2:.2f})")
                 print(_rl, flush=True)
                 try:
@@ -1844,7 +1852,7 @@ def _scene():
             "height_cm": None if z_cm is None else round(z_cm),
             "src": src, "cube_entries": int(sc.get("n_cube", 0)),
             "mount_cm": round(mount_cm), "tilt_deg": TILT, "diag": diag,
-            "boxes": boxes, "pc": pc_pts, "fall_state": fall_state,
+            "boxes": boxes, "pc": [p[:4] for p in pc_pts], "fall_state": fall_state,
             "fall_p": fall_p, "primary_pose": primary_pose,
             "lying_state": lying_state,          # ⭐ ExtraMLP state classifier: person lying on floor?
             # ⭐ CUBE fire 2D contract (FROZEN 2026-07-22): lying (Y/N/None=作废, cube_ff-primary/
@@ -1931,7 +1939,8 @@ class Handler(BaseHTTPRequestHandler):
             bins = sorted({int(e.range_bin) for e in ents})
             return self._send(200, json.dumps({"bin": rb, "half_win": hw, "n_frames": n,
                                                 "entries": len(ents), "range_bins": bins,
-                                                "n_ant": (len(ents[0].vec) if ents else 0)}))
+                                                "n_ant": (len(ents[0].vec) if ents else 0),
+                                                "tokens": getattr(_src, "_cube_tokens", -1)}))
         if u.path == "/api/state":
             q = parse_qs(u.query)
             bl = int(q["bin_lo"][0]) if "bin_lo" in q else None

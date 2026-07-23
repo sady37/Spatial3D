@@ -121,6 +121,7 @@ class LiveSource:
         self._cube_hold_ts = 0.0               # last ts a TLV 320 fired = fall-trigger (fall cfg ARM)
         self._fall_since = 0.0                 # ts the CURRENT continuous 320 episode began (for confirm timer)
         self._cube_bins = None                 # last range bins where 320 actually fired (cubeQuery anchor)
+        self._cube_tokens = -1                  # cube token-bucket remaining (new fw); -1 until first 320
         self._cube_bins_ts = 0.0
         self._cube_query = None                # server-triggered cube fetch state (see request_cube)
         self._lock = threading.Lock()
@@ -331,6 +332,10 @@ class LiveSource:
                 poses = f.poses()               # {tid: Pose} from TLV 321 (empty if off)
                 tbc = f.track_bin_cube()
                 ncube = len(tbc.entries) if tbc is not None else 0
+                # ⭐ cube token-bucket telemetry (new firmware 3H subheader): -1 = old firmware.
+                # Only present on 320 frames (post-query); host extrapolates between (see design).
+                if tbc is not None and getattr(tbc, "tokens", -1) >= 0:
+                    self._cube_tokens = int(tbc.tokens)
                 if ncube > 0:
                     # fall-trigger: 320 fired. A NEW episode begins if 320 was quiet (>1.5s)
                     # before now; otherwise it's the same ongoing episode (confirm timer runs).
@@ -345,34 +350,46 @@ class LiveSource:
                 # server-triggered cube fetch: collect N frames of 320 at the queried range
                 q = self._cube_query
                 if q is not None:
-                    if tbc is not None:
-                        for e in tbc.entries:
-                            if abs(int(e.range_bin) - q["bin"]) <= q["hw"]:
-                                q["entries"].append(e)
-                    q["left"] -= 1
-                    if q["left"] <= 0:
-                        q["done"].set()
+                    # ⭐ count ONLY frames that actually carried a matching 320 (fixed 2026-07-23):
+                    # the old `q["left"] -= 1` per frame counted the cubeQuery's ARM-LATENCY frames
+                    # (command sent -> firmware starts bursting a few frames later), so the budget was
+                    # spent on empty frames and collection ended early -> intermittent 0 entries
+                    # (0/220/0). The firmware itself is reliable (raw CLI: 6/6 full bursts). Counting
+                    # collected 320 frames makes n_frames mean n_frames, immune to arm latency.
+                    matched = [e for e in tbc.entries if abs(int(e.range_bin) - q["bin"]) <= q["hw"]] \
+                        if tbc is not None else []
+                    if matched:
+                        q["entries"].extend(matched)
+                        q["got"] = q.get("got", 0) + 1
+                        if q["got"] >= q["left"]:
+                            q["done"].set()
                 if tgts:
                     self._z_hist.append(float(tgts[0].z))
                 z_smooth = float(np.median(self._z_hist)) if self._z_hist else None
                 # accumulate the 3001 minor point cloud over ~0.5s for the block-person
                 pc = f.point_cloud()
                 if pc is not None and len(pc.xyz):
-                    self._pc_hist.append((sc_ts, pc.xyz, pc.snr))
+                    # keep per-point DOPPLER too (was discarded): the reflector probe uses per-point
+                    # radial velocity to separate a real body (incoherent multi-directional micro-
+                    # motion -> high doppler spread) from a metal ghost (rigid/coherent -> low spread).
+                    self._pc_hist.append((sc_ts, pc.xyz, pc.snr, pc.doppler))
                 while self._pc_hist and self._pc_hist[0][0] < now - 0.5:
                     self._pc_hist.popleft()
                 if self._pc_hist:
                     pc_xyz = np.concatenate([p[1] for p in self._pc_hist])
                     pc_snr = np.concatenate([p[2] for p in self._pc_hist])
+                    pc_dop = np.concatenate([p[3] for p in self._pc_hist])
                 else:
                     pc_xyz = np.empty((0, 3), np.float32); pc_snr = np.empty(0, np.float32)
+                    pc_dop = np.empty(0, np.float32)
                 self._scene = {"points": pts, "targets": tgts, "poses": poses,
                                "t": sc_ts, "n_cube": ncube,
                                "z_smooth": z_smooth,
                                "y0": float(tgts[0].y) if tgts else None,
-                               "pc_xyz": pc_xyz, "pc_snr": pc_snr,
+                               "pc_xyz": pc_xyz, "pc_snr": pc_snr, "pc_doppler": pc_dop,
                                "cube_ts": self._cube_hold_ts, "fall_since": self._fall_since,
-                               "cube_bins": self._cube_bins, "cube_bins_ts": self._cube_bins_ts}
+                               "cube_bins": self._cube_bins, "cube_bins_ts": self._cube_bins_ts,
+                               "cube_tokens": self._cube_tokens}
                 # Feed the breathing/HR pipeline: this firmware emits the slow-time cube
                 # as TLV 320 (per STILL-track per-bin 16-ant zero-Doppler vectors), NOT
                 # range_antenna. Route those into the SAME per-bin buffer window() reads,
@@ -478,17 +495,22 @@ class LiveSource:
         # sensor stops). Long integration must come from STACKING short bursts server-side,
         # never one giant burst. This guard applies to every caller.
         n_frames = max(1, min(int(n_frames), 300))
-        q = {"bin": int(range_bin), "hw": int(half_win), "left": int(n_frames),
-             "entries": [], "done": _th.Event()}
-        with self._lock:
-            self._cube_query = q
-        try:
-            self._sess.send_cli(f"cubeQuery {int(range_bin)} {int(half_win)} {int(n_frames)}")
-        except Exception as e:
-            print(f"[cube-query] send_cli failed (firmware may lack cubeQuery): {e}", flush=True)
-        q["done"].wait(timeout)
-        with self._lock:
-            self._cube_query = None
+        # RETRY ONCE on empty: the firmware is reliable (raw CLI 6/6), but a command can occasionally
+        # miss delivery (CLI drain contention). A second attempt lands it -- cheap vs a missed fall.
+        for _attempt in range(2):
+            q = {"bin": int(range_bin), "hw": int(half_win), "left": int(n_frames),
+                 "entries": [], "done": _th.Event()}
+            with self._lock:
+                self._cube_query = q
+            try:
+                self._sess.send_cli(f"cubeQuery {int(range_bin)} {int(half_win)} {int(n_frames)}")
+            except Exception as e:
+                print(f"[cube-query] send_cli failed (firmware may lack cubeQuery): {e}", flush=True)
+            q["done"].wait(timeout)
+            with self._lock:
+                self._cube_query = None
+            if q["entries"]:
+                return q["entries"]
         return q["entries"]
 
     def window(self, win_s):
