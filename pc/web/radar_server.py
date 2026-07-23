@@ -164,6 +164,10 @@ _Z40_PRESENCE = os.environ.get("Z40_PRESENCE", "1") != "0"
 # empty baseline): z40 >= Z40_LYING_THR = a lying body vs empty (far/occluded workhorse, body
 # ~28-97 >> empty ~0; `down` already excluded stand/walk upstream so 0.4 only clears empty-noise).
 CUBE_FF_THR = 0.5
+RR_PRESENCE_STR = 0.3        # a locked RR with at least this strength = a confirmed breathing body =
+                             # the strongest presence signal (outranks z40/cube_ff; also self-validates
+                             # the query location -- a body that breathes at qbin IS there). Set from the
+                             # near-fall miss (rr=19.9 str=0.56 while z40/cube_ff=0 -> person MISSED).
 # ⭐ WIDE CUBE (A-stage, user 2026-07-23): the firmware buffers TBC_MAX_ENTRIES=40 entries/frame, so
 # ONE query can carry up to +-19 bins (39 bins ~ 4.2 m at dR 0.107) -- we were using +-3 (7 bins,
 # 0.75 m). The guard budget (cubeGuardCfg 300/300/3000) counts cube-FRAMES, not entries, so a wide
@@ -791,8 +795,15 @@ def _cube_lying_verdict(cres):
     CORRECTS the A+B z40-primary override (z40 wrongly won whenever present)."""
     ff = cres.get("cube_ff")            # None or float (MUSIC floor-band MOTION fraction)
     z40 = cres.get("z40")               # None or float (差值/基值 XY presence vs empty)
+    # ⭐ RR-LOCKED = a BREATHING BODY (2026-07-23, near-fall miss): a locked respiration at this bin is
+    # the STRONGEST possible presence signal -- there is definitionally a living body there. z40/cube_ff
+    # both came back 0.0 on a clear 1.9 m fall (hs=-1.6, floor_frac=1.0) while rr=19.9 str=0.56, so the
+    # person was MISSED. RR outranks z40/cube_ff for presence: if it breathes, it is a body.
+    rr = cres.get("rr"); strn = cres.get("strength", 0.0) or 0.0
+    if rr not in (None, 0) and strn >= RR_PRESENCE_STR:
+        return True                     # RR PRIMARY: a confirmed breathing body -> lying Y
     if ff is not None and ff >= CUBE_FF_THR:
-        return True                     # cube_ff PRIMARY: strong self-contained positive
+        return True                     # cube_ff: strong self-contained positive
     if _Z40_PRESENCE and z40 is not None:
         return z40 >= Z40_LYING_THR     # z40 FALLBACK: the far/occluded/多簇 workhorse
     if ff is not None:
@@ -1567,8 +1578,14 @@ def _scene():
         if cube_lying is not None:
             _qbin = _cube_result.get("bin")
             _curbin = _cube_target_bin(sc)               # current fall/lost location (None -> no mass)
-            _loc_ok = (_curbin is not None and _qbin is not None
-                       and abs(_qbin - _curbin) <= CUBE_LOC_MAX_BIN)     # (A) location
+            # ⭐ RR self-validates the location (2026-07-23): a locked RR means a breathing body IS at
+            # qbin, so the noisy _cube_target_bin (near-leg pollution put it at bin 6 while the body +
+            # CUBE-A peak + RR all agree on bin 18) must NOT void it. The epoch freshness check still
+            # applies. Without this, a clear 1.9 m fall was voided every frame (loc=0 qbin=18 curbin=6).
+            _rr_lock = (_cube_result.get("rr") not in (None, 0)
+                        and (_cube_result.get("strength", 0) or 0) >= RR_PRESENCE_STR)
+            _loc_ok = _rr_lock or (_curbin is not None and _qbin is not None
+                                   and abs(_qbin - _curbin) <= CUBE_LOC_MAX_BIN)     # (A) location
             _epoch_ok = (_cube_result.get("epoch") == _cube_query_epoch[0])   # (B) provenance: this query's own
             if not (_loc_ok and _epoch_ok):
                 cube_lying = None                        # not THIS active query's answer here -> 作废
