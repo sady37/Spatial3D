@@ -222,7 +222,13 @@ CUBE_RESET_S = 5.0           # after this long with NO active fall (person up & 
 # query CUBE_DELAY_S after the episode's trigger: 0-18 s the living gate = the 3001 below-floor
 # cloud (floor_fall, inherently micro-motion-keyed) + sustained-down -> red WITHOUT cube; at 18 s
 # the cube adds RR/floor-energy (tier 2) and gives the server ExtraMLP its cube features.
-CUBE_DELAY_S = 18.0          # hold the episode's FIRST cubeQuery this long after the trigger (3001 first)
+# ⭐ TIER-1 6 s FREE FILTER (user 2026-07-22f): "许多是误报" -- most TI/window alarms are TRANSIENT misfires.
+# COST LADDER, cheapest first: (1) the FREE firmware window-Z/MLP `down` must PERSIST FALL_PERSIST_S before
+# anything expensive engages; a misfire that clears < 6 s costs nothing. (2) THEN the 3001 tier (CUBE_DELAY_S
+# of below-floor cloud / ExtraMLP lying). (3) THEN the cube (bandwidth-heavy, ≤3). The 3001 episode clock
+# (`_cube_episode_t0`) only starts AFTER the 6 s survives, so 3001 decisions + cube are all gated behind it.
+FALL_PERSIST_S = 6.0         # tier-1: `down` must be sustained this long before the 3001/cube tiers engage
+CUBE_DELAY_S = 18.0          # tier-2: hold the FIRST cubeQuery this long after the 6 s-survived trigger (3001 first)
 _cube_episode_t0 = [0.0]     # wall time the current cube episode's trigger fired (0 = no episode)
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
@@ -824,16 +830,20 @@ def _scene():
             _cwy = float(_np.median(wy[m])); _cff = _cbelow / max(_ctot, 1)
             _cz90 = float(_np.percentile(wz[m], 90))              # cluster top-of-body (robust) == hi2
             _cyspan = float(wy[m].max() - wy[m].min())            # ground-range extent (lie=elongated)
-            # ⭐ ExtraMLP lying verdict: the trained 3001-height logistic (hi2/floorfrac/yspan/n3001)
-            # OWNS lie-vs-stand. micro imputes to 0 (per-cluster temporal micro not tracked at runtime
-            # yet; weight is small). A body-size floor gate (LYING_MIN_N) still guards against furniture
-            # fragments; RR person-vs-furniture is applied later on the fetched cube.
-            _cplie = _extramlp.p_lie({"hi2": _cz90, "floorfrac": _cff, "yspan": _cyspan,
-                                      "n3001": _ctot, "micro": 0.0})
+            # ⭐ TIER-2 ExtraMLP ON-DEMAND (user 2026-07-22f): "ExtraMLP 平时不调用" -- the trained
+            # 3001-height logistic (lie-vs-stand) is EXPENSIVE-tier and runs ONLY after the tier-1
+            # track_filter passed (i.e. `down` persisted FALL_PERSIST_S -> an episode is open, prev-frame
+            # `_cube_episode_t0 > 0`). Idle / transient-alarm frames use the FREE geometric fallback and
+            # never call p_lie. (1-frame lag on episode onset is negligible.)
             _clying_geom = bool(_cff >= LYING_FFRAC and _ctot >= LYING_MIN_N
                                 and _cz90 < LYING_TOP_Z + LYING_TOP_RANGE_K * max(0.0, _cwy - 2.0))
-            _clying = (bool(_ctot >= LYING_MIN_N and _cplie is not None and _cplie >= EXTRAMLP_LIE_THR)
-                       if (_extramlp.ok and _EXTRAMLP_ON) else _clying_geom)
+            if _cube_episode_t0[0] > 0.0 and _extramlp.ok and _EXTRAMLP_ON:
+                _cplie = _extramlp.p_lie({"hi2": _cz90, "floorfrac": _cff, "yspan": _cyspan,
+                                          "n3001": _ctot, "micro": 0.0})
+                _clying = bool(_ctot >= LYING_MIN_N and _cplie is not None and _cplie >= EXTRAMLP_LIE_THR)
+            else:
+                _cplie = None                         # ExtraMLP not called this frame -> free geom fallback
+                _clying = _clying_geom
             clusters.append({"cx": cx, "cy": cy, "wy_med": _cwy, "n": _ctot,
                              "floor_frac": _cff, "med_wz": float(_np.median(wz[m])),
                              "z90": round(_cz90, 3), "lying": _clying,
@@ -1096,7 +1106,19 @@ def _scene():
         _fall_region["since"] = 0.0
     floor_fall = _fall_region["since"] > 0.0
     down = bool((w_down and real_person) or floor_fall)     # gated trigger (+ track-free leg)
-    if down and _cube_episode_t0[0] == 0.0:                 # mark the episode trigger (3001-first clock)
+    # sustained-down clock (bridges brief DOWN_GAP_S flicker gaps) -- computed HERE so the tier-1 6 s
+    # free filter can gate the 3001/cube episode on it. A transient misfire clears < 6 s -> no episode.
+    if down:
+        if _down_since[0] == 0.0:
+            _down_since[0] = now
+        _down_last[0] = now
+    elif _down_since[0] and (now - _down_last[0]) > DOWN_GAP_S:
+        _down_since[0] = 0.0                       # down truly gone -> reset the sustain timer
+    down_dur = (now - _down_since[0]) if _down_since[0] else 0.0
+    # ⭐ TIER-1 GATE: start the 3001-first episode ONLY after `down` persisted FALL_PERSIST_S (6 s free
+    # filter). Everything expensive (cube, susp-declaration, veto) hangs off _cube_episode_t0 -> a < 6 s
+    # false alarm never reaches the 3001 tier or the cube.
+    if down and down_dur >= FALL_PERSIST_S and _cube_episode_t0[0] == 0.0:
         _cube_episode_t0[0] = now
 
     # server-triggered cube fetch: HELD CUBE_DELAY_S after the trigger (3001-first tiering) then
@@ -1202,14 +1224,7 @@ def _scene():
     # SUSTAINED-DOWN escalation: track how long the person has continuously been down
     # (bridging brief DOWN_GAP_S flicker gaps). If down that long AND a real person, call it
     # a red Fall even if the cube never found breathing -- catches a kid / weak-breathing
-    # body. The cube-RR path (above) still confirms faster for a clear adult.
-    if down:
-        if _down_since[0] == 0.0:
-            _down_since[0] = now
-        _down_last[0] = now
-    elif _down_since[0] and (now - _down_last[0]) > DOWN_GAP_S:
-        _down_since[0] = 0.0                       # down truly gone -> reset the sustain timer
-    down_dur = (now - _down_since[0]) if _down_since[0] else 0.0
+    # body. (down_dur / _down_since are computed ABOVE, at the tier-1 6 s gate.)
     # ffrac guard: a real fall puts the cloud BELOW the floor line (high floor_frac). A
     # ~0.45 m furniture cluster (floor_frac~0.02) reads "down" via the window leg but is NOT
     # on the floor -> must never latch a permanent fall (that was the 22-minute false latch).
