@@ -997,7 +997,17 @@ def _scene():
     # THROWN AWAY as 作废 with `void(loc=1 qbin=40 curbin=41, epoch=0 51vs54)` -- the answer came back
     # stamped 51 while the counter had already reached 54. Nothing physical failed; the bookkeeping
     # invalidated a correct answer. Now the reset fires ONCE per quiet period, not once per frame.
-    if time.time() - _cube_last_active[0] > CUBE_RESET_S and not _quiet_reset_done[0]:
+    # An armed/open episode deliberately survives loss of both GTRACK and the 3001 cloud:
+    # far falls commonly disappear immediately after impact, and absence is not evidence that
+    # the trigger was false.  Only reset raw quiet state while no trigger-cancel/3001/cube/red
+    # episode owns an anchor.
+    _episode_pending = bool(_fall_trigger_anchor[0] is not None
+                            or _cube_episode_t0[0] > 0.0
+                            or _cube_confirmed_episode[0]
+                            or time.time() < _fall_latch_until[0])
+    if (not _episode_pending
+            and time.time() - _cube_last_active[0] > CUBE_RESET_S
+            and not _quiet_reset_done[0]):
         _quiet_reset_done[0] = True
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended (round over) -> restart the 6 s/18 s clocks next round
@@ -1265,51 +1275,16 @@ def _scene():
                 _lost_since.pop(ftk.id, None)                # GTRACK has it -> not lost
             elif ftk.person and ftk.source == "inherited":
                 _lost_since.setdefault(ftk.id, _now)         # mark when it became lost
-                if _cube_episode_t0[0] == 0.0:               # start the 3001-first clock on this trigger
-                    _cube_episode_t0[0] = _now
-                # NO reset-on-RR here: a breathing body returns RR every burst, and resetting
-                # the counter kept it probing forever -> 320 flood -> WEDGE. Rate-limited instead.
-                # GATED: 3001-first DELAY elapsed (18 s of 3001 before the cube) AND sensor FRESH
-                # (never flood a wedged firmware) AND CUBE_RETRY_S spacing AND the MAX_CUBE_BURSTS
-                # alarm-done cap (shared across both probes) -- <=3 queries/fall, then the alarm is done.
-                if (_now - _lost_since[ftk.id] >= LOST_WAIT_S
-                        and (_now - _cube_episode_t0[0]) >= CUBE_DELAY_S
-                        and not _cube_busy[0]
-                        and _cube_episode[0] < MAX_CUBE_BURSTS      # alarm-done: <=3 queries/fall
-                        and (_now - sc.get("t", _now)) < STALE_GATE_S
-                        and (_now - _last_cube_burst_t[0]) > CUBE_RETRY_S):
-                    # WHERE to query (Q: lost坐标记录了吗/查的是它吗/考虑地板能量吗):
-                    # 1) PREFER the floor-band ENERGY cluster (`_fall_anchor`, max floor_frac) --
-                    #    a still/fallen body IS the floor energy; the FloorTracker position
-                    #    `ftk.x,ftk.y` DRIFTS onto whatever orphan cloud is densest (190500: the
-                    #    seated 2nd person, bin10) and wasted every burst there.
-                    # 2) else the DEATH coordinate near this lost track (where a person went DOWN,
-                    #    from `_fall_deaths`) -- not the drifted floor position.
-                    # 3) else fall back to the floor-track position.
-                    # ⭐ below-floor cloud FIRST (user 0722): a lost far track's death/anchor coord
-                    # scatters onto empty bins; the PERSISTENT below-floor mass is the real body.
-                    # Death coordinate is only the fallback when the cloud is fully gone.
-                    _dxy = [(dx, dy) for (dt, dx, dy) in _fall_deaths
-                            if (dx - ftk.x) ** 2 + (dy - ftk.y) ** 2 < FALL_REGION_M ** 2]
-                    _ax, _ay = _dxy[-1] if _dxy else (ftk.x, ftk.y)
-                    # ⭐ TRIGGER ANCHOR (user 0722k): the LOST track's location (death coord / floor pos) is
-                    # where the faller went down -> that is the cube target (below).
-                    _fall_trigger_anchor[0] = (_ax, _ay)
-                    rb = _cube_target_bin(sc, fallback=int(round(math.hypot(_ax, _ay) / RANGE_STEP)))
-                    _cube_busy[0] = True
-                    _lost_query_t[ftk.id] = _now
-                    _last_cube_burst_t[0] = _now
-                    _cube_query_epoch[0] += 1        # (B) new query -> 作废 prior result until this lands
-                    # ⭐ quota (_cube_episode) is charged at EVALUATION on a VALID Y/N verdict, NOT here at
-                    # launch (user 0722i, ④): a mis-targeted/empty first burst (作废) must not burn a query
-                    # (222000 starvation). The launch gate below still holds < MAX_CUBE_BURSTS; the hard
-                    # duty ceiling is the 60 s cadence + firmware cubeGuard.
-                    # 60 frames (~6s): a single LONG cubeQuery (150/~15s) WEDGES the firmware
-                    # -- the sustained 320 flood over DATA UART kills it ([NO-Done] + no frames).
-                    # Long integration for a still body must come from stacking SHORT bursts
-                    # into a server-side sliding buffer (option A), not one long burst.
-                    threading.Thread(target=_fetch_cube_bg, args=(rb, 1.0, 60, _cube_query_epoch[0]),
-                                     daemon=True).start()
+                # A lost-track fall follows the same pipeline as a tracked trigger.  Lock its
+                # spatial identity and start the 6 s trigger-cancel window; do not jump directly
+                # into the 18 s 3001 window.
+                if _cube_episode_t0[0] == 0.0 and _fall_trigger_anchor[0] is None:
+                    _fall_trigger_anchor[0] = (ftk.x, ftk.y)
+                    _fall_trigger_tid[0] = ftk.id
+                    _fall_persist_since[0] = _now
+                # Lost-track is only trigger persistence.  It must not own a second cube-launch
+                # path: the single launch below runs after the anchor-local 3001 verdict, preserving
+                # the fixed trigger anchor and the Trigger -> 6 s -> 18 s -> cube ordering.
         for d in [i for i in _lost_since if i not in alive_ids]:   # forget gone tracks
             _lost_since.pop(d, None); _lost_query_t.pop(d, None)
 
@@ -1493,16 +1468,29 @@ def _scene():
                 _fcl = [c for c in _clusters_now[0]
                         if c.get("floor_frac", 0) >= 0.7 and c.get("n", 0) >= FALL_CLUSTER_MIN_N]
                 if _fcl:
-                    _bc = max(_fcl, key=lambda c: c["n"]); _fall_trigger_anchor[0] = (_bc["cx"], _bc["wy_med"])
+                    _bc = max(_fcl, key=lambda c: c["n"])
+                    # Fall identity is always radar-frame (x,y), matching GTRACK.  wy_med is
+                    # tilt-corrected ground range and must not be mixed into the 0.5 m XY gate.
+                    _fall_trigger_anchor[0] = (_bc["cx"], _bc["cy"])
             if _fall_trigger_anchor[0] is not None:
                 _fall_persist_since[0] = now
         if _fall_trigger_anchor[0] is not None:
             _a = _fall_trigger_anchor[0]
-            _ti_silent = (not w_down) and not (fw is not None and fw.valid and fw.falling_prob >= 0.5)
-            _rec = _ti_silent and any(                          # ID-backed recovery: upright + silent
+            _tracks_at_anchor = [t for t in tg
+                                 if (t["x"] - _a[0]) ** 2 + (t["y"] - _a[1]) ** 2
+                                 <= FALL_ANCHOR_R ** 2]
+            _local_ti_active = False
+            for _t in _tracks_at_anchor:
+                _tp = poses.get(_t["tid"])
+                if _tp is not None and ((_tp.win_valid and _tp.down)
+                                        or (_tp.valid and _tp.falling_prob >= 0.5)):
+                    _local_ti_active = True
+                    break
+            _ti_silent = not _local_ti_active
+            _rec = _ti_silent and any(                          # anchor-local upright + silent
                 (mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)) >= FALL_UPRIGHT_M
-                and ((t["x"] - _a[0]) ** 2 + (t["y"] - _a[1]) ** 2 <= FALL_ANCHOR_R ** 2
-                     or t["tid"] == _fall_trigger_tid[0]) for t in tg)
+                and (t["x"] - _a[0]) ** 2 + (t["y"] - _a[1]) ** 2 <= FALL_ANCHOR_R ** 2
+                for t in tg)
             if _rec:
                 if _arm_recover_since[0] == 0.0:
                     _arm_recover_since[0] = now
@@ -1531,7 +1519,34 @@ def _scene():
     # AND nothing is lying. If 3001 does NOT veto -- lying, OR SIT (ambiguous), OR a collapsed/absent
     # far body, OR empty -- the cubeQuery proceeds normally. This preserves the far-lying-collapse
     # case (no STAND box -> no veto -> cube STILL queries -> RR/MUSIC can confirm).
-    veto = bool((not lying_state) and primary_pose == "STAND")
+    # The 3001 filter belongs to this episode's fixed fall coordinate.  A STAND/WALK
+    # elsewhere in the room (including a same-tid tracker that drifted away) cannot veto it.
+    _fa = _fall_trigger_anchor[0]
+    if _fa is not None:
+        _local_boxes = [b for b in boxes
+                        if (((b["x0"] + b["x1"]) / 2.0 - _fa[0]) ** 2
+                            + ((b["y0"] + b["y1"]) / 2.0 - _fa[1]) ** 2)
+                        <= FALL_ANCHOR_R ** 2]
+        _local_clusters = [c for c in clusters
+                           if ((c["cx"] - _fa[0]) ** 2 + (c["cy"] - _fa[1]) ** 2)
+                           <= FALL_ANCHOR_R ** 2]
+    else:
+        _local_boxes = []
+        _local_clusters = []
+    _local_upright = any(b.get("pose") == "STAND" for b in _local_boxes)
+    _local_lying = any(c.get("lying") for c in _local_clusters)
+    veto = bool(_local_upright and not _local_lying)
+    # At the end of the 18 s filter, an explicit anchor-local upright verdict is
+    # terminal false-trigger evidence.  End the unconfirmed episode instead of
+    # suppressing cube forever while leaving its anchor/timers wedged.
+    if cube_delay_ok and veto:
+        _cube_episode_t0[0] = 0.0
+        _fall_trigger_anchor[0] = None
+        _fall_trigger_tid[0] = None
+        _fall_persist_since[0] = 0.0
+        _arm_recover_since[0] = 0.0
+        _down_since[0] = 0.0
+        _fall_region["since"] = 0.0
     # CUBE fires BROADLY: on a TI alarm, unless 3001 vetoes a STAND. Keeps the far-lying-collapse
     # rescue (no STAND box -> cube still queries). This is SEPARATE from the suspected declaration
     # below -- querying a cube is cheap-to-be-wrong; declaring "suspect fall" to the user is not.
@@ -1602,9 +1617,11 @@ def _scene():
             cube_living_state = "Living" if _alive else "?"
     # ⭐ RED STATE MACHINE (user 2026-07-22g): count THIS query's verdict ONCE (dedup on _cube_result["t"]).
     # Y -> 升红 + 阴性清零; N -> +1, two consecutive -> 撤红; None(作废) -> skip (neither raise nor count).
+    _cube_red_rose = False
     if _cube_result["t"] > 0.0 and _cube_result["t"] != _cube_eval_t[0]:
         _cube_eval_t[0] = _cube_result["t"]
         if cube_lying is True:                       # Y -> raise red, reset the negative run
+            _cube_red_rose = not _cube_confirmed_episode[0]
             _cube_confirmed_episode[0] = True
             _cube_neg_run[0] = 0
             _cube_episode[0] += 1                     # ④ quota charged on a VALID verdict (Y/N), not 作废
@@ -1614,6 +1631,12 @@ def _scene():
             if _cube_neg_run[0] >= CUBE_CANCEL_NEG:
                 _cube_confirmed_episode[0] = False
                 _fall_latch_until[0] = 0.0
+                _cube_episode_t0[0] = 0.0
+                _fall_trigger_anchor[0] = None
+                _fall_trigger_tid[0] = None
+                _fall_persist_since[0] = 0.0
+                _arm_recover_since[0] = 0.0
+                _down_since[0] = 0.0
                 _fall_region["since"] = 0.0          # ⑤ 撤红 -> stop the region re-arming on residual clutter
                 _fall_deaths[:] = [(dt, dx, dy) for (dt, dx, dy) in _fall_deaths
                                    if _last_low_xy[0] is None
@@ -1630,7 +1653,7 @@ def _scene():
     # this, empty-room floor_fall noise or a sitting/moving person that trips a TI trigger reads as
     # Suspected every 18 s. The cube still queries broadly (cube_gate) to confirm/rescue; only a real
     # ExtraMLP lying candidate (surviving the 18 s gate) goes orange + beeps.
-    susp_gate = bool(cube_delay_ok and lying_state)
+    susp_gate = bool(cube_delay_ok and _local_lying)
     fall_state = "fall" if dec["fall"] else ("suspected" if susp_gate else "none")
 
     # SUSTAINED-DOWN escalation: track how long the person has continuously been down
@@ -1678,7 +1701,12 @@ def _scene():
     # sees the (correctly) high whole-cloud median and "撤警" over and over with no red on: live
     # 0723 logged 9 RECOVER firings in 38 s at down=0, wz_med 0.62-0.85, cands=0. Each firing wiped
     # episode state and ticked _cube_query_epoch, which is what voids in-flight cube answers.
-    _episode_live = bool(_cube_confirmed_episode[0] or now < _fall_latch_until[0] or _down_since[0])
+    # LEG1/2 are red-state recovery, never trigger-cancel or 3001 filtering.  In
+    # particular, do not let a whole-room cloud-up erase an unconfirmed far fall.
+    # Also defer recovery on the exact frame a cube Y raises red so the confirmation
+    # is observable and its event edge cannot be cleared in the same scene call.
+    _episode_live = bool((_cube_confirmed_episode[0] or now < _fall_latch_until[0])
+                         and not _cube_red_rose)
     _llxy = _last_low_xy[0] if _episode_live else None
     if _llxy is not None:
         _lx, _ly = _llxy
@@ -1819,7 +1847,11 @@ def _scene():
     # (L1103) and onset (L1114) legs. This was the LEAK: red_trigger/beep fired on sustained_fall
     # even with cube-free CLOSED -> the "closed" cube-free red still 3-beeped. Now RED = cube-confirmed
     # dec["fall"] only (unless CUBEFREE_FALL is explicitly on). Far falls red via the cube (z40 XY).
-    red_trigger = bool(dec["fall"] or (_CUBEFREE_FALL and sustained_fall))
+    # A cube Y is the episode's authoritative red edge.  It must count/beep even if
+    # the original track and firmware trigger have disappeared before B-narrow returns.
+    red_trigger = bool(_cube_red_rose
+                       or (_CUBEFREE_FALL and sustained_fall
+                           and _beep_last_state[0] != "fall"))
     if red_trigger and _fall_onset_armed[0]:
         _fall_event_n[0] += 1
         _fall_onset_armed[0] = False
@@ -1839,7 +1871,11 @@ def _scene():
     else:                                         # ⭐ ROUND MODEL: raw `down` clear -> round over grace ->
         if _down_clear_since[0] == 0.0:           # re-arm for the NEXT round (was gated on cloud_up; the
             _down_clear_since[0] = now             # round model ends a round on down-clear, not on a risen
-        elif now - _down_clear_since[0] >= FALL_EVENT_GAP_S:   # cloud -- a still-down body that re-asserts
+        elif (now - _down_clear_since[0] >= FALL_EVENT_GAP_S
+              and _fall_trigger_anchor[0] is None
+              and _cube_episode_t0[0] == 0.0
+              and not _cube_confirmed_episode[0]
+              and now >= _fall_latch_until[0]):                # never re-arm inside an owned episode
             _fall_onset_armed[0] = True           # `down` just re-detects as a new round, which is fine)
     # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
     # red-Fall can be pinned to the exact failing gate. Goes to stdout AND

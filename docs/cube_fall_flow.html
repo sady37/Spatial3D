@@ -72,7 +72,7 @@
   <header class="top">
     <div class="eyebrow">AWRL6844 · Fall pipeline</div>
     <h1>Cube 跌倒判读流程</h1>
-    <p class="sub">从 TI 片上 alarm 到报警,cube 是唯一权威。3001 只负责过滤与起钟;判决走 cube 的两维返回,trigger 无权在原地否决。</p>
+    <p class="sub">Episode: trigger_cancel 6s → 3001_filter 18s → cube A-wide+B-narrow(1~3发/60s间隔) → red 后才启用 LEG1/2。真倒后 track lost 不取消。</p>
     <div class="legend">
       <span class="chip"><span class="dot" style="background:#0e9f6e"></span>已实现(本会话提交)</span>
       <span class="chip"><span class="dot" style="background:#d97706"></span>TODO(设计定案 · 未实现)</span>
@@ -87,21 +87,24 @@
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'ui-monospace, Menlo, monospace','fontSize':'13px','lineColor':'#94a3b8','edgeLabelBackground':'#cbd5e1'}}}%%
 flowchart TD
     A["TI alarm — window-Z / MLP (TLV 321)<br/>—或— 3001 floor_fall(楼下云)"]:::src
-    A --> B["down = (w_down AND real_person) OR floor_fall<br/>⚠ down 对遮挡/远身体是胡猜(可信度≈0)"]:::proc
-    B --> C{"① tier-1 免费 track_filter<br/>down 持续 ≥ 6s ?(许多 TI alarm 是瞬时误报)"}:::dec
-    C -->|"否 <6s"| XF["瞬时误报 · 零成本丢弃<br/>(不算 3001 · 不发 cube)"]:::discard
-    C -->|"是"| D["② 起 episode · 18s ExtraMLP 段(tier-2)<br/>3001 ExtraMLP 按需调用 · 平时不调用"]:::done
-    D --> E["等 18s<br/>0–18s 只 3001 过滤 · 不发 cube · 不报红"]:::done
-    E --> F["③ cube query · tier-3(最贵,最后)<br/>目标 = 楼下云 median bin<br/>门:fresh · 非busy · 速率 · 固件预算"]:::done
-    F --> G["cube 一发返回"]:::proc
+    A --> B["锁定 Fall anchor=(x,y)<br/>R=0.5m 定义本 episode 空间身份"]:::proc
+    B --> C{"① trigger_cancel · 6s<br/>R≤0.5m 内 upright + TI静默持续1s?"}:::dec
+    C -->|"是·明确反证"| XF["Trigger误报 · 零成本取消<br/>不进3001 · 不发cube"]:::discard
+    C -->|"否·默认通过(track lost也通过)"| D["② 开 episode · 3001_filter 18s<br/>门外track无效;无数据不否决"]:::done
+    D --> E{"anchor内3001明确 STAND/WALK veto?"}:::dec
+    E -->|"是"| XF2["3001明确过滤 · 轮结束"]:::discard
+    E -->|"否·lying/SIT/空/lost"| F["③ cube query #1<br/>A wide×短定位peak → B narrow×长测量<br/>fresh · 非busy · 60s发送间隔 · 固件预算"]:::done
+    F --> G["B narrow 返回<br/>RR/strength · cube_ff · z40"]:::proc
 
     G --> AB{"cube 校验<br/>(A) 位置:查询bin 与 当前楼下云bin ≤ 10 且存在(8e0cfdd)<br/>(B) 归属:回包必须属于【本次主动查询】· query-epoch 相等(0722d)<br/>发新查询即作废旧结果 · bin 距离判不了返回时间"}:::done
     AB -->|"任一失败"| VOID["作废 · 视为无返回"]:::discard
     VOID -.->|"60s 重查 · 不烧配额"| F
 
     AB -->|"通过"| P["① PRESENCE — lying (Y/N) 单独定 fall"]:::hd
-    P --> P1{"cube_ff 够强?"}:::dec
-    P1 -->|"强"| PY["lying = Y<br/>(cube_ff 主判据)"]:::done
+    P --> PR{"B段 RR lock?<br/>rr有效且 strength≥0.3"}:::dec
+    PR -->|"是·呼吸活体自证"| PY["lying = Y<br/>RR自证presence/location"]:::done
+    PR -->|"否"| P1{"cube_ff 够强?"}:::dec
+    P1 -->|"≥0.5"| PY
     P1 -->|"<0.5 / =0"| P2["z40 兜底 · 已实现 3449523<br/>差值/基值 vs 空房 · XY 逐格<br/>(多簇 chair隔断 仲裁仍 TODO#2:现由 cube_ff<0.5 近似)"]:::done
     P2 --> P3{"z40 ≥ 0.4 ?"}:::dec
     P3 -->|"是"| PY
@@ -124,16 +127,15 @@ flowchart TD
     QT -->|"否 未满3"| F
     QT -->|"是"| HOLD["🔴 红保持 · 停查<br/>(报警是事件·已发出即完成)"]:::alarm
 
-    %% ⭐ 中途-up 撤红 —— 与 cube 连2N 并列的清红路(任一腿)
+    %% ⭐ LEG1/2 只在 RED 后,不得介入 trigger_cancel / 3001_filter
     HOLD --> MU{"中途-up 撤红?(任一腿即撤)"}:::dec
     SM -.->|"红保持中随时可撤"| MU
-    MU -->|"leg1 cloud_up(起身·走没走都算)"| LG1["整云 median 世界高 &gt;0.4 · 持续2s · real_inst<br/>AND ground_clear(多数票)—— 护理员拉高 median<br/>骗不过持续存在的楼下点"]:::done
-    MU -->|"leg2 walk-away 六关(起身且走)"| LG2["①起点≤0.8m ②位移≥1.5m ③限速1.2m/s+0.3裕(瞬移取消重排队)<br/>④世界高≥0.4m ⑤TI静默 ⑥ground_clear(多数票·护理员克星)<br/>①②③硬关批权 · ④⑤⑥否决关只拦"]:::done
+    MU -->|"LEG1 cloud_up"| LG1["整云 median 世界高 &gt;0.4 · 持续2s · real_inst<br/>起身但未走开也可撤红"]:::done
+    MU -->|"LEG2 walk-away"| LG2["①先在Fall spot≤0.8m注册 ②位移≥1.5m<br/>③限速≤1.2m/s(步长&gt;0.3m才判瞬移)"]:::done
     LG1 --> STB["全清 + re-arm + 待机"]:::proc
     LG2 --> STB
     CLR --> STB
-    HOLD -.->|"或 down 持续清 CUBE_RESET_S(兜底)"| STB
-    STB --> RB["再倒 → 第 2 轮(新 trigger · 新 18s · 新 ≤3 发)"]:::proc
+    STB --> RB["再倒 → 新anchor · 新6s cancel · 新18s filter · 新≤3发"]:::proc
     RB -.-> A
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
@@ -151,7 +153,9 @@ flowchart TD
     <div class="card note">
       <h3>硬约束</h3>
       <ul>
-        <li><span class="tag done">18s</span> 3001-first:前 18s 只过滤,无 cube 无红</li>
+        <li><b>6s trigger_cancel</b>:只认 anchor R≤0.5m 内 upright+TI静默反证;track lost默认通过</li>
+        <li><b>18s 3001_filter</b>:明确STAND/WALK才veto;无数据不否决</li>
+        <li>首次cube≈Trigger+24s;后续最多2发,查询发起间隔60s</li>
         <li>固件 cubeGuard 硬窗口 <code>300s</code>(3000帧)</li>
         <li>预算 <code>300</code> cube-帧/窗口(30s)= <b>10% 占空</b></li>
         <li>单发上限 <code>300</code>帧(30s);server 用 60帧/发</li>
@@ -161,12 +165,12 @@ flowchart TD
       <h3>判决原则</h3>
       <ul>
         <li><b>Fall ≥ 1</b>:任一发 lying=Y 即报</li>
-        <li>presence 主判据 = <b>cube_ff</b>(≥0.5),z40 兜底(<0.5)</li>
+        <li>B段presence优先级:<b>RR lock</b>(strength≥0.3) → cube_ff(≥0.5) → z40兜底</li>
         <li>lying 单独定 fall;Living_state 只贴标签("?"≠崩溃)</li>
         <li><b>cube 是权威</b>:进 cube-query = down 已不可信 → down 不再排/撤 cube</li>
         <li>红状态机:升红=1发Y · 撤红=连2发N · 作废不算 · Y清零 · <b>配额只数有效发(Y/N),作废不烧</b></li>
-        <li>撤红/轮结束:①cube连2N ②中途-up恢复(leg1 cloud_up+ground_clear / leg2 walk-away六关) ③down清兜底</li>
-        <li>ground_clear <b>多数票</b>(近10帧≥70%楼下空)· leg1 也 AND 上它(护理员克星)</li>
+        <li><b>LEG1/2只在red后</b>:LEG1 cloud_up;LEG2 起点0.8m+位移1.5m+限速/瞬移排除</li>
+        <li>R=0.5是Fall身份门;R=0.8是LEG2起点门;10bin是cube回包位置门</li>
         <li>cube 校验:(A)位置 10bin +(B)归属 <b>query-epoch</b>(只认本次查询回包,发新查询即作废旧包),失败作废 → 下次 query 重查</li>
       </ul>
     </div>
@@ -175,13 +179,13 @@ flowchart TD
       <ul>
         <li>cube_ff 强/弱 = <code>0.5</code>(躺 0.55–0.92 vs 远/静 0.00)</li>
         <li>z40 lying = <code>0.4</code>(躺 ~28 ≫ 空 ~0)</li>
-        <li>每次跌倒 ≤ <code>3</code> <b>有效</b>发(@+18/+60/+60s),作废不烧配额(222000 不饿死);撤红=连2N/中途up/down清</li>
+        <li>每次跌倒 ≤ <code>3</code> 有效发:相对Trigger约+24/+84/+144s;60s是<b>发起间隔</b>,不是单发采集时长</li>
         <li>校验门限 = <code>10 bin</code>(1bin≈10.8cm → ~1m)</li>
       </ul>
     </div>
   </div>
 
-  <div class="foot">已实现 3449523 cube_ff主/z40兜 · eaafa5f 刷新(去停查自锁) · 8e0cfdd (A)位置+(B)归属校验 · 30s节奏(60→30 救 fall2,固件 cubeGuard 防挂) &nbsp;·&nbsp; 基线 c1110ac / b1f1adf / 8982ea6 / 7fb173c &nbsp;·&nbsp; TODO:down门/3001 veto 重设计 · RANGE_STEP 校正 · 多簇 #2</div>
+  <div class="foot">设计同步 2026-07-23:6s trigger_cancel(失track默认通过) · 18s 3001_filter · A-wide+B-narrow · RR lock→cube_ff→z40 · ≤3有效发/60s间隔 · LEG1/2仅red后 &nbsp;·&nbsp; TODO:代码对齐R=0.5身份门与recovery阶段边界</div>
 </div>
 
 <script type="module">
