@@ -252,18 +252,30 @@ RECOVER_S = 2.0              # a CLEAR recovery this long CLEARS the latch early
                              # red). The centroid stays ~+0.7 m once up. Only clears when up.
 RECOVER_ZMED = 0.4           # whole-cloud median world height above this = the mass is UP (a
                              # lying body is -0.2..-0.5; standing/sitting is +0.5..+0.9).
-# ⭐ FAR-ROBUST RECOVERY (user 2026-07-22f): cloud_up (RECOVER_ZMED) is reliable NEAR but FAILS FAR --
-# at >3 m the downtilt term (-py*sin(25 deg) ~= -1.7 m @4 m) + elevation under-resolution collapse a
-# STANDING person's whole-cloud median to 0.0-0.4, overlapping a lying body, so a far recovered-in-place
-# fall never clears cloud_up -> red STUCK. Two range-INDEPENDENT recovery signals OR'd with cloud_up:
-#   (B) MOVED: a live GTRACK track near the fall spot that is UPRIGHT (world-h > FALL_UPRIGHT_M) AND
-#       MOVING (speed > RECOVER_VMIN). A still fallen body yields NO moving upright track, so this is
-#       SAFE (can't false-clear a real fall) and range-independent. Primary signal.
-#   (A) VACATED: the fall spot is essentially EMPTY of points (the body left the region). Conservative
-#       (<= RECOVER_VACATE_N points near _last_low_xy) to avoid false-clearing a far-SPARSE real lying
-#       body -- a lying body always leaves SOME low points at the spot; only a walked-off spot empties.
-RECOVER_VMIN = 0.2           # (B) min GTRACK track speed (m/s) to count as "got up and moving"
-RECOVER_VACATE_N = 3         # (A) <= this many points near the fall spot = the body has left (vacated)
+# ⭐ WALK-AWAY RECOVERY (user 2026-07-22f) — cloud_up (RECOVER_ZMED) works NEAR but FAILS FAR (>3 m: the
+# downtilt -py*sin(25 deg) ~= -1.7 m @4 m + elevation under-resolution collapse a STANDING person's
+# whole-cloud median into the lying band -> a far recovered fall never clears -> red STUCK). The rigorous
+# clear is a SIX-GATE AND chain that resists false-recovery from passers-by, caregivers, coasting ghosts,
+# teleport fragments, and crawling/dragging. Per-track state (`_recover_cand`) tracks each candidate:
+#   (1) ORIGIN  : the candidate track FIRST appeared within RECOVER_ORIGIN_M of the fall spot (a passer-by
+#                 originates elsewhere -> never a candidate).
+#   (2) DISPLACE: it has since moved >= RECOVER_DISP_M from that origin (a coasting drift can't march 1.5 m).
+#   (3) SPEED   : per-frame speed <= RECOVER_SPEED_MAX throughout -- a teleport fragment DISQUALIFIES the
+#                 candidate for good (sticky `disq`).
+#   (4) UPRIGHT : WORLD height (mount + z*cos - y*sin, NOT raw posZ) >= RECOVER_TRACK_Z -- a crawling or
+#                 dragged low mass, even if it travels 1.5 m, is not upright -> not recovery.
+#   (5) LEGS QUIET: Window-Z quiet (not w_down) AND MLP quiet (falling_p < 0.5, same thr as the cleaner;
+#                 an INVALID fw counts as QUIET -- no-alarm != alarm, safety is carried by the hard gates).
+#   (6) GROUND_CLEAR: the below-floor mass within +-10 bins of the fall bin is GONE -- the ONLY counter to a
+#                 CAREGIVER who satisfies gates 1-5 while the VICTIM is still on the floor.
+# ALL six -> walk-away recovery. (cloud_up still clears the NEAR stand-up, gated by ground_clear+legs so a
+# caregiver leaning over a down victim can't clear it either.)
+RECOVER_ORIGIN_M = 0.8       # (1) candidate track must first appear within this of the fall spot [80 cm]
+RECOVER_DISP_M = 1.5         # (2) displacement from its origin to count as walked-away [150 cm]
+RECOVER_SPEED_MAX = 1.2      # (3) per-frame track speed <= this; exceed once -> disqualified [120 cm/s]
+RECOVER_TRACK_Z = 0.4        # (4) track WORLD height (mount+z*cos-y*sin) >= this = upright [40 cm]
+RECOVER_GROUND_N = 3         # (6) <= this many below-floor points within +-10 bins of the fall bin = clear
+_recover_cand = {}           # per-episode candidate tracks: tid -> {ox, oy, disq} (walk-away gate 1-3 state)
 CANCEL_R = 0.5               # 30 s monitor: if a GTRACK track stands UP within this radius of
                              # where the body fell (the person got up unaided at the fall spot),
                              # DISCARD the fall -- a stumble that self-recovers is not an
@@ -703,6 +715,7 @@ def _scene():
         _cube_episode[0] = 0
         _cube_episode_t0[0] = 0.0     # episode ended -> restart the 18 s cube-delay clock next fall
         _cube_confirmed_episode[0] = False   # episode ended -> the next fall must re-confirm via cube
+        _recover_cand.clear()                # episode ended -> forget walk-away candidate tracks
         _cube_neg_run[0] = 0          # TODO#1: reset the consecutive-negative cancel counter
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
@@ -1247,30 +1260,44 @@ def _scene():
     if (dec["fall"] or _cube_confirmed_episode[0]
             or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
         _fall_latch_until[0] = now + FALL_HOLD_S
-    # RECOVERY clears the latch early: the person got up and moved on -- a stumble that self-recovers
-    # is not an emergency. NEAR signal = the whole-cloud centroid at the fall spot has RISEN (cloud_up;
-    # we do NOT use the GTRACK track Z here -- it floats ~1 m on a still body, so a fallen person's
-    # coasting track reads "up" and would falsely cancel a real fall, wrecked fall B in 000000). cloud_up
-    # FAILS at range (see RECOVER_VMIN/RECOVER_VACATE_N notes), so OR in two range-independent signals:
-    _rmoved = False; _rvacated = False        # (B) got-up-and-moving, (A) fall spot vacated
+    # RECOVERY clears the latch early: the person got up and moved on -- a stumble that self-recovers is
+    # not an emergency. NEAR = cloud_up (whole-cloud centroid risen). cloud_up FAILS far, so add the
+    # 6-gate WALK-AWAY chain (see the RECOVER_* block up top). Per-track candidate state in _recover_cand.
+    _legs_quiet = (not w_down) and not (fw is not None and fw.valid and fw.falling_prob >= 0.5)   # gate (5)
+    walkaway = False; ground_clear = True
     _llxy = _last_low_xy[0]
     if _llxy is not None:
         _lx, _ly = _llxy
-        # (B) SAFE: an UPRIGHT, MOVING GTRACK track near the fall spot = person got up and walked.
-        _rmoved = any(((t["x"] - _lx) ** 2 + (t["y"] - _ly) ** 2 < FALL_REGION_M ** 2)
-                      and (mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)) > FALL_UPRIGHT_M
-                      and t.get("speed", 0.0) > RECOVER_VMIN for t in tg)
-        # (A) CONSERVATIVE: the fall spot is essentially EMPTY (body left the region). Guarded on the
-        # cloud existing; if there is NO cloud at all, the spot is trivially vacated.
+        # gate (6) GROUND_CLEAR: below-floor mass within +-10 bins of the fall bin gone
         if pcx is not None and len(pcx):
-            _nreg = ((px - _lx) ** 2 + (py - _ly) ** 2) < FALL_REGION_M ** 2
-            _rvacated = int(_nreg.sum()) <= RECOVER_VACATE_N
-        else:
-            _rvacated = True
-    recovered = cloud_up or _rmoved or _rvacated
-    # Held RECOVER_S to debounce (a flickering false signal won't sustain), only when a real person is
-    # present (real_inst). ANY signal sustaining RECOVER_S clears; they share the one _recover_since timer.
-    if real_inst and recovered:
+            _fr = math.hypot(_lx, _ly)                                  # fall-spot radar range (m)
+            _gm = int(((wz < FLOOR_Z) & (_np.abs(_np.hypot(px, py) - _fr) <= 10 * RANGE_STEP)).sum())
+            ground_clear = _gm <= RECOVER_GROUND_N
+        _alive = set()
+        for t in tg:
+            _tid = t["tid"]; _alive.add(_tid)
+            _c = _recover_cand.get(_tid)
+            if _c is None:                                              # gate (1) ORIGIN near the fall spot
+                if (t["x"] - _lx) ** 2 + (t["y"] - _ly) ** 2 <= RECOVER_ORIGIN_M ** 2:
+                    _recover_cand[_tid] = {"ox": t["x"], "oy": t["y"], "disq": False}
+                continue
+            if t.get("speed", 0.0) > RECOVER_SPEED_MAX:                 # gate (3) teleport -> disqualify
+                _c["disq"] = True
+            if _c["disq"]:
+                continue
+            _disp = math.hypot(t["x"] - _c["ox"], t["y"] - _c["oy"])                       # gate (2)
+            _wh = mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)                  # gate (4)
+            if (_disp >= RECOVER_DISP_M and _wh >= RECOVER_TRACK_Z
+                    and _legs_quiet and ground_clear):                 # gates (2)&(4)&(5)&(6)
+                walkaway = True
+        for _d in [k for k in _recover_cand if k not in _alive]:       # forget dead candidate tracks
+            _recover_cand.pop(_d, None)
+    else:
+        _recover_cand.clear()
+    # cloud_up (NEAR stand-up) is also gated by ground_clear + legs_quiet so a caregiver leaning over a
+    # still-down victim can't clear it. walk-away carries the far case. Debounced RECOVER_S either way.
+    recovered = walkaway or (cloud_up and ground_clear and _legs_quiet)
+    if recovered:
         if _recover_since[0] == 0.0:
             _recover_since[0] = now
         if now - _recover_since[0] >= RECOVER_S:
@@ -1284,6 +1311,7 @@ def _scene():
             _cube_episode[0] = 0
             _cube_episode_t0[0] = 0.0
             _cube_neg_run[0] = 0
+            _recover_cand.clear()                  # episode over -> forget candidate tracks
     else:
         _recover_since[0] = 0.0
     if now < _fall_latch_until[0]:
@@ -1456,6 +1484,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/fall/reset":              # clear a latched red Fall
             _fall_latch_until[0] = 0.0
             _cube_confirmed_episode[0] = False       # manual reset -> drop the confirmation hold too
+            _recover_cand.clear()
             return self._send(200, json.dumps({"fall_reset": True}))
         if u.path == "/api/scene":
             try:
