@@ -2075,9 +2075,15 @@ def main():
                 pass
     threading.Thread(target=_self_tick, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    # graceful stop on Ctrl-C AND SIGTERM (plain `pkill`) so the read-only serial
-    # attach is released cleanly and never wedges the firmware. NOTE: `kill -9`
-    # (SIGKILL) is uncatchable and CAN wedge the UART -> then power-cycle the radar.
+    # graceful stop on Ctrl-C AND SIGTERM (plain `pkill`) so the current recording block gets
+    # flushed to disk before exit. NOTE (measured 2026-07-23): `kill -9` does NOT wedge the sensor.
+    # The firmware streams autonomously and does not care whether the host is reading -- a hard kill
+    # was tested and the DATA line kept emitting valid frames (3991 B in the 4 s right after SIGKILL,
+    # magic word intact). The earlier "SIGKILL can wedge the UART" note was a guess, now disproven;
+    # the two real "dead radar" states this session were a cold boot idling for a cfg and a wide-cube
+    # UART flood, neither related to how the process exited. So the ONLY cost of `kill -9` is losing
+    # the unflushed current 5-min recording (and the graceful handler); prefer plain pkill for that,
+    # not to protect the hardware.
     import signal
     global _shutdown
     def _graceful(*_a):
@@ -2085,9 +2091,9 @@ def main():
         # thread, which is exactly where serve_forever() is blocked; ServerBase.shutdown() then
         # waits for that loop to finish -- and the loop cannot advance because the main thread is
         # sitting inside this handler. Self-deadlock: SIGTERM and SIGINT were both ignored, so every
-        # stop ended in `kill -9`, the one thing this handler exists to avoid (SIGKILL is uncatchable
-        # and can wedge the UART -- the "ports up, firmware alive, zero bytes" state found this
-        # morning). Handing the shutdown to a helper thread lets the main loop unwind normally.
+        # stop ended in `kill -9` -- which loses the unflushed recording (it does NOT wedge the
+        # sensor; that was tested, see the note above). Handing the shutdown to a helper thread lets
+        # the main loop unwind normally, so a plain pkill now flushes and exits cleanly.
         threading.Thread(target=lambda: (_src.stop(), srv.shutdown()), daemon=True).start()
     _shutdown = _graceful                                 # exposed via /api/quit
     signal.signal(signal.SIGINT, _graceful)
