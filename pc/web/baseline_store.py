@@ -136,16 +136,133 @@ def _atomic_savez(path, **arrays):
     os.replace(tmp, path)
 
 
-def stats(hour=None, since_s=None, min_n=3, path=None):
-    """Per-bin robust baseline + dispersion over the USABLE (unmasked) samples.
+def hour_stats(min_days=3, path=None):
+    """⭐ ACROSS-DAY dispersion per (bin, hour-of-day) -- the statistic the threshold should use.
 
-    hour     : restrict to this hour-of-day (diurnal slice; the drift being tracked is thermal)
-    since_s  : restrict to the last N seconds (e.g. 7200 for the user's "recent 2h" view)
-    Returns {bin: {"med", "sigma", "n"}} -- MEDIAN not mean, so a handful of samples where the
-    mask failed to catch an occupant cannot drag the baseline. sigma uses MAD*1.4826 for the same
-    reason: a robust spread is what a threshold should be built on."""
-    T, P, M = _load() if path is None else (lambda d: (d["ts"], d["power"], d["mask"].astype(bool)))(
-        np.load(path, allow_pickle=False))
+    WHY THIS SHAPE (user 2026-07-23): sampling hourly gives ONE sample per (bin, hour) per day, so
+    the spread within a cell is spread ACROSS DAYS at a FIXED time of day. That controls for the
+    diurnal term: whatever the sun/HVAC does at 15:00 it does every day, so comparing 15:00 to
+    15:00 leaves only the genuine day-to-day instability. Within-hour spread is deliberately NOT
+    computed -- it measures the 2 s measurement noise, not the drift a threshold must survive.
+
+    IN LOG SPACE. The whole metric is multiplicative (差值/基值, R^4, reflectivity), and linear
+    power is dominated by near bins -- bin 14 sits ~65x above bin 50, so the same 5% relative
+    wobble differs by two orders of magnitude in linear units and no single global threshold can
+    exist. log makes the dispersion scale-free and near/far directly comparable.
+
+    Returns {(bin, hour): {"med_log", "sigma_log", "n_days", "cv"}} where cv = exp(sigma_log)-1 is
+    the equivalent fractional wobble (0.05 = this cell drifts +-5% day to day)."""
+    T, P, M = _read(path)
+    if len(T) == 0:
+        return {}
+    hrs = np.array([time.localtime(t).tm_hour for t in T])
+    days = np.array([time.strftime("%Y%m%d", time.localtime(t)) for t in T])
+    out = {}
+    for h in range(24):
+        sel = hrs == h
+        if not sel.any():
+            continue
+        Ph, Mh, Dh = P[sel], M[sel], days[sel]
+        for b in range(MAX_BIN):
+            ok = Mh[:, b] & np.isfinite(Ph[:, b]) & (Ph[:, b] > 0)
+            if ok.sum() < min_days:
+                continue
+            # one value per DAY (median within a day) so a duplicated hour cannot double-count
+            vals = []
+            for d in sorted(set(Dh[ok])):
+                vals.append(np.median(np.log(Ph[ok & (Dh == d), b])))
+            if len(vals) < min_days:
+                continue
+            v = np.array(vals)
+            med = float(np.median(v))
+            mad = float(np.median(np.abs(v - med)))
+            sig = 1.4826 * mad
+            out[(b, h)] = {"med_log": med, "sigma_log": sig, "n_days": len(v),
+                           "cv": float(np.exp(sig) - 1.0)}
+    return out
+
+
+def coverage(path=None):
+    """⭐ MNAR guard: how many usable days each (bin, hour) actually has.
+
+    Missingness here is NOT random -- it is caused by occupancy masking, and occupancy correlates
+    with hour (the bins in front of the sofa are masked every evening). Treating "no data" as
+    "stable" would leave exactly the places people occupy without a baseline, so coverage is
+    reported explicitly and thin cells must be called UNKNOWN, never quiet."""
+    T, P, M = _read(path)
+    cov = np.zeros((MAX_BIN, 24), int)
+    if len(T) == 0:
+        return cov
+    hrs = np.array([time.localtime(t).tm_hour for t in T])
+    for h in range(24):
+        sel = hrs == h
+        if sel.any():
+            cov[:, h] = (M[sel] & np.isfinite(P[sel]) & (P[sel] > 0)).sum(axis=0)
+    return cov
+
+
+def furniture_events(min_days=4, k=4.0, min_jump_log=0.2, path=None):
+    """⭐ Structural change (furniture moved), as a CHANGE POINT -- not as variance.
+
+    Variance is symmetric and memoryless: a box removed on day 4 raises the 7-day variance, and so
+    does one noisy sweep. They are indistinguishable in a variance. What separates them is SHAPE:
+      * thermal drift is smooth and HOUR-SHAPED (same sun every day at the same time)
+      * a furniture move is a STEP that appears at ALL hours at once, on a CONTIGUOUS block of bins
+    So collapse the hours away first (one robust level per bin per DAY), then look for a step in
+    that daily series. The hour-shaped drift cancels in the daily median; the step does not.
+
+    Returns [{bin, day, before, after, jump_log, jump_x}] for jumps beyond k robust sigmas."""
+    T, P, M = _read(path)
+    if len(T) == 0:
+        return []
+    days = np.array([time.strftime("%Y%m%d", time.localtime(t)) for t in T])
+    uniq = sorted(set(days))
+    if len(uniq) < min_days:
+        return []
+    lvl = np.full((MAX_BIN, len(uniq)), np.nan)
+    for j, d in enumerate(uniq):
+        sel = days == d
+        Pd, Md = P[sel], M[sel]
+        for b in range(MAX_BIN):
+            ok = Md[:, b] & np.isfinite(Pd[:, b]) & (Pd[:, b] > 0)
+            if ok.sum():
+                lvl[b, j] = np.median(np.log(Pd[ok, b]))
+    ev = []
+    for b in range(MAX_BIN):
+        v = lvl[b]
+        good = np.isfinite(v)
+        if good.sum() < min_days:
+            continue
+        d1 = np.diff(v[good])
+        if len(d1) < 2:
+            continue
+        s = 1.4826 * np.median(np.abs(d1 - np.median(d1))) or 1e-9
+        idx = np.where(good)[0]
+        for i, dv in enumerate(d1):
+            # RELATIVE *and* ABSOLUTE. k*sigma alone fires on a very stable bin for a 5% wobble
+            # (validated: a synthetic 0.30x box removal scored |jump_log|=1.2 while the drift-only
+            # false positives sat at 0.05) -- a structural change worth a name is a LARGE
+            # multiplicative step, so it must also clear min_jump_log (0.2 = 22%).
+            if abs(dv) > k * s and abs(dv) >= min_jump_log:
+                ev.append({"bin": b, "day": uniq[idx[i + 1]],
+                           "before": float(v[idx[i]]), "after": float(v[idx[i + 1]]),
+                           "jump_log": float(dv), "jump_x": float(np.exp(dv))})
+    return sorted(ev, key=lambda e: (e["day"], e["bin"]))
+
+
+def _read(path=None):
+    if path is None:
+        return _load()
+    d = np.load(path, allow_pickle=False)
+    return d["ts"], d["power"], d["mask"].astype(bool)
+
+
+def stats(hour=None, since_s=None, min_n=3, path=None):
+    """Per-bin robust baseline + dispersion over the USABLE (unmasked) samples (linear power).
+
+    Kept for ad-hoc slicing; the THRESHOLD should read hour_stats() instead -- see its docstring
+    for why across-day-at-fixed-hour in log space is the statistic that matters."""
+    T, P, M = _read(path)
     if len(T) == 0:
         return {}
     sel = np.ones(len(T), bool)
@@ -170,8 +287,7 @@ def stats(hour=None, since_s=None, min_n=3, path=None):
 
 def summary(path=None):
     """Compact health view: coverage + which bins are chronically unstable (sigma/med)."""
-    T, P, M = _load() if path is None else (lambda d: (d["ts"], d["power"], d["mask"].astype(bool)))(
-        np.load(path, allow_pickle=False))
+    T, P, M = _read(path)
     if len(T) == 0:
         return {"sweeps": 0}
     st = stats(path=path)

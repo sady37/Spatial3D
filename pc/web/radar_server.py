@@ -188,7 +188,11 @@ _empty_prof = [None]         # cached (bins, trace-power) of the fixed empty-roo
 #      for future room-drawing / training.
 # Budget: 2 shots x 20 frames = 40 cube-frames per sweep against cubeGuard's 300 per 3000 frames --
 # at a 2 h cadence that is negligible, and it NEVER runs while a fall episode is live.
-SWEEP_PERIOD_S = float(os.environ.get("SWEEP_PERIOD_S", "7200"))   # 2 h (user spec)
+SWEEP_PERIOD_S = float(os.environ.get("SWEEP_PERIOD_S", "3600"))   # 1 h (user spec 0723):
+                             # one sample per (bin, hour) per day -> the dispersion that matters is
+                             # ACROSS DAYS at a fixed hour (diurnal controlled). Within-hour spread is
+                             # NOT wanted: it measures 2 s measurement noise, not the drift a threshold
+                             # must survive. See baseline_store.hour_stats().
 SWEEP_SHOTS = ((20, 19), (48, 16))    # (center_bin, half_win) -> bins 1-39, 32-64 (overlap 32-39)
 SWEEP_FRAMES = 20                     # 2 s per shot: plenty for a trace-power/covariance estimate
 SWEEP_MASK_R_M = 1.0                  # mask +-1 m around any occupant (multipath contamination)
