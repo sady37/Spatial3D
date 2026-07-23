@@ -180,6 +180,20 @@ CUBE_HALF_WIN = int(os.environ.get("CUBE_HALF_WIN", "19"))   # A-stage query wid
 CUBE_VERDICT_HW = 3          # the verdict (RR / cube_ff / z40) still runs on a 7-bin sub-window --
                              # now CENTRED ON THE PROFILE PEAK instead of on the pre-data guess.
 _empty_prof = [None]         # cached (bins, trace-power) of the fixed empty-room install baseline
+# ⭐ PERIODIC WHOLE-ROOM SWEEP (user spec 2026-07-23). Two shots cover the room (cube_sweep's
+# geometry: bins 1-39 + 32-64), 2 s each, every SWEEP_PERIOD_S. Two jobs:
+#   1. mask out every bin within SWEEP_MASK_R_M of a track / below-floor cloud -- a body contaminates
+#      NEIGHBOURING bins through multipath, so masking only the occupied bin is not enough;
+#   2. feed baseline_store: rolling power/variance for the live threshold + a永久 covariance archive
+#      for future room-drawing / training.
+# Budget: 2 shots x 20 frames = 40 cube-frames per sweep against cubeGuard's 300 per 3000 frames --
+# at a 2 h cadence that is negligible, and it NEVER runs while a fall episode is live.
+SWEEP_PERIOD_S = float(os.environ.get("SWEEP_PERIOD_S", "7200"))   # 2 h (user spec)
+SWEEP_SHOTS = ((20, 19), (48, 16))    # (center_bin, half_win) -> bins 1-39, 32-64 (overlap 32-39)
+SWEEP_FRAMES = 20                     # 2 s per shot: plenty for a trace-power/covariance estimate
+SWEEP_MASK_R_M = 1.0                  # mask +-1 m around any occupant (multipath contamination)
+_sweep_last = [0.0]
+_sweep_busy = [False]
 Z40_LYING_THR = 0.4
 # ⭐ PROVENANCE/LOCATION gate: a cube result used in the fall decision MUST be THIS active query's OWN
 # answer AT THIS location, else it is a stale/foreign result reused as a false confirm (Q2 live 154000:
@@ -549,6 +563,58 @@ def _cube_presence_profile(entries):
         P = float(_np.real(_np.trace((s.conj().T @ s) / len(s))))
         out.append((b, (P - base[b]) / base[b], P))
     return out
+
+
+def _sweep_bg(occupied_r, tracks_xy):
+    """Background: the 2-shot whole-room sweep -> baseline_store. `occupied_r` = ground ranges (m)
+    of everything alive right now (tracks + below-floor cloud mass); every bin within
+    SWEEP_MASK_R_M of one is masked OUT of the baseline."""
+    import numpy as _np
+    from collections import defaultdict as _dd
+    try:
+        import web.baseline_store as _bs
+    except Exception:
+        try:
+            import baseline_store as _bs
+        except Exception:
+            _sweep_busy[0] = False
+            return
+    try:
+        byb = _dd(list)
+        for center, hw in SWEEP_SHOTS:
+            ents = _src.request_cube(center, n_frames=SWEEP_FRAMES, half_win=hw,
+                                     timeout=SWEEP_FRAMES / 10.0 + 3.0)
+            for e in (ents or []):
+                byb[int(e.range_bin)].append(_np.asarray(e.vec, complex))
+            time.sleep(0.5)                      # let the DATA UART drain between shots
+        if not byb:
+            return
+        cov_by_bin, pow_by_bin = {}, {}
+        for b, s in byb.items():
+            if len(s) < 4:
+                continue
+            S = _np.stack(s)
+            C = (S.conj().T @ S) / len(S)
+            cov_by_bin[b] = C
+            pow_by_bin[b] = float(_np.real(_np.trace(C)))
+        masked = {b for b in pow_by_bin
+                  if any(abs(b * RANGE_STEP - r) <= SWEEP_MASK_R_M for r in occupied_r)}
+        n = _bs.record_sweep(pow_by_bin, masked)
+        _bs.archive_sweep(cov_by_bin, masked, tracks_xy)
+        _line = (f"[fall] SWEEP bins={len(pow_by_bin)} masked={len(masked)} "
+                 f"occupied_r={[round(r, 2) for r in occupied_r]} rolling_n={n}")
+        print(_line, flush=True)
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "record",
+                                   "fall_debug.log"), "a") as _fh:
+                _fh.write(_line + "\n")
+        except Exception:
+            pass
+    except Exception as _e:
+        print(f"[fall] SWEEP failed: {type(_e).__name__}: {_e}", flush=True)
+    finally:
+        _sweep_busy[0] = False
+        _sweep_last[0] = time.time()
 
 
 def _fetch_cube_bg(range_bin, floor_frac, n_frames=60, epoch=None):
@@ -1538,6 +1604,25 @@ def _scene():
         _fall_persist_since[0] = 0.0; _arm_recover_since[0] = 0.0
         _recover_since[0] = 0.0
         _fall_onset_armed[0] = True                               # round over -> ready to count round 2
+
+    # ⭐ PERIODIC WHOLE-ROOM SWEEP trigger. INTERLOCKED: never while a cube query is in flight, never
+    # while ANY fall state is live (a confirm must never lose UART or guard budget to housekeeping),
+    # and never before the previous sweep finished. Runs on its own thread so /api/scene never waits.
+    if (SWEEP_PERIOD_S > 0 and not _sweep_busy[0] and not _cube_busy[0]
+            and not _cube_confirmed_episode[0] and now >= _fall_latch_until[0]
+            and not down and not _down_since[0]
+            and now - _sweep_last[0] >= SWEEP_PERIOD_S
+            and hasattr(_src, "request_cube")):
+        _occ_r = []                                   # ground range of every occupant right now
+        for _t in tg:
+            _occ_r.append(math.hypot(_t["x"], _t["y"]))
+        if cloud_wz_med is not None and _clusters_now[0]:
+            for _c in _clusters_now[0]:
+                if _c.get("wy_med") is not None:
+                    _occ_r.append(float(_c["wy_med"]))
+        _sweep_busy[0] = True
+        threading.Thread(target=_sweep_bg, daemon=True,
+                         args=(_occ_r, [(t["x"], t["y"]) for t in tg])).start()
 
     # ⭐ RED = the cube-verdict hold (升红 on Y, 撤红 on 2N) OR the short bridging latch. The hold clears on 2
     # consecutive cube N, on 中途-up RECOVERY (above), OR on `down` staying clear (episode reset below).

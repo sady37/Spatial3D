@@ -119,6 +119,10 @@ class FakeSource:
 
 def _reset_state():
     """Zero the module timers so a replay starts clean (not carrying a prior run)."""
+    srv.SWEEP_PERIOD_S = 0.0        # no housekeeping sweeps in replay: the recorded npz holds only
+                                    # the bursts the LIVE run fired, and a replay sweep would both
+                                    # pull phantom entries out of FakeSource and write to the real
+                                    # baseline store. Replay judges the fall verdict, nothing else.
     srv._real_since[0] = 0.0
     srv._last_query_t[0] = 0.0
     srv._cube_busy[0] = False
