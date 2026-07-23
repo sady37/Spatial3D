@@ -233,59 +233,14 @@ _cube_episode_t0 = [0.0]     # wall time the current cube episode's trigger fire
 _real_since = [0.0]          # last time the real-person gate was instantaneously true
 REAL_GRACE_S = 2.0           # hold real-person through brief point-count dips (see below)
 _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until this wall time
-_cube_confirmed_episode = [False]  # the cube CONFIRMED a fallen body this episode -> the red HOLDS
-                             # while the person stays DOWN, even after the confirming cube goes stale
-                             # (>12 s) and a refire is rate-limited. A person who stays down LONGER
-                             # is MORE of an emergency and must NOT downgrade fall->suspected just
-                             # because the cube aged out. Cleared when the episode resets.
-# ⭐ TODO#1 (user 2026-07-22, FROZEN): a flickering `down`/trigger CANNOT retract a cube-confirmed
-# fall (`down` is 胡猜 for an occluded/far body -- floor_fall ~60% occluded=0, w_down flickers). Only
-# a genuine RECOVERY (cloud_up) OR the CUBE itself going NEGATIVE 2x consecutively may cancel; the
-# trigger may not. _cube_neg_run counts consecutive cube-NEGATIVE fires (lying=N); 作废(None) does NOT
-# count (unmeasured != absent). _cube_eval_t = the cube-result timestamp last counted (count once/fire).
-_cube_neg_run = [0]          # consecutive cube fires that returned lying=N (2 -> cancel the hold)
-_cube_eval_t = [0.0]         # _cube_result["t"] of the last fire we counted (dedup per burst)
-CUBE_CANCEL_NEG = 2          # this many consecutive cube negatives cancels the confirmation hold
-FALL_HOLD_S = 30.0           # keep showing red Fall this long after the last confirmation
-                             # (a caregiver must SEE it; it must not clear when the person
-                             # stirs/gets up). Cleared by /api/fall/reset or a clear recovery.
-_recover_since = [0.0]       # wall time the person has been continuously upright & recovered
-RECOVER_S = 2.0              # a CLEAR recovery this long CLEARS the latch early: a tracked real
-                             # person whose WHOLE-cloud median height is up (RECOVER_ZMED). Uses
-                             # the robust cloud centroid, NOT the per-box pose/ffrac -- those
-                             # thrash as the walking-away body FRAGMENTS (000000: ffrac 0<->1,
-                             # pose SIT/STAND/LIE flicker, a stray fragment even re-latched the
-                             # red). The centroid stays ~+0.7 m once up. Only clears when up.
-RECOVER_ZMED = 0.4           # whole-cloud median world height above this = the mass is UP (a
-                             # lying body is -0.2..-0.5; standing/sitting is +0.5..+0.9).
-# ⭐ WALK-AWAY RECOVERY (user 2026-07-22f) — cloud_up (RECOVER_ZMED) works NEAR but FAILS FAR (>3 m: the
-# downtilt -py*sin(25 deg) ~= -1.7 m @4 m + elevation under-resolution collapse a STANDING person's
-# whole-cloud median into the lying band -> a far recovered fall never clears -> red STUCK). The rigorous
-# clear is a SIX-GATE AND chain that resists false-recovery from passers-by, caregivers, coasting ghosts,
-# teleport fragments, and crawling/dragging. Per-track state (`_recover_cand`) tracks each candidate:
-#   (1) ORIGIN  : the candidate track FIRST appeared within RECOVER_ORIGIN_M of the fall spot (a passer-by
-#                 originates elsewhere -> never a candidate).
-#   (2) DISPLACE: it has since moved >= RECOVER_DISP_M from that origin (a coasting drift can't march 1.5 m).
-#   (3) SPEED   : per-frame speed <= RECOVER_SPEED_MAX throughout -- a teleport fragment DISQUALIFIES the
-#                 candidate for good (sticky `disq`).
-#   (4) UPRIGHT : WORLD height (mount + z*cos - y*sin, NOT raw posZ) >= RECOVER_TRACK_Z -- a crawling or
-#                 dragged low mass, even if it travels 1.5 m, is not upright -> not recovery.
-#   (5) LEGS QUIET: Window-Z quiet (not w_down) AND MLP quiet (falling_p < 0.5, same thr as the cleaner;
-#                 an INVALID fw counts as QUIET -- no-alarm != alarm, safety is carried by the hard gates).
-#   (6) GROUND_CLEAR: the below-floor mass within +-10 bins of the fall bin is GONE -- the ONLY counter to a
-#                 CAREGIVER who satisfies gates 1-5 while the VICTIM is still on the floor.
-# ALL six -> walk-away recovery. (cloud_up still clears the NEAR stand-up, gated by ground_clear+legs so a
-# caregiver leaning over a down victim can't clear it either.)
-RECOVER_ORIGIN_M = 0.8       # (1) candidate track must first appear within this of the fall spot [80 cm]
-RECOVER_DISP_M = 1.5         # (2) displacement from its origin to count as walked-away [150 cm]
-RECOVER_SPEED_MAX = 1.2      # (3) per-frame track speed <= this; exceed once -> disqualified [120 cm/s]
-RECOVER_TRACK_Z = 0.4        # (4) track WORLD height (mount+z*cos-y*sin) >= this = upright [40 cm]
-RECOVER_GROUND_N = 3         # (6) <= this many below-floor points within +-10 bins of the fall bin = clear
-_recover_cand = {}           # per-episode candidate tracks: tid -> {ox, oy, disq} (walk-away gate 1-3 state)
-CANCEL_R = 0.5               # 30 s monitor: if a GTRACK track stands UP within this radius of
-                             # where the body fell (the person got up unaided at the fall spot),
-                             # DISCARD the fall -- a stumble that self-recovers is not an
-                             # emergency. Faster + more specific than the cloud-centroid clear.
+# ⭐ ROUND MODEL (user 2026-07-22g): red is NOT a persistent state needing "recovery" clearing -- a fall is
+# ONE ROUND, held by the FALL_HOLD_S latch, ended when `down` clears (person got up = the NEXT round). REMOVED
+# the confirmed-hold (`_cube_confirmed_episode`, TODO#1), the cube-negative cancel, and the cloud_up / 6-gate
+# walk-away recovery detection -- all were modelling red as a persistent state, which spawned the far-blind
+# cloud_up + stuck-red mess. A still-down body just re-detects as a new round (periodic re-alert = OK). See
+# the round-model block in _scene.
+FALL_HOLD_S = 30.0           # red Fall latch: keep it visible this long after the last confirmation
+                             # (dashboard visibility + bridges brief `down` flicker). Round ends on down-clear.
 _last_low_xy = [None]        # radar-frame (x, y) of the most recent below-floor cloud mass
 _down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
 _lying_since = [0.0]         # wall time the ExtraMLP lying_state has been continuously true
@@ -719,10 +674,8 @@ def _scene():
     # vitals/negative state.)
     if time.time() - _cube_last_active[0] > CUBE_RESET_S:
         _cube_episode[0] = 0
-        _cube_episode_t0[0] = 0.0     # episode ended -> restart the 18 s cube-delay clock next fall
-        _cube_confirmed_episode[0] = False   # episode ended -> the next fall must re-confirm via cube
-        _recover_cand.clear()                # episode ended -> forget walk-away candidate tracks
-        _cube_neg_run[0] = 0          # TODO#1: reset the consecutive-negative cancel counter
+        _cube_episode_t0[0] = 0.0     # episode ended (round over) -> restart the 6 s/18 s clocks next round
+        _last_low_xy[0] = None        # forget the fall spot
         _fall_had_rr[0] = False       # new physical fall -> re-assess vitals from scratch
         _fall_living[0] = False; _fall_measured[0] = False
         _collapse_since[0] = 0.0
@@ -1193,26 +1146,12 @@ def _scene():
         if cube_lying:
             _alive = (_cube_result["rr"] not in (None, 0)) or bool(_cube_result.get("micro"))
             cube_living_state = "Living" if _alive else "?"
-    # ⭐ TODO#1: count consecutive cube NEGATIVES, ONCE per burst (dedup on _cube_result["t"]). Only a
-    # cube-N (lying=False = a real "empty here" assessment) counts; 作废(None) does NOT (unmeasured !=
-    # absent). CUBE_CANCEL_NEG in a row is the ONLY signal (besides recovery) allowed to cancel a
-    # cube-confirmed fall -- a flickering `down`/trigger may not.
-    if _cube_result["t"] > 0.0 and _cube_result["t"] != _cube_eval_t[0]:
-        _cube_eval_t[0] = _cube_result["t"]
-        _v = _cube_lying_verdict(_cube_result)
-        if _v is True:
-            _cube_neg_run[0] = 0
-        elif _v is False:
-            _cube_neg_run[0] += 1
-    cube_cancelled = _cube_neg_run[0] >= CUBE_CANCEL_NEG
 
     # MLP leg from the firmware (Phase 2): falling motion + pose. None until its
     # 8-frame window fills. OR-fused with the window leg inside the cleaner.
     mlp_out = ({"pose": fw.label, "falling_p": fw.falling_prob}
                if (fw is not None and fw.valid) else None)
     dec = _cleaner.decide({"down": down, "h_s": w_hs}, mlp_out, cube=cube_ev, geom=None)
-    if dec["fall"]:
-        _cube_confirmed_episode[0] = True    # cube confirmed a fallen body -> latch holds red while down
     # ⭐ Suspected DECLARATION is TIGHTER than the cube gate: it needs an ACTUAL ExtraMLP lying
     # candidate (lying_state), NOT merely "not a STAND" (user 2026-07-20: web 频报 suspect). Without
     # this, empty-room floor_fall noise or a sitting/moving person that trips a TI trigger reads as
@@ -1257,78 +1196,17 @@ def _scene():
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
 
-    # LATCH a confirmed red Fall so it stays visible on the dashboard for FALL_HOLD_S even
-    # after the person stirs/gets up (a ~6 s red that clears the instant they move is easy
-    # to miss). Cleared by GET /api/fall/reset or a sustained clear recovery below.
-    # `cloud_up` = the WHOLE-cloud centroid is up (robust to the per-box fragmentation that
-    # thrashes pose/ffrac as a body walks away). Don't RE-LATCH on a stray low fragment while
-    # the mass is clearly up -- that was extending the red long after the person got up.
-    cloud_up = cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED
-    # ⭐ TODO#1 (FROZEN 0722): once the cube CONFIRMED a fallen body this episode, the red HOLDS on the
-    # confirmation ALONE -- a flickering `down`/trigger may NOT retract it. (Was `_cube_confirmed_episode
-    # AND down`: `down` is 胡猜 for an occluded/far body -- floor_fall ~60% occluded=0 + w_down flickers
-    # on the far track -- so requiring it re-veto'd a confirmed fall every other frame -> the 403 fall/
-    # 494 susp/584 none flicker on live 110000.) ONLY a genuine RECOVERY (cloud_up, below) OR the CUBE
-    # going NEGATIVE CUBE_CANCEL_NEG times (cube_cancelled = a real "body gone" assessment) may cancel.
-    if cube_cancelled:
-        _cube_confirmed_episode[0] = False       # cube says the body is GONE (2x N) -> release the hold
-    if (dec["fall"] or _cube_confirmed_episode[0]
-            or (_CUBEFREE_FALL and sustained_fall)) and not cloud_up:
-        _fall_latch_until[0] = now + FALL_HOLD_S
-    # RECOVERY clears the latch early: the person got up and moved on -- a stumble that self-recovers is
-    # not an emergency. NEAR = cloud_up (whole-cloud centroid risen). cloud_up FAILS far, so add the
-    # 6-gate WALK-AWAY chain (see the RECOVER_* block up top). Per-track candidate state in _recover_cand.
-    _legs_quiet = (not w_down) and not (fw is not None and fw.valid and fw.falling_prob >= 0.5)   # gate (5)
-    walkaway = False; ground_clear = True
-    _llxy = _last_low_xy[0]
-    if _llxy is not None:
-        _lx, _ly = _llxy
-        # gate (6) GROUND_CLEAR: below-floor mass within +-10 bins of the fall bin gone
-        if pcx is not None and len(pcx):
-            _fr = math.hypot(_lx, _ly)                                  # fall-spot radar range (m)
-            _gm = int(((wz < FLOOR_Z) & (_np.abs(_np.hypot(px, py) - _fr) <= 10 * RANGE_STEP)).sum())
-            ground_clear = _gm <= RECOVER_GROUND_N
-        _alive = set()
-        for t in tg:
-            _tid = t["tid"]; _alive.add(_tid)
-            _c = _recover_cand.get(_tid)
-            if _c is None:                                              # gate (1) ORIGIN near the fall spot
-                if (t["x"] - _lx) ** 2 + (t["y"] - _ly) ** 2 <= RECOVER_ORIGIN_M ** 2:
-                    _recover_cand[_tid] = {"ox": t["x"], "oy": t["y"], "disq": False}
-                continue
-            if t.get("speed", 0.0) > RECOVER_SPEED_MAX:                 # gate (3) teleport -> disqualify
-                _c["disq"] = True
-            if _c["disq"]:
-                continue
-            _disp = math.hypot(t["x"] - _c["ox"], t["y"] - _c["oy"])                       # gate (2)
-            _wh = mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)                  # gate (4)
-            if (_disp >= RECOVER_DISP_M and _wh >= RECOVER_TRACK_Z
-                    and _legs_quiet and ground_clear):                 # gates (2)&(4)&(5)&(6)
-                walkaway = True
-        for _d in [k for k in _recover_cand if k not in _alive]:       # forget dead candidate tracks
-            _recover_cand.pop(_d, None)
-    else:
-        _recover_cand.clear()
-    # cloud_up (NEAR stand-up) is also gated by ground_clear + legs_quiet so a caregiver leaning over a
-    # still-down victim can't clear it. walk-away carries the far case. Debounced RECOVER_S either way.
-    recovered = walkaway or (cloud_up and ground_clear and _legs_quiet)
-    if recovered:
-        if _recover_since[0] == 0.0:
-            _recover_since[0] = now
-        if now - _recover_since[0] >= RECOVER_S:
-            _fall_latch_until[0] = 0.0
-            _cube_confirmed_episode[0] = False     # got up -> episode over -> drop the confirmation hold
-            _last_low_xy[0] = None                 # episode discarded -> forget the fall spot
-            # ⭐ ALARM-DONE (user 0722e): recovery ENDS the episode -> reset the cube query budget NOW
-            # (don't wait for the 5 s-quiet CUBE_RESET_S) so a genuinely NEW fall re-arms its own 3
-            # queries. This is what makes the MAX_CUBE_BURSTS cap safe (the old cap starved fall2 because
-            # only 5 s-quiet reset it; recovery is the correct, immediate episode boundary).
-            _cube_episode[0] = 0
-            _cube_episode_t0[0] = 0.0
-            _cube_neg_run[0] = 0
-            _recover_cand.clear()                  # episode over -> forget candidate tracks
-    else:
-        _recover_since[0] = 0.0
+    # ⭐ ROUND MODEL (user 2026-07-22g): a fall is ONE ROUND. Red shows while THIS round is confirmed,
+    # plus a FALL_HOLD_S latch to bridge brief `down` flicker + keep it visible on the dashboard. The
+    # round ENDS when `down` stays clear (person got up) -> latch expires -> red off -> the episode resets
+    # on down-clear (below) and re-arms. Getting up is the START of the NEXT round, NOT "recovery of a held
+    # state" -- so there is NO confirmed-hold and NO cloud_up / walk-away recovery detection (those modelled
+    # red as a persistent state that then needed clearing, which spawned the far-blind cloud_up + stuck-red
+    # mess). A still-down (occluded) body keeps re-confirming within the 30 s latch so its red never
+    # flickers off; if its `down` drops and later re-asserts it simply re-detects as a NEW round (periodic
+    # re-alert of a person still on the floor = acceptable, throttled by the ~24 s round cadence).
+    if dec["fall"] or (_CUBEFREE_FALL and sustained_fall):
+        _fall_latch_until[0] = now + FALL_HOLD_S      # live confirmation -> (re)extend the red latch
     if now < _fall_latch_until[0]:
         fall_state = "fall"
     # fused fall probability P (dashboard '跌倒概率 P 融合'): TI MLP + the 5 scene features.
@@ -1398,11 +1276,11 @@ def _scene():
     _beep_last_state[0] = fall_state
     if down:
         _down_clear_since[0] = 0.0
-    elif cloud_up:                                # person genuinely upright (mass risen)
-        if _down_clear_since[0] == 0.0:
-            _down_clear_since[0] = now
-        elif now - _down_clear_since[0] >= FALL_EVENT_GAP_S:
-            _fall_onset_armed[0] = True           # recovered -> ready for the next DISTINCT fall
+    else:                                         # ⭐ ROUND MODEL: raw `down` clear -> round over grace ->
+        if _down_clear_since[0] == 0.0:           # re-arm for the NEXT round (was gated on cloud_up; the
+            _down_clear_since[0] = now             # round model ends a round on down-clear, not on a risen
+        elif now - _down_clear_since[0] >= FALL_EVENT_GAP_S:   # cloud -- a still-down body that re-asserts
+            _fall_onset_armed[0] = True           # `down` just re-detects as a new round, which is fine)
     # DIAG: whenever a fall trigger is active, log the full gate breakdown so a missed
     # red-Fall can be pinned to the exact failing gate. Goes to stdout AND
     # record/fall_debug.log (so it can be read back without copy-paste). Remove once tuned.
@@ -1421,9 +1299,10 @@ def _scene():
                 _fh.write(_line + "\n")
         except Exception:
             pass
-    # mark the cube episode active while a fall is in play, so the budget only resets after
-    # CUBE_RESET_S of genuine quiet (person up & gone) -- see the reset at the top of _scene.
-    if fall_state == "fall" or down or floor_fall:
+    # mark the cube episode active while RAW down/floor-fall is in play, so the episode resets (and the
+    # round re-arms) CUBE_RESET_S after `down` clears -- NOT gated on the FALL_HOLD_S red latch (the round
+    # ends on down-clear even while the red stays visible for its dashboard hold).
+    if down or floor_fall:
         _cube_last_active[0] = now
     return {"live": True, "points": pts, "targets": tg,
             "height_cm": None if z_cm is None else round(z_cm),
@@ -1498,8 +1377,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(_meta))
         if u.path == "/api/fall/reset":              # clear a latched red Fall
             _fall_latch_until[0] = 0.0
-            _cube_confirmed_episode[0] = False       # manual reset -> drop the confirmation hold too
-            _recover_cand.clear()
             return self._send(200, json.dumps({"fall_reset": True}))
         if u.path == "/api/scene":
             try:
