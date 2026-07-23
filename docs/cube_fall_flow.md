@@ -10,10 +10,11 @@ AWRL6844 fall pipeline。**cube 是唯一权威**;3001 只负责过滤与起 18s
 flowchart TD
     A["TI alarm — window-Z / MLP (TLV 321)<br/>—或— 3001 floor_fall(楼下云)"]:::src
     A --> B["down = (w_down AND real_person) OR floor_fall<br/>⚠ down 对遮挡/远身体是胡猜(可信度≈0)"]:::proc
-    B --> C{"down 首次 = 1 ?"}:::dec
-    C -->|"是"| D["起 18s 钟 · 3001-first"]:::done
+    B --> C{"① tier-1 免费 track_filter<br/>down 持续 ≥ 6s ?(许多 TI alarm 是瞬时误报)"}:::dec
+    C -->|"否 <6s"| XF["瞬时误报 · 零成本丢弃<br/>(不算 3001 · 不发 cube)"]:::discard
+    C -->|"是"| D["② 起 episode · 18s ExtraMLP 段(tier-2)<br/>3001 ExtraMLP 按需调用 · 平时不调用"]:::done
     D --> E["等 18s<br/>0–18s 只 3001 过滤 · 不发 cube · 不报红"]:::done
-    E --> F["cube query<br/>目标 = 楼下云 median bin<br/>门:fresh · 非busy · 速率 · 固件预算"]:::done
+    E --> F["③ cube query · tier-3(最贵,最后)<br/>目标 = 楼下云 median bin<br/>门:fresh · 非busy · 速率 · 固件预算"]:::done
     F --> G["cube 一发返回"]:::proc
 
     G --> AB{"cube 校验<br/>(A) 位置:查询bin 与 当前楼下云bin ≤ 10 且存在(8e0cfdd)<br/>(B) 归属:回包必须属于【本次主动查询】· query-epoch 相等(0722d)<br/>发新查询即作废旧结果 · bin 距离判不了返回时间"}:::done
@@ -53,7 +54,8 @@ flowchart TD
 
 ## 硬约束
 
-- **18s** 3001-first:前 18s 只过滤,无 cube、不报红。
+- **成本阶梯(便宜→贵,误报多故先滤):① tier-1 免费 track_filter**(window-Z/MLP `down` 持续 `FALL_PERSIST_S=6s`,<6s 瞬时误报零成本丢弃)**→ ② tier-2 ExtraMLP 按需**(3001 lie-vs-stand,仅 episode 开着时逐帧算,`平时不调用`,空闲走免费几何兜底)**→ ③ tier-3 cube**(最贵,18s 后)。
+- **18s** 3001-first:6s 之后再等 18s(tier-2 段),无 cube、不报红。
 - 固件 cubeGuard 硬窗口 `300s`(3000 帧 @10fps)。
 - 预算 `300` cube-帧/窗口(30s)= **10% 占空**;单发上限 `300` 帧(30s);server 用 60 帧/发。
 
