@@ -57,7 +57,6 @@ flowchart TD
     HOLD -.->|"或 down 持续清 CUBE_RESET_S(兜底)"| STB
     STB --> RB["再倒 → 第 2 轮(新 trigger · 新 18s · 新 ≤3 发)"]:::proc
     RB -.-> A
-    RT -.-> F
 
     classDef src fill:#0d9488,color:#fff,stroke:#0b7d72,stroke-width:1px;
     classDef proc fill:#475569,color:#fff,stroke:#334155,stroke-width:1px;
