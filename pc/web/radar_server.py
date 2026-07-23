@@ -239,13 +239,34 @@ _fall_latch_until = [0.0]    # a confirmed red Fall LATCHES the display until th
 #   作废 (None)  = counts as NEITHER (skipped -- does not raise, count, or reset).
 #   a Y RESETS the negative run (阴性清零); quota (3 queries) exhausted w/o 2 N -> red HOLDS.
 # `_cube_confirmed_episode` is the persistent RED hold (raised on Y, held across the 60 s query gaps and
-# through 作废/single-N, cleared ONLY by 2 consecutive N OR the round ending on down-clear). This REPLACES
-# the far-blind cloud_up / 6-gate walk-away recovery (all removed) -- the CUBE's own N verdict is the clear.
-_cube_confirmed_episode = [False]  # persistent RED hold (cube Y raised it; 2N / down-clear clears it)
+# through 作废/single-N, cleared by 2 consecutive N, by 中途-up RECOVERY (below), OR by the round ending on
+# down-clear). The cube's own N verdict AND the get-up recovery are both clears.
+_cube_confirmed_episode = [False]  # persistent RED hold (cube Y raised it; 2N / recovery / down-clear clears it)
 _cube_neg_run = [0]          # consecutive cube-N run; None(作废) neither counts nor resets; Y resets to 0
 _cube_eval_t = [0.0]         # _cube_result["t"] last counted (dedup: each query's verdict counts once)
 CUBE_CANCEL_NEG = 2          # 撤红: this many consecutive cube N clears the red hold
 FALL_HOLD_S = 30.0           # red latch: bridges brief `down`/dec flicker on top of the confirmed hold
+# ⭐ 中途-UP RECOVERY (user 2026-07-22h): the person got UP mid-round -> 撤警 + FULL CLEAR -> standby (round 2
+# re-triggers fresh). TWO legs, either fires:
+#  LEG 1 cloud_up (got up, walked or not): the WHOLE-CLOUD median world height (mount+z*cos-y*sin) > RECOVER_ZMED,
+#        sustained RECOVER_S, AND real_inst. NOT any box / track z -- the whole-cloud median sits in a wide gap
+#        (lying -0.2..-0.5 vs standing/sitting +0.5..+0.9), so 0.4 splits it cleanly; per-box metrics thrash as
+#        the body fragments but the median stays ~+0.7. 2 s guards single-frame spikes. Covers get-up-in-place /
+#        sit-on-bed / lean-on-table (mass rises but doesn't walk far).
+#  LEG 2 walk-away 6-gate (got up AND walked, before cloud_up's 2 s accumulates -- fast exit): per-track
+#        candidate AND-chain -- (1)(2)(3) HARD gates (positive physical displacement, can't fake), (4)(5)(6)
+#        VETO gates (block only, never grant). Fires as soon as all 6 hold (no extra sustain -- the walk IS
+#        the time). See the gate list at the recovery block.
+RECOVER_ZMED = 0.4           # LEG1: whole-cloud median world height above this = mass is UP
+RECOVER_S = 2.0              # LEG1: sustain the cloud_up recovery this long (single-frame spike guard)
+RECOVER_ORIGIN_M = 0.8       # LEG2 (1): candidate track must first appear within this of the fall spot
+RECOVER_DISP_M = 1.5         # LEG2 (2): straight-line displacement from origin to count as walked-away
+RECOVER_SPEED_MAX = 1.2      # LEG2 (3): per-step speed cap (m/s); a faster step = teleport
+RECOVER_STEP_NOISE = 0.3     # LEG2 (3): only flag a teleport when the step also exceeds this (position noise)
+RECOVER_TRACK_Z = 0.4        # LEG2 (4): track WORLD height (mount+z*cos-y*sin) >= this = upright (not crawl)
+RECOVER_GROUND_N = 3         # LEG2 (6): <= this many below-floor points within +-10 bins of the fall bin = clear
+_recover_since = [0.0]       # LEG1: wall time cloud_up has been continuously true
+_recover_cand = {}           # LEG2: tid -> {ox, oy, lx, ly, lt} candidate origin + last pos/time
 _last_low_xy = [None]        # radar-frame (x, y) of the most recent below-floor cloud mass
 _down_since = [0.0]          # wall time the current sustained-down episode started (0 = none)
 _lying_since = [0.0]         # wall time the ExtraMLP lying_state has been continuously true
@@ -1216,11 +1237,53 @@ def _scene():
         fall_state = "fall"
         dec["reason"] = list(dec.get("reason") or []) + [f"sustained{int(down_dur)}s"]
 
-    # ⭐ RED = the cube-verdict hold (升红 on Y, 撤红 on 2N; see the state machine above) OR the short latch
-    # that bridges a live confirmation's flicker. The round ENDS -- and the hold clears -- on 2 consecutive
-    # cube N (cube says the body is gone) OR on `down` staying clear (person got up -> episode reset below).
-    # Getting up is the START of the NEXT round, NOT "recovery of a held state" -> NO cloud_up / walk-away
-    # recovery detection (removed); the CUBE's own N verdict + down-clear are the only clears.
+    # ⭐ 中途-UP RECOVERY (user 2026-07-22h): got up mid-round -> 撤警 + FULL CLEAR -> standby. LEG 1 cloud_up
+    # (mass risen, sustained RECOVER_S) OR LEG 2 walk-away 6-gate (got up AND walked). See the RECOVER_* block.
+    cloud_up = bool(cloud_wz_med is not None and cloud_wz_med > RECOVER_ZMED and real_inst)   # LEG 1 (instant)
+    if cloud_up:
+        if _recover_since[0] == 0.0:
+            _recover_since[0] = now
+    else:
+        _recover_since[0] = 0.0
+    leg1 = cloud_up and (now - _recover_since[0] >= RECOVER_S)      # LEG 1: sustained RECOVER_S
+    leg2 = False                                                    # LEG 2: walk-away 6-gate (per-track)
+    _llxy = _last_low_xy[0]
+    if _llxy is not None:
+        _lx, _ly = _llxy
+        _gclear = True                                             # gate (6) ground_clear
+        if pcx is not None and len(pcx):
+            _fr = math.hypot(_lx, _ly)
+            _gm = int(((wz < FLOOR_Z) & (_np.abs(_np.hypot(px, py) - _fr) <= 10 * RANGE_STEP)).sum())
+            _gclear = _gm <= RECOVER_GROUND_N
+        _veto = (not w_down) and not (fw is not None and fw.valid and fw.falling_prob >= 0.5)  # gate (5) TI silent
+        _alive_ids = set()
+        for t in tg:
+            _tid = t["tid"]; _alive_ids.add(_tid)
+            _c = _recover_cand.get(_tid)
+            if _c is None:                                         # gate (1) ORIGIN within 0.8 m of fall spot
+                if (t["x"] - _lx) ** 2 + (t["y"] - _ly) ** 2 <= RECOVER_ORIGIN_M ** 2:
+                    _recover_cand[_tid] = {"ox": t["x"], "oy": t["y"], "lx": t["x"], "ly": t["y"], "lt": now}
+                continue
+            _step = math.hypot(t["x"] - _c["lx"], t["y"] - _c["ly"]); _dt = max(now - _c["lt"], 0.05)
+            if _step > RECOVER_STEP_NOISE and _step / _dt > RECOVER_SPEED_MAX:   # gate (3) teleport -> re-queue
+                _recover_cand.pop(_tid, None); continue           # cancel qualification, may re-register via (1)
+            _c["lx"], _c["ly"], _c["lt"] = t["x"], t["y"], now
+            _disp = math.hypot(t["x"] - _c["ox"], t["y"] - _c["oy"])                 # gate (2) displacement
+            _wh = mount_m + t["z"] * math.cos(th) - t["y"] * math.sin(th)            # gate (4) upright
+            if _disp >= RECOVER_DISP_M and _wh >= RECOVER_TRACK_Z and _veto and _gclear:
+                leg2 = True                                       # (1)(2)(3) pass + (4)(5)(6) don't veto
+        for _d in [k for k in _recover_cand if k not in _alive_ids]:
+            _recover_cand.pop(_d, None)
+    else:
+        _recover_cand.clear()
+    if leg1 or leg2:                                              # 撤警 + 全清 -> 待机 (round 2 re-triggers)
+        _cube_confirmed_episode[0] = False; _fall_latch_until[0] = 0.0
+        _cube_episode[0] = 0; _cube_episode_t0[0] = 0.0; _cube_neg_run[0] = 0
+        _last_low_xy[0] = None; _recover_cand.clear(); _recover_since[0] = 0.0
+        _fall_onset_armed[0] = True                               # round over -> ready to count round 2
+
+    # ⭐ RED = the cube-verdict hold (升红 on Y, 撤红 on 2N) OR the short bridging latch. The hold clears on 2
+    # consecutive cube N, on 中途-up RECOVERY (above), OR on `down` staying clear (episode reset below).
     if dec["fall"] or (_CUBEFREE_FALL and sustained_fall):
         _fall_latch_until[0] = now + FALL_HOLD_S      # live confirmation -> (re)extend the bridging latch
     if _cube_confirmed_episode[0] or now < _fall_latch_until[0]:
